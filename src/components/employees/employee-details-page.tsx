@@ -52,7 +52,7 @@ const todayYMD = (): string => {
   const t = new Date();
   return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
 };
-const isFriday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 5;
+const isSunday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 0;
 const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
 
 interface MonthPoint { y: number; m: number }
@@ -220,8 +220,8 @@ function MonthGrid({ year, month, records, print = false }: {
           className={cn(
             'pb-1 text-center text-[11px] font-semibold uppercase tracking-wide',
             print
-              ? (w === 'Fri' ? 'text-rose-600' : 'text-zinc-500')
-              : (w === 'Fri' ? 'text-rose-500' : 'text-muted-foreground'),
+              ? (w === 'Sun' ? 'text-rose-600' : 'text-zinc-500')
+              : (w === 'Sun' ? 'text-rose-500' : 'text-muted-foreground'),
           )}
         >
           {w}
@@ -233,18 +233,18 @@ function MonthGrid({ year, month, records, print = false }: {
         const date = ymd(year, month, d);
         const rec = byDate.get(date);
         const future = date > today;
-        const fri = isFriday(date);
+        const sun = isSunday(date);
         const absent = rec?.status === 'absent';
         const hasHours = rec?.status === 'present' && rec.hours != null;
         return (
           <div
             key={d}
             role="img"
-            aria-label={`${date}${fri ? ', Friday' : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : ', not marked'}`}
+            aria-label={`${date}${sun ? ', Sunday' : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : ', not marked'}`}
             className={cn(
               'relative flex min-h-16 flex-col items-center justify-center rounded-lg border text-sm',
               print ? 'border-zinc-300 bg-white text-zinc-900' : 'border-border/60 bg-background/60',
-              fri && (print ? 'border-rose-200 bg-rose-50' : 'border-rose-500/20 bg-rose-500/[0.04]'),
+              sun && (print ? 'border-rose-200 bg-rose-50' : 'border-rose-500/20 bg-rose-500/[0.04]'),
               future && 'opacity-40',
               date === today && (print ? 'ring-2 ring-zinc-500' : 'ring-2 ring-brand/50'),
             )}
@@ -661,7 +661,7 @@ export function EmployeeDetailsPage() {
   const realtimeVersion = useRealtimeVersion(['employee', 'attendance', 'site', 'camp']);
   const selectedEmployeeId = useAppStore((s) => s.selectedEmployeeId);
   const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
-  const navigateToEmployeesWithEdit = useAppStore((s) => s.navigateToEmployeesWithEdit);
+  const navigateToEmployeeForm = useAppStore((s) => s.navigateToEmployeeForm);
 
   const [emp, setEmp] = useState<EmployeeVM | null>(null);
   const [loading, setLoading] = useState(true);
@@ -812,7 +812,7 @@ export function EmployeeDetailsPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => navigateToEmployeesWithEdit(emp.id)}
+              onClick={() => navigateToEmployeeForm('edit', emp.id, 'employee_details')}
               aria-label={`Edit ${emp.full_name}`}
             >
               <Pencil size={14} /> Edit

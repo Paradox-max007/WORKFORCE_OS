@@ -228,6 +228,8 @@ export interface MenuPermissionMap {
 
 export interface EmployeeInput {
   full_name: string;
+  /** Manual employee ID — when blank the system auto-generates one (PUL-YYYY-NNN) */
+  employee_code?: string | null;
   nationality: string | null;
   date_of_birth: string | null;
   phone: string | null;

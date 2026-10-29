@@ -106,8 +106,8 @@ function SidebarContent({
   const allowed = (id: AppView): boolean => {
     if (user.role === 'super_admin') return true;
     if (id === 'dashboard' || id === 'uniform_registry') return true;
-    // the dedicated employee details page belongs to the Employees module
-    if (id === 'employee_details') return perms ? perms.employees : false;
+    // the dedicated employee details / form pages belong to the Employees module
+    if (id === 'employee_details' || id === 'employee_form') return perms ? perms.employees : false;
     return perms ? perms[id as keyof typeof perms] ?? false : false;
   };
 

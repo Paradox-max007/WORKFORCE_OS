@@ -20,10 +20,10 @@ animated product identity.
 | Module | Capabilities |
 |---|---|
 | **Dashboard** | Live KPI cards, 6-month attendance analytics, site-wise breakdown, idle-employee radar — all animated & realtime, with **readable chart tooltips** (light text on themed cards in both themes) |
-| **Employees** | Full profiles (passport/ID, emergency contact, rating), photo, site + camp assignment (with **block & room no.**), team-leader flag, soft-delete with cascade hide, **nationality filter** (region → country: Africans → Burundi/Kenya, Asians → India/…), **home-country address** per passport, **CV PDF export**, **dedicated details page** (not a modal) showing camp · block · room, with **Track Record viewer** & **WhatsApp share with lifetime / specific-month timesheets** |
+| **Employees** | Full profiles (passport/ID, emergency contact, rating), photo, site + camp assignment (with **block & room no.**), team-leader flag, soft-delete with cascade hide, **nationality column + region → country filter** (Africans → Burundi/Kenya, Asians → India/…), **home-country address** per passport, **dedicated Add/Edit page** (no modal) with **manual or auto Employee ID**, **camp filter + filtered Excel (.xlsx) export** whose filename mirrors the active filters, **CV PDF export**, **dedicated details page** showing camp · block · room, with **Track Record viewer** & **WhatsApp share with lifetime / specific-month timesheets** |
 | **Sites** | Client/project tracking, activate/deactivate with crew impact warning, per-site crew view, add/remove crew, printable **A4 attendance sheet** (PDF / print, alphabetical, with hand-fill TOTAL PRESENT / ABSENT lines) |
 | **Camps** | **Accommodation management** — create/edit/deactivate/delete camps (location, capacity, notes), **one employee ↔ exactly one camp**, **block & room numbers** per resident (required on add/move, editable inline), instant transfers between camps, bulk move/remove, capacity usage bars |
-| **Attendance** | **Excel-style marking sheet grouped SITEWISE** (one alphabetical section per work site — attendance is marked site-by-site), every cell is an always-editable input (custom hours e.g. `8`, `10.5` or `A` for absent), each row shows the employee's **trade**, **TOTAL HOURS column** (row sum) + **ABSENT count** beside it, site filter narrows the crew, per-employee calendar view, rating engine (±0.2 / OT hour above 8h/day), **auto-warning after 3 consecutive absences**, **admin gating: normal admins only see & mark their assigned sites** |
+| **Attendance** | **Excel-style marking sheet grouped SITEWISE** (one alphabetical section per work site — attendance is marked site-by-site), every past cell is an always-editable input (custom hours e.g. `8`, `10.5` or `A` for absent; **un-entered days stay blank — no auto-filled defaults**), the **full month is always shown up to its last day with future dates locked**, each row shows the employee's **trade in its own column** and the **name / employee ID / camp stacked** in the employee cell, **Sundays marked red**, **clear grid lines for large data**, **TOTAL HOURS column** (row sum) + **ABSENT count** beside it, site filter narrows the crew, per-employee calendar view, rating engine (±0.2 / OT hour above 8h/day), **auto-warning after 3 consecutive absences**, **admin gating: normal admins only see & mark their assigned sites** |
 | **Leave Requests** | 6 leave types, day math, approve/reject workflow, reviewer audit trail |
 | **Cancellation Requests** | Attendance cancellation approvals with reviewer audit trail |
 | **Warnings & Fines** | Manual + auto-generated warnings, fines with amounts, full history |
@@ -164,7 +164,10 @@ path per feature — no feature drift between demo and production.
 - `admin_site` — sites assigned to normal admins (super admin assigns; attendance RPC only
   accepts marks for assigned sites)
 - `attendance(employee_id, date)` unique constraint + rating/warning engine inside
-  `mark_attendance()`
+  `mark_attendance()`; `get_month_attendance` returns **only real records** — un-entered
+  days stay blank in the sheet, future days are locked client-side
+- `create_employee` accepts an **optional manual employee ID** (validated unique) and
+  falls back to `next_employee_code()` when blank
 - `uniform_registry` token sequencing + encrypted document numbers + renewal chain
 - RLS: staff read-all, writes **only** through super-admin-gated RPC functions
 - All 13 tables in the `supabase_realtime` publication

@@ -15,6 +15,7 @@ import { CampsPage } from '@/components/camps/camps-page';
 import { CancellationRequestPage } from '@/components/cancellation-requests/cancellation-request-page';
 import { DashboardPage } from '@/components/dashboard/dashboard-page';
 import { EmployeeDetailsPage } from '@/components/employees/employee-details-page';
+import { EmployeeFormPage } from '@/components/employees/employee-form-page';
 import { EmployeePage } from '@/components/employees/employee-page';
 import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
@@ -63,6 +64,7 @@ function MainLayout() {
     dashboard: <DashboardPage />,
     employees: <EmployeePage />,
     employee_details: <EmployeeDetailsPage />,
+    employee_form: <EmployeeFormPage />,
     sites: <SitesPage />,
     camps: <CampsPage />,
     attendance: <AttendancePage />,

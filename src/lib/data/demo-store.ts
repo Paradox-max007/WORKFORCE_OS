@@ -88,7 +88,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 5,
+    version: 6,
     profiles: [],
     sites: [],
     camps: [],
@@ -382,7 +382,7 @@ function seedDB(): DemoDB {
 // Persistence + cross-tab realtime sync
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'pulse_demo_db_v5';
+const STORAGE_KEY = 'pulse_demo_db_v6';
 const SESSION_KEY = 'pulse_demo_session';
 const CHANNEL = 'pulse-demo-realtime';
 
@@ -410,7 +410,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 5) return parsed;
+      if (parsed.version === 6) return parsed;
     }
   } catch {
     // corrupted → reseed

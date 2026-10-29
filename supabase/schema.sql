@@ -671,9 +671,20 @@ declare v_block text := nullif(btrim(coalesce(p_employee->>'camp_block','')), ''
 declare v_room  text := nullif(btrim(coalesce(p_employee->>'camp_room','')), '');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
+-- manual employee ID: use it as-is; blank → auto-generate (PUL-YYYY-NNN)
+declare v_code text := nullif(btrim(coalesce(p_employee->>'employee_code','')), '');
 declare conflicting public.employee;
 begin
   if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+
+  -- manual IDs must be unique (case-insensitive)
+  if v_code is not null then
+    select * into conflicting from public.employee
+      where lower(employee_code) = lower(v_code) limit 1;
+    if conflicting.id is not null then
+      raise exception 'Employee ID "%" is already taken by % — use another ID or leave it blank to auto-generate', v_code, conflicting.full_name;
+    end if;
+  end if;
 
   -- site must exist and be active
   if v_site is not null and not exists (select 1 from public.site where id = v_site and is_active) then
@@ -704,7 +715,7 @@ begin
     id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id,
     camp_id, camp_block, camp_room
   ) values (
-    p_employee->>'full_name', public.next_employee_code(),
+    p_employee->>'full_name', coalesce(v_code, public.next_employee_code()),
     nullif(p_employee->>'nationality',''), (p_employee->>'date_of_birth')::date,
     nullif(p_employee->>'phone',''), nullif(p_employee->>'email',''), nullif(p_employee->>'address',''),
     nullif(p_employee->>'emergency_contact',''), nullif(p_employee->>'position',''),
@@ -878,43 +889,20 @@ end; $$;
 -- 9. ATTENDANCE RPCs
 -- ============================================================================
 
--- Fetch a month (lazily auto-creating missing records, never for future days).
--- Normal admins only receive rows for employees working at THEIR assigned sites.
+-- Fetch one month's REAL attendance records (un-entered days stay blank in the
+-- marking sheet). Normal admins only receive rows for employees working at THEIR assigned sites.
 create or replace function public.get_month_attendance(p_month text)
 returns setof public.attendance language plpgsql
 security definer set search_path = public
 as $$
-declare
-  m_start date := to_date(p_month || '-01', 'YYYY-MM-DD');
-  m_end   date := (m_start + interval '1 month - 1 day')::date;
-  today   date := current_date;
-  last_day date;
 begin
   if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
     raise exception 'Access denied';
   end if;
 
-  if today < m_start then
-    last_day := m_start - 1;  -- future month: create nothing
-  elsif today < m_end then
-    last_day := today;
-  else
-    last_day := m_end;
-  end if;
-
-  -- auto-create missing records: 8h present for site employees, unmarked for idle
-  insert into public.attendance (employee_id, date, status, hours)
-  select e.id, d::date,
-         case when e.current_site_id is null then 'not_marked' else 'present' end,
-         case when e.current_site_id is null then null else 8 end
-  from public.employee e
-  cross join generate_series(m_start, last_day, interval '1 day') d
-  where e.status <> 'deleted'
-    and not exists (
-      select 1 from public.attendance a
-      where a.employee_id = e.id and a.date = d::date
-    );
-
+  -- Only REAL records are returned: days with no record simply stay blank in
+  -- the marking sheet (no auto-created 8h defaults). Future days render blank
+  -- and are locked client-side.
   return query
     select a.* from public.attendance a
     join public.employee e on e.id = a.employee_id

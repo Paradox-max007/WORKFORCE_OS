@@ -27,7 +27,6 @@ import {
 import {
   addDaysStr,
   db,
-  fromYMD,
   getDemoSessionId,
   isFridayStr,
   nowISO,
@@ -418,10 +417,16 @@ export const demoApi = {
       );
       if (conflict) throw new Error(`Another employee (${conflict.full_name}) is already the team leader of this site`);
     }
+    // manual employee ID: use it as-is; blank → auto-generate. IDs are unique.
+    const manualCode = (input.employee_code ?? '').trim();
+    if (manualCode) {
+      const dup = db.employees.find((e) => e.employee_code.toLowerCase() === manualCode.toLowerCase());
+      if (dup) throw new Error(`Employee ID "${manualCode}" is already taken by ${dup.full_name} — use another ID or leave it blank to auto-generate.`);
+    }
     const e: Employee = {
       id: uid(),
       full_name: input.full_name,
-      employee_code: nextEmployeeCode(),
+      employee_code: manualCode || nextEmployeeCode(),
       nationality: input.nationality || null,
       date_of_birth: input.date_of_birth || null,
       phone: input.phone || null,
@@ -545,31 +550,8 @@ export const demoApi = {
 
   // ---- attendance --------------------------------------------------------------
   async getMonthAttendance(month: string): Promise<Attendance[]> {
-    const today = toYMD(new Date());
-    const [y, m] = month.split('-').map(Number);
-    const first = `${month}-01`;
-    const monthEnd = toYMD(new Date(y, m, 0));
-    const lastDay = today < first ? null : today < monthEnd ? today : monthEnd;
-
-    // auto-create missing records for non-deleted employees
-    if (lastDay) {
-      for (const e of db.employees) {
-        if (e.status === 'deleted') continue;
-        for (let d = fromYMD(first); toYMD(d) <= lastDay; d.setDate(d.getDate() + 1)) {
-          const dateStr = toYMD(d);
-          const exists = db.attendance.some((a) => a.employee_id === e.id && a.date === dateStr);
-          if (!exists) {
-            db.attendance.push({
-              id: uid(), employee_id: e.id, date: dateStr,
-              status: e.current_site_id ? 'present' : 'not_marked',
-              hours: e.current_site_id ? 8 : null,
-              is_hidden: false, created_at: nowISO(),
-            });
-          }
-        }
-      }
-      saveAndEmit(['attendance']);
-    }
+    // Only REAL records are returned — days with no record simply stay blank
+    // in the marking sheet (no more auto-created 8h defaults).
 
     // normal admins only see rows for employees at their assigned sites
     const allowedSites = mySiteAllowance();

@@ -48,7 +48,7 @@ const todayYMD = (): string => {
   const t = new Date();
   return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
 };
-const isFriday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 5;
+const isSunday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 0;
 const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
 
 /** Parse a cell value → { kind, hours }. kind: 'absent' | 'hours' | 'clear' | 'invalid' */
@@ -108,8 +108,6 @@ export function AttendancePage() {
 
   const today = todayYMD();
   const days = daysInMonth(year, month);
-  const isCurrentMonth = monthKey === `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
-  const isFutureMonth = monthKey > `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
 
   // ---- data loading ----------------------------------------------------------
   useEffect(() => {
@@ -301,50 +299,62 @@ export function AttendancePage() {
   const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
 
   const dayColumns = useMemo(() => {
+    // always show the FULL month (1 … last day): un-entered days stay blank,
+    // future days are rendered but locked against editing.
     const cols: number[] = [];
-    const last = isCurrentMonth ? now.getDate() : isFutureMonth ? 0 : days;
-    for (let d = 1; d <= last; d++) cols.push(d);
+    for (let d = 1; d <= days; d++) cols.push(d);
     return cols;
-  }, [days, isCurrentMonth, isFutureMonth, now]);
+  }, [days]);
 
-  // ---- one editable day cell (plain render fn — keeps input focus stable) ----
+  // ---- one day cell (plain render fn — keeps input focus stable) ------------
   const renderDayCell = (emp: EmployeeVM, date: string) => {
     const key = `${emp.id}|${date}`;
     const value = cellText(emp.id, date);
     const busy = savingKeys.has(key);
-    const fri = isFriday(date);
+    const sun = isSunday(date);
+    const future = date > today;
     const isA = value.trim().toLowerCase() === 'a';
     return (
       <td
         key={key}
         className={cn(
-          'p-0 text-center',
-          fri && 'bg-rose-500/[0.04]',
-          !fri && date > new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10) && 'bg-emerald-500/[0.04]',
+          'border-x border-b border-foreground/15 p-0 text-center',
+          sun && 'bg-rose-500/[0.05]',
+          !sun && !future && date > new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10) && 'bg-emerald-500/[0.04]',
+          future && 'bg-muted/40',
         )}
       >
-        <div className="relative">
-          <input
-            value={value}
-            disabled={busy}
-            onChange={(e) => setCell(emp.id, date, e.target.value)}
-            onBlur={() => commitCell(emp.id, date)}
-            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-            aria-label={`${emp.full_name} — ${date}`}
-            className={cn(
-              'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
-              'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
-              isA && 'bg-rose-500/10 font-bold text-rose-500',
-              value !== '' && !isA && 'text-foreground',
-              busy && 'opacity-50',
-            )}
+        {future ? (
+          // future dates are visible but locked — nothing to mark yet
+          <div
+            className="flex h-9 w-10 cursor-not-allowed items-center justify-center"
+            title={`${date} — future date, not editable yet`}
+            aria-label={`${emp.full_name} — ${date} — future date, locked`}
           />
-          {busy && (
-            <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <Loader2 size={10} className="animate-spin text-brand" />
-            </span>
-          )}
-        </div>
+        ) : (
+          <div className="relative">
+            <input
+              value={value}
+              disabled={busy}
+              onChange={(e) => setCell(emp.id, date, e.target.value)}
+              onBlur={() => commitCell(emp.id, date)}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              aria-label={`${emp.full_name} — ${date}`}
+              className={cn(
+                'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
+                'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
+                isA && 'bg-rose-500/10 font-bold text-rose-500',
+                value !== '' && !isA && 'text-foreground',
+                busy && 'opacity-50',
+              )}
+            />
+            {busy && (
+              <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <Loader2 size={10} className="animate-spin text-brand" />
+              </span>
+            )}
+          </div>
+        )}
       </td>
     );
   };
@@ -400,28 +410,31 @@ export function AttendancePage() {
             <table className="w-full min-w-max border-collapse text-sm">
               <thead>
                 <tr className="border-b bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <th className="sticky left-0 z-20 min-w-[240px] bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
+                  <th className="sticky left-0 z-20 w-[240px] min-w-[240px] border-x border-foreground/15 bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
+                  <th className="sticky left-[240px] z-20 w-[120px] min-w-[120px] border-x border-b border-foreground/15 bg-muted/60 px-3 py-2.5 font-medium">Trade</th>
                   {dayColumns.map((d) => {
                     const date = ymd(year, month, d);
-                    const fri = isFriday(date);
+                    const sun = isSunday(date);
+                    const future = date > today;
                     return (
                       <th
                         key={d}
                         className={cn(
-                          'w-10 min-w-10 px-1 py-2.5 text-center font-medium',
-                          fri && 'bg-rose-500/[0.07] text-rose-500',
+                          'w-10 min-w-10 border-x border-b border-foreground/15 px-1 py-2.5 text-center font-medium',
+                          sun && 'bg-rose-500/[0.07] text-rose-500',
+                          future && 'text-muted-foreground/50',
                         )}
-                        title={`${MONTH_NAMES[month - 1]} ${d}${fri ? ' (Friday)' : ''}`}
+                        title={`${MONTH_NAMES[month - 1]} ${d}${sun ? ' (Sunday)' : ''}${future ? ' — future (locked)' : ''}`}
                       >
                         <div>{d}</div>
-                        <div className="text-[9px] font-normal normal-case opacity-70">
+                        <div className={cn('text-[9px] font-normal normal-case opacity-70', sun && 'text-rose-500')}>
                           {WEEKDAYS[new Date(`${date}T00:00:00`).getDay()]}
                         </div>
                       </th>
                     );
                   })}
-                  <th className="sticky right-[92px] z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
-                  <th className="sticky right-0 z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
+                  <th className="sticky right-[92px] z-20 w-[92px] border-x border-b border-foreground/15 bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
+                  <th className="sticky right-0 z-20 w-[92px] border-l border-b border-foreground/15 bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
                 </tr>
               </thead>
               <tbody>
@@ -433,41 +446,46 @@ export function AttendancePage() {
                       initial={{ opacity: 0, y: 6 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: Math.min(i * 0.02, 0.25), ease: EASE }}
-                      className="border-b border-border/40 transition-colors last:border-0 hover:bg-brand/[0.02]"
+                      className="transition-colors"
                     >
-                      <td className="sticky left-0 z-10 bg-card px-4 py-2">
+                      {/* employee — stacked: name / employee ID / camp */}
+                      <td className="sticky left-0 z-10 border-x border-b border-foreground/15 bg-card px-4 py-2">
                         <div className="flex items-center gap-2.5">
                           <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
                             {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
                           </span>
                           <div className="min-w-0">
-                            <p className="truncate text-[13px] font-medium">{emp.full_name}</p>
-                            <p className="flex items-center gap-1.5 truncate text-[10px] text-muted-foreground">
-                              <span className="font-mono">{emp.employee_code}</span>
-                              {emp.position && (
-                                <span className="truncate rounded-full border border-border bg-muted/60 px-1.5 py-px font-medium text-foreground/70">{emp.position}</span>
-                              )}
-                              {emp.camp_name && (
-                                <span className="inline-flex shrink-0 items-center gap-0.5 text-amber-600 dark:text-amber-400" title={`Camp: ${emp.camp_name}${emp.camp_block ? ' · Block ' + emp.camp_block : ''}${emp.camp_room ? ' · Room ' + emp.camp_room : ''}`}>
-                                  <Tent size={9} className="inline" />
-                                  {emp.camp_name}
-                                </span>
-                              )}
-                            </p>
+                            <p className="truncate text-[13px] font-medium leading-tight">{emp.full_name}</p>
+                            <p className="truncate font-mono text-[10px] leading-tight text-muted-foreground">{emp.employee_code}</p>
+                            {emp.camp_name ? (
+                              <p
+                                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] leading-tight text-amber-600 dark:text-amber-400"
+                                title={`Camp: ${emp.camp_name}${emp.camp_block ? ' · Block ' + emp.camp_block : ''}${emp.camp_room ? ' · Room ' + emp.camp_room : ''}`}
+                              >
+                                <Tent size={9} className="inline" />
+                                {emp.camp_name}
+                              </p>
+                            ) : (
+                              <p className="text-[10px] leading-tight text-muted-foreground/60">No camp</p>
+                            )}
                           </div>
                         </div>
+                      </td>
+                      {/* trade — its own dedicated column */}
+                      <td className="sticky left-[240px] z-10 border-x border-b border-foreground/15 bg-card px-3 py-2">
+                        <span className="truncate text-xs font-medium text-foreground/80">{emp.position ?? '—'}</span>
                       </td>
                       {dayColumns.map((d) => (
                         renderDayCell(emp, ymd(year, month, d))
                       ))}
                       {/* Total hours */}
-                      <td className="sticky right-[92px] z-10 bg-card px-2 text-center">
+                      <td className="sticky right-[92px] z-10 border-x border-b border-foreground/15 bg-card px-2 text-center">
                         <span className="inline-flex min-w-12 rounded-lg bg-emerald-500/10 px-1.5 py-1 text-[12px] font-bold tabular-nums text-emerald-500">
                           {totals.hours}
                         </span>
                       </td>
                       {/* Absences */}
-                      <td className="sticky right-0 z-10 bg-card px-2 text-center">
+                      <td className="sticky right-0 z-10 border-l border-b border-foreground/15 bg-card px-2 text-center">
                         <span
                           className={cn(
                             'inline-flex min-w-8 rounded-lg px-1.5 py-1 text-[12px] font-bold tabular-nums',
@@ -484,7 +502,7 @@ export function AttendancePage() {
             </table>
           </div>
           <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
-            {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every cell is editable: click a cell and type hours (e.g. 8, 10.5) or A, then press Enter or click away
+            {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every past cell is editable (hours e.g. 8, 10.5 or <span className="font-semibold text-rose-500">A</span>); future dates stay blank & locked
           </p>
         </div>
       </motion.section>
@@ -592,7 +610,8 @@ export function AttendancePage() {
         <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/20 ring-1 ring-rose-500/40" />A = Absent</span>
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-emerald-500/20 ring-1 ring-emerald-500/40" />Hours</span>
-          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/[0.06] ring-1 ring-border" />Friday</span>
+          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/[0.06] ring-1 ring-border" />Sunday</span>
+          <span className="hidden items-center gap-1.5 lg:flex"><span className="size-2.5 rounded-sm bg-muted/60 ring-1 ring-border/70" />Future (locked)</span>
         </div>
       </div>
 
@@ -651,7 +670,7 @@ export function AttendancePage() {
             />
             <div className="mt-4 grid grid-cols-7 gap-1.5">
               {WEEKDAYS.map((w) => (
-                <div key={w} className={cn('pb-1 text-center text-[11px] font-medium uppercase tracking-wide', w === 'Fri' ? 'text-rose-500' : 'text-muted-foreground')}>
+                <div key={w} className={cn('pb-1 text-center text-[11px] font-medium uppercase tracking-wide', w === 'Sun' ? 'text-rose-500' : 'text-muted-foreground')}>
                   {w}
                 </div>
               ))}
@@ -660,7 +679,7 @@ export function AttendancePage() {
                 const d = idx + 1;
                 const date = ymd(year, month, d);
                 const future = date > today;
-                const fri = isFriday(date);
+                const sun = isSunday(date);
                 const value = cellText(calendarEmployee.id, date);
                 const parsed = parseCell(value);
                 return (
@@ -673,8 +692,8 @@ export function AttendancePage() {
                           future
                             ? 'cursor-not-allowed border-dashed opacity-40'
                             : 'hover:border-brand/50 hover:shadow-[0_4px_16px_-6px_var(--glow)]',
-                          fri && 'border-rose-500/20 bg-rose-500/[0.04]',
-                          !future && !fri && 'bg-card',
+                          sun && 'border-rose-500/20 bg-rose-500/[0.05]',
+                          !future && !sun && 'bg-card',
                           date === today && 'ring-2 ring-brand/50',
                         )}
                       >
@@ -690,7 +709,7 @@ export function AttendancePage() {
                     </PopoverTrigger>
                     <PopoverContent className="w-56 p-3" align="center">
                       <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        {calendarEmployee.full_name} · {date}{fri ? ' (Friday)' : ''}
+                        {calendarEmployee.full_name} · {date}{sun ? ' (Sunday)' : ''}
                       </p>
                       <Input
                         autoFocus

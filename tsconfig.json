@@ -39,6 +39,10 @@
   "exclude": [
     "node_modules",
     "repo-original",
-    "supabase"
+    "supabase",
+    "examples",
+    "skills",
+    "tool-results",
+    "mini-services"
   ]
 }

@@ -1,0 +1,1086 @@
+     1→-- ============================================================================
+     2→-- PULSE Workforce OS — Complete Supabase Database Schema
+     3→-- ============================================================================
+     4→-- Run this file in the Supabase SQL Editor (Dashboard → SQL → New query).
+     5→-- It creates everything from scratch:
+     6→--   • Tables with proper FK relationships + indexes
+     7→--   • Row Level Security policies
+     8→--   • All business logic as Postgres functions (RPC)
+     9→--   • Triggers (new-user profile, updated_at, attendance engine)
+    10→--   • Realtime publication for live updates
+    11→-- ============================================================================
+    12→
+    13→create extension if not exists pgcrypto;
+    14→
+    15→-- ============================================================================
+    16→-- 1. TABLES
+    17→-- ============================================================================
+    18→
+    19→-- App users (mirrors auth.users — first ever user becomes super_admin)
+    20→create table if not exists public.profiles (
+    21→  id          uuid primary key references auth.users(id) on delete cascade,
+    22→  email       text not null unique,
+    23→  name        text not null default 'User',
+    24→  role        text not null default 'pending' check (role in ('super_admin','admin','pending')),
+    25→  theme       text not null default 'dark'    check (theme in ('dark','light')),
+    26→  accent      text not null default 'violet'  check (accent in ('violet','emerald','amber','rose')),
+    27→  created_at  timestamptz not null default now(),
+    28→  updated_at  timestamptz not null default now()
+    29→);
+    30→
+    31→-- Per-admin menu access toggles (UI-level gating for admins)
+    32→create table if not exists public.menu_permission (
+    33→  id          uuid primary key default gen_random_uuid(),
+    34→  profile_id  uuid not null references public.profiles(id) on delete cascade,
+    35→  menu_key    text not null check (menu_key in ('employees','sites','attendance','leave_requests','cancellation_requests','notifications')),
+    36→  allowed     boolean not null default false,
+    37→  unique (profile_id, menu_key)
+    38→);
+    39→
+    40→-- Work sites
+    41→create table if not exists public.site (
+    42→  id           uuid primary key default gen_random_uuid(),
+    43→  name         text not null unique,
+    44→  client_name  text,
+    45→  project_name text,
+    46→  is_active    boolean not null default true,
+    47→  created_at   timestamptz not null default now()
+    48→);
+    49→
+    50→-- Employees
+    51→create table if not exists public.employee (
+    52→  id                  uuid primary key default gen_random_uuid(),
+    53→  full_name           text not null,
+    54→  employee_code       text not null unique,            -- ASM-YYYY-NNN
+    55→  nationality         text,
+    56→  date_of_birth       date,
+    57→  phone               text,
+    58→  email               text,
+    59→  address             text,
+    60→  emergency_contact   text,
+    61→  position            text,
+    62→  join_date           date,
+    63→  company_name        text,
+    64→  passport_number     text,
+    65→  passport_status     text check (passport_status in ('Valid','Expired','N/A')),
+    66→  id_number           text,
+    67→  id_status           text check (id_status in ('Valid','Expired','N/A')),
+    68→  current_site_id     uuid references public.site(id) on delete set null,
+    69→  rating              numeric(2,1) not null default 5.0 check (rating >= 0 and rating <= 5),
+    70→  status              text not null default 'active' check (status in ('active','pending_deletion','deleted')),
+    71→  photo               text,                            -- base64 data-url
+    72→  is_team_leader      boolean not null default false,
+    73→  team_leader_site_id uuid references public.site(id) on delete set null,
+    74→  created_at          timestamptz not null default now(),
+    75→  updated_at          timestamptz not null default now()
+    76→);
+    77→
+    78→-- Daily attendance
+    79→create table if not exists public.attendance (
+    80→  id             uuid primary key default gen_random_uuid(),
+    81→  employee_id    uuid not null references public.employee(id) on delete cascade,
+    82→  date           date not null,
+    83→  status         text not null default 'present' check (status in ('present','absent','no_site','overtime','not_marked')),
+    84→  overtime_hours numeric(4,1) check (overtime_hours >= 0 and overtime_hours <= 24),
+    85→  is_hidden      boolean not null default false,
+    86→  created_at     timestamptz not null default now(),
+    87→  unique (employee_id, date)
+    88→);
+    89→
+    90→-- In-app notifications for admin profiles
+    91→create table if not exists public.notification (
+    92→  id          uuid primary key default gen_random_uuid(),
+    93→  profile_id  uuid not null references public.profiles(id) on delete cascade,
+    94→  title       text not null,
+    95→  message     text not null,
+    96→  type        text not null check (type in ('request','warning','fine')),
+    97→  read        boolean not null default false,
+    98→  is_hidden   boolean not null default false,
+    99→  created_at  timestamptz not null default now()
+   100→);
+   101→
+   102→-- Disciplinary warnings
+   103→create table if not exists public.warning (
+   104→  id               uuid primary key default gen_random_uuid(),
+   105→  employee_id      uuid not null references public.employee(id) on delete cascade,
+   106→  reason           text not null,
+   107→  is_auto_generated boolean not null default false,
+   108→  absent_dates     jsonb,          -- array of "YYYY-MM-DD" for auto warnings
+   109→  created_by       uuid references public.profiles(id) on delete set null,
+   110→  is_hidden        boolean not null default false,
+   111→  created_at       timestamptz not null default now()
+   112→);
+   113→
+   114→-- Fines
+   115→create table if not exists public.fine (
+   116→  id          uuid primary key default gen_random_uuid(),
+   117→  employee_id uuid not null references public.employee(id) on delete cascade,
+   118→  reason      text not null,
+   119→  amount      numeric(10,2) not null default 0 check (amount >= 0),
+   120→  created_by  uuid references public.profiles(id) on delete set null,
+   121→  is_hidden   boolean not null default false,
+   122→  created_at  timestamptz not null default now()
+   123→);
+   124→
+   125→-- Leave requests
+   126→create table if not exists public.leave_request (
+   127→  id              uuid primary key default gen_random_uuid(),
+   128→  employee_id     uuid not null references public.employee(id) on delete cascade,
+   129→  leave_type      text not null check (leave_type in ('casual','sick','annual','emergency','marriage','other')),
+   130→  other_type_text text,
+   131→  start_date      date not null,
+   132→  end_date        date not null,
+   133→  total_days      int not null default 1 check (total_days >= 1),
+   134→  reason          text not null,
+   135→  status          text not null default 'pending' check (status in ('pending','approved','rejected')),
+   136→  created_by      uuid references public.profiles(id) on delete set null,
+   137→  reviewed_by     uuid references public.profiles(id) on delete set null,
+   138→  reviewed_at     timestamptz,
+   139→  is_hidden       boolean not null default false,
+   140→  created_at      timestamptz not null default now()
+   141→);
+   142→
+   143→-- Cancellation requests (employee removal workflow)
+   144→create table if not exists public.cancellation_request (
+   145→  id           uuid primary key default gen_random_uuid(),
+   146→  employee_id  uuid not null references public.employee(id) on delete cascade,
+   147→  reason       text,
+   148→  status       text not null default 'pending' check (status in ('pending','approved','rejected')),
+   149→  requested_by uuid references public.profiles(id) on delete set null,
+   150→  reviewed_by  uuid references public.profiles(id) on delete set null,
+   151→  reviewed_at  timestamptz,
+   152→  is_hidden    boolean not null default false,
+   153→  created_at   timestamptz not null default now()
+   154→);
+   155→
+   156→-- Uniform registry (6-month renewal cycle)
+   157→create table if not exists public.uniform_registry (
+   158→  id                uuid primary key default gen_random_uuid(),
+   159→  uniform_id        int not null unique,
+   160→  token_number      int not null,
+   161→  employee_id       uuid not null references public.employee(id) on delete cascade,
+   162→  employee_name     text not null,
+   163→  document_type     text not null check (document_type in ('id','passport')),
+   164→  document_number   text not null,
+   165→  items             jsonb not null default '{}',
+   166→  site_name         text,
+   167→  team_leader_name  text,
+   168→  is_renewal        boolean not null default false,
+   169→  previous_token_id int,
+   170→  is_deleted        boolean not null default false,
+   171→  is_hidden         boolean not null default false,
+   172→  created_at        timestamptz not null default now(),
+   173→  renewal_date      timestamptz not null default (now() + interval '6 months')
+   174→);
+   175→
+   176→-- ============================================================================
+   177→-- 2. INDEXES
+   178→-- ============================================================================
+   179→create index if not exists idx_employee_site        on public.employee(current_site_id);
+   180→create index if not exists idx_employee_status      on public.employee(status);
+   181→create index if not exists idx_employee_code        on public.employee(employee_code);
+   182→create index if not exists idx_attendance_emp       on public.attendance(employee_id);
+   183→create index if not exists idx_attendance_date      on public.attendance(date);
+   184→create index if not exists idx_attendance_hidden    on public.attendance(is_hidden);
+   185→create index if not exists idx_notification_profile on public.notification(profile_id);
+   186→create index if not exists idx_notification_hidden  on public.notification(is_hidden);
+   187→create index if not exists idx_warning_emp          on public.warning(employee_id);
+   188→create index if not exists idx_warning_hidden       on public.warning(is_hidden);
+   189→create index if not exists idx_fine_emp             on public.fine(employee_id);
+   190→create index if not exists idx_fine_hidden          on public.fine(is_hidden);
+   191→create index if not exists idx_leave_emp            on public.leave_request(employee_id);
+   192→create index if not exists idx_leave_status         on public.leave_request(status);
+   193→create index if not exists idx_leave_created        on public.leave_request(created_at);
+   194→create index if not exists idx_cancellation_emp     on public.cancellation_request(employee_id);
+   195→create index if not exists idx_cancellation_status  on public.cancellation_request(status);
+   196→create index if not exists idx_uniform_emp          on public.uniform_registry(employee_id);
+   197→create index if not exists idx_uniform_token        on public.uniform_registry(token_number);
+   198→create index if not exists idx_uniform_created      on public.uniform_registry(created_at);
+   199→create index if not exists idx_menu_perm_profile    on public.menu_permission(profile_id);
+   200→
+   201→-- ============================================================================
+   202→-- 3. HELPER + SECURITY FUNCTIONS
+   203→-- ============================================================================
+   204→
+   205→-- Am I a super admin?
+   206→create or replace function public.is_super_admin()
+   207→returns boolean language sql stable
+   208→security definer set search_path = public
+   209→as $$ select exists(select 1 from public.profiles where id = auth.uid() and role = 'super_admin'); $$;
+   210→
+   211→-- Am I staff (admin or super_admin)?
+   212→create or replace function public.is_staff()
+   213→returns boolean language sql stable
+   214→security definer set search_path = public
+   215→as $$ select exists(select 1 from public.profiles where id = auth.uid() and role in ('super_admin','admin')); $$;
+   216→
+   217→-- Does the current admin hold a given menu permission (super admins always true)?
+   218→create or replace function public.has_menu_permission(p_menu_key text)
+   219→returns boolean language sql stable
+   220→security definer set search_path = public
+   221→as $$
+   222→  select
+   223→    exists(select 1 from public.profiles where id = auth.uid() and role = 'super_admin')
+   224→    or exists(
+   225→      select 1 from public.menu_permission mp
+   226→      join public.profiles p on p.id = mp.profile_id
+   227→      where mp.profile_id = auth.uid() and mp.menu_key = p_menu_key and mp.allowed and p.role = 'admin'
+   228→    );
+   229→$$;
+   230→
+   231→-- Fan-out a notification to every super admin
+   232→create or replace function public.notify_super_admins(p_title text, p_message text, p_type text)
+   233→returns void language plpgsql
+   234→security definer set search_path = public
+   235→as $$
+   236→begin
+   237→  if not public.is_staff() then raise exception 'Access denied'; end if;
+   238→  insert into public.notification (profile_id, title, message, type)
+   239→  select id, p_title, p_message, p_type from public.profiles where role = 'super_admin';
+   240→end; $$;
+   241→
+   242→-- Clamp helper for rating adjustments
+   243→create or replace function public.clamp_rating(v numeric)
+   244→returns numeric language sql immutable as $$ select greatest(0, least(5, round(v, 1))); $$;
+   245→
+   246→-- Anon-accessible check: does the system have a super admin yet?
+   247→-- (used by the login page to show "Initialize System" instead of "Sign In")
+   248→create or replace function public.has_any_profiles()
+   249→returns boolean language sql stable
+   250→security definer set search_path = public
+   251→as $$ select exists(select 1 from public.profiles where role = 'super_admin'); $$;
+   252→
+   253→-- Function execution grants:
+   254→--   • authenticated users may call every business function (guards inside)
+   255→--   • anonymous users may ONLY check whether initial setup is needed
+   256→revoke execute on all functions in schema public from anon;
+   257→grant execute on all functions in schema public to authenticated;
+   258→grant execute on function public.has_any_profiles() to anon;
+   259→
+   260→-- ============================================================================
+   261→-- 4. TRIGGERS
+   262→-- ============================================================================
+   263→
+   264→-- New auth user → profile row (first user becomes super_admin, others 'pending'
+   265→-- until a super admin promotes them from Admin Management)
+   266→create or replace function public.handle_new_user()
+   267→returns trigger language plpgsql
+   268→security definer set search_path = public
+   269→as $$
+   270→begin
+   271→  insert into public.profiles (id, email, name, role)
+   272→  values (
+   273→    new.id,
+   274→    lower(new.email),
+   275→    coalesce(new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)),
+   276→    case when (select count(*) from public.profiles) = 0 then 'super_admin' else 'pending' end
+   277→  )
+   278→  on conflict (id) do nothing;
+   279→  return new;
+   280→end; $$;
+   281→
+   282→drop trigger if exists on_auth_user_created on auth.users;
+   283→create trigger on_auth_user_created
+   284→  after insert on auth.users
+   285→  for each row execute function public.handle_new_user();
+   286→
+   287→-- updated_at touch for employee + profiles
+   288→create or replace function public.touch_updated_at()
+   289→returns trigger language plpgsql as $$
+   290→begin
+   291→  new.updated_at = now();
+   292→  return new;
+   293→end; $$;
+   294→
+   295→drop trigger if exists trg_employee_touch on public.employee;
+   296→create trigger trg_employee_touch before update on public.employee
+   297→  for each row execute function public.touch_updated_at();
+   298→
+   299→drop trigger if exists trg_profiles_touch on public.profiles;
+   300→create trigger trg_profiles_touch before update on public.profiles
+   301→  for each row execute function public.touch_updated_at();
+   302→
+   303→-- ============================================================================
+   304→-- 5. ROW LEVEL SECURITY
+   305→-- ============================================================================
+   306→
+   307→alter table public.profiles            enable row level security;
+   308→alter table public.menu_permission     enable row level security;
+   309→alter table public.site                enable row level security;
+   310→alter table public.employee            enable row level security;
+   311→alter table public.attendance          enable row level security;
+   312→alter table public.notification        enable row level security;
+   313→alter table public.warning             enable row level security;
+   314→alter table public.fine                enable row level security;
+   315→alter table public.leave_request       enable row level security;
+   316→alter table public.cancellation_request enable row level security;
+   317→alter table public.uniform_registry    enable row level security;
+   318→
+   319→-- profiles: read self, super admins read all
+   320→drop policy if exists profiles_select on public.profiles;
+   321→create policy profiles_select on public.profiles
+   322→  for select using (id = auth.uid() or public.is_super_admin());
+   323→
+   324→-- menu permissions: read self, super admins read all
+   325→drop policy if exists menu_perm_select on public.menu_permission;
+   326→create policy menu_perm_select on public.menu_permission
+   327→  for select using (profile_id = auth.uid() or public.is_super_admin());
+   328→
+   329→-- notifications: read + update (mark read) own rows
+   330→drop policy if exists notification_select on public.notification;
+   331→create policy notification_select on public.notification
+   332→  for select using (profile_id = auth.uid() or public.is_super_admin());
+   333→drop policy if exists notification_update on public.notification;
+   334→create policy notification_update on public.notification
+   335→  for update using (profile_id = auth.uid()) with check (profile_id = auth.uid());
+   336→
+   337→-- operational data: every signed-in staff member can READ (menu-level
+   338→-- restrictions are enforced in the UI + RPC write guards below)
+   339→drop policy if exists site_select on public.site;
+   340→create policy site_select on public.site for select using (public.is_staff());
+   341→drop policy if exists employee_select on public.employee;
+   342→create policy employee_select on public.employee for select using (public.is_staff());
+   343→drop policy if exists attendance_select on public.attendance;
+   344→create policy attendance_select on public.attendance for select using (public.is_staff());
+   345→drop policy if exists warning_select on public.warning;
+   346→create policy warning_select on public.warning for select using (public.is_staff());
+   347→drop policy if exists fine_select on public.fine;
+   348→create policy fine_select on public.fine for select using (public.is_staff());
+   349→drop policy if exists leave_select on public.leave_request;
+   350→create policy leave_select on public.leave_request for select using (public.is_staff());
+   351→drop policy if exists cancellation_select on public.cancellation_request;
+   352→create policy cancellation_select on public.cancellation_request for select using (public.is_staff());
+   353→drop policy if exists uniform_select on public.uniform_registry;
+   354→create policy uniform_select on public.uniform_registry for select using (public.is_staff());
+   355→
+   356→-- All WRITES go through the RPC functions below (security definer with their
+   357→-- own role/permission guards) or the service-role API route for user admin.
+   358→
+   359→-- ============================================================================
+   360→-- 6. SELF-SERVICE / ADMIN PROFILE RPCs
+   361→-- ============================================================================
+   362→
+   363→-- Update own display name + theme + accent
+   364→create or replace function public.set_preferences(p_name text default null, p_theme text default null, p_accent text default null)
+   365→returns public.profiles language plpgsql
+   366→security definer set search_path = public
+   367→as $$
+   368→declare result public.profiles;
+   369→begin
+   370→  update public.profiles set
+   371→    name   = coalesce(p_name, name),
+   372→    theme  = coalesce(nullif(p_theme, ''), theme),
+   373→    accent = coalesce(nullif(p_accent, ''), accent)
+   374→  where id = auth.uid()
+   375→  returning * into result;
+   376→  return result;
+   377→end; $$;
+   378→
+   379→-- Super admin edits another profile's name / role (email + password go via the
+   380→-- service-role API route). Last-super-admin protection included.
+   381→create or replace function public.update_profile_admin(p_id uuid, p_name text, p_role text)
+   382→returns public.profiles language plpgsql
+   383→security definer set search_path = public
+   384→as $$
+   385→declare result public.profiles;
+   386→declare target_count int;
+   387→begin
+   388→  if not public.is_super_admin() then raise exception 'Only super admins can manage profiles'; end if;
+   389→  if p_role not in ('admin','super_admin') then raise exception 'Invalid role'; end if;
+   390→
+   391→  -- last super admin protection
+   392→  if (select role from public.profiles where id = p_id) = 'super_admin' and p_role <> 'super_admin' then
+   393→    select count(*) into target_count from public.profiles where role = 'super_admin';
+   394→    if target_count <= 1 then raise exception 'Cannot demote the last super admin'; end if;
+   395→  end if;
+   396→
+   397→  update public.profiles set name = p_name, role = p_role, updated_at = now()
+   398→  where id = p_id returning * into result;
+   399→  return result;
+   400→end; $$;
+   401→
+   402→-- Super admin deletes a profile (last-super-admin protected). The auth.users
+   403→-- row is removed separately by the service-role API route.
+   404→create or replace function public.delete_profile_admin(p_id uuid)
+   405→returns void language plpgsql
+   406→security definer set search_path = public
+   407→as $$
+   408→declare target_count int;
+   409→begin
+   410→  if not public.is_super_admin() then raise exception 'Only super admins can delete profiles'; end if;
+   411→  if (select role from public.profiles where id = p_id) = 'super_admin' then
+   412→    select count(*) into target_count from public.profiles where role = 'super_admin';
+   413→    if target_count <= 1 then raise exception 'Cannot delete the last super admin'; end if;
+   414→  end if;
+   415→  delete from public.profiles where id = p_id;
+   416→end; $$;
+   417→
+   418→-- Grant / revoke a menu permission for an admin
+   419→create or replace function public.set_menu_permission(p_profile_id uuid, p_menu_key text, p_allowed boolean)
+   420→returns void language plpgsql
+   421→security definer set search_path = public
+   422→as $$
+   423→begin
+   424→  if not public.is_super_admin() then raise exception 'Only super admins can manage permissions'; end if;
+   425→  if (select role from public.profiles where id = p_profile_id) = 'super_admin' then
+   426→    raise exception 'Super admins always have full access';
+   427→  end if;
+   428→  insert into public.menu_permission (profile_id, menu_key, allowed)
+   429→  values (p_profile_id, p_menu_key, p_allowed)
+   430→  on conflict (profile_id, menu_key) do update set allowed = p_allowed;
+   431→end; $$;
+   432→
+   433→-- ============================================================================
+   434→-- 7. SITE RPCs
+   435→-- ============================================================================
+   436→
+   437→create or replace function public.create_site(p_name text, p_client_name text default null, p_project_name text default null)
+   438→returns public.site language plpgsql
+   439→security definer set search_path = public
+   440→as $$
+   441→declare result public.site;
+   442→begin
+   443→  if not public.has_menu_permission('sites') then raise exception 'Access denied'; end if;
+   444→  if exists (select 1 from public.site where lower(name) = lower(p_name)) then
+   445→    raise exception 'A site with this name already exists';
+   446→  end if;
+   447→  insert into public.site (name, client_name, project_name) values (p_name, p_client_name, p_project_name)
+   448→  returning * into result;
+   449→  return result;
+   450→end; $$;
+   451→
+   452→-- Returns the site + how many employees got unassigned when deactivating.
+   453→create or replace function public.update_site(
+   454→  p_id uuid, p_name text, p_client_name text, p_project_name text, p_is_active boolean
+   455→)
+   456→returns jsonb language plpgsql
+   457→security definer set search_path = public
+   458→as $$
+   459→declare result public.site;
+   460→declare unassigned_count int := 0;
+   461→declare was_active boolean;
+   462→begin
+   463→  if not public.has_menu_permission('sites') then raise exception 'Access denied'; end if;
+   464→  if exists (select 1 from public.site where lower(name) = lower(p_name) and id <> p_id) then
+   465→    raise exception 'A site with this name already exists';
+   466→  end if;
+   467→
+   468→  select is_active into was_active from public.site where id = p_id;
+   469→  update public.site set name = p_name, client_name = p_client_name, project_name = p_project_name, is_active = p_is_active
+   470→  where id = p_id returning * into result;
+   471→
+   472→  if was_active = true and p_is_active = false then
+   473→    select count(*) into unassigned_count from public.employee where current_site_id = p_id and status <> 'deleted';
+   474→    update public.employee set current_site_id = null where current_site_id = p_id;
+   475→    update public.employee set is_team_leader = false, team_leader_site_id = null
+   476→      where team_leader_site_id = p_id or (current_site_id = p_id and is_team_leader);
+   477→  end if;
+   478→
+   479→  return jsonb_build_object('site', to_jsonb(result), 'unassignedCount', unassigned_count);
+   480→end; $$;
+   481→
+   482→create or replace function public.delete_site(p_id uuid)
+   483→returns void language plpgsql
+   484→security definer set search_path = public
+   485→as $$
+   486→begin
+   487→  if not public.has_menu_permission('sites') then raise exception 'Access denied'; end if;
+   488→  update public.employee set current_site_id = null where current_site_id = p_id;
+   489→  update public.employee set is_team_leader = false, team_leader_site_id = null where team_leader_site_id = p_id;
+   490→  delete from public.site where id = p_id;
+   491→end; $$;
+   492→
+   493→-- ============================================================================
+   494→-- 8. EMPLOYEE RPCs
+   495→-- ============================================================================
+   496→
+   497→-- Next employee code in the ASM-YYYY-NNN sequence (max NNN for the year + 1)
+   498→create or replace function public.next_employee_code()
+   499→returns text language sql stable
+   500→security definer set search_path = public
+   501→as $$
+   502→  select 'ASM-' || to_char(now(), 'YYYY') || '-' ||
+   503→         lpad((coalesce(max(substring(employee_code from '[0-9]+$')::int), 0) + 1)::text, 3, '0')
+   504→  from public.employee
+   505→  where employee_code like 'ASM-' || to_char(now(), 'YYYY') || '-%';
+   506→$$;
+   507→
+   508→create or replace function public.create_employee(p_employee jsonb)
+   509→returns public.employee language plpgsql
+   510→security definer set search_path = public
+   511→as $$
+   512→declare result public.employee;
+   513→declare v_site uuid := nullif(p_employee->>'current_site_id','');
+   514→declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
+   515→declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
+   516→declare conflicting public.employee;
+   517→begin
+   518→  if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+   519→
+   520→  -- site must exist and be active
+   521→  if v_site is not null and not exists (select 1 from public.site where id = v_site and is_active) then
+   522→    raise exception 'The selected site does not exist or is inactive';
+   523→  end if;
+   524→
+   525→  -- one team leader per site
+   526→  if v_is_leader and v_leader_site is not null then
+   527→    select * into conflicting from public.employee
+   528→      where is_team_leader and team_leader_site_id = v_leader_site and status <> 'deleted' limit 1;
+   529→    if conflicting.id is not null then
+   530→      raise exception 'Another employee (%) is already the team leader of this site', conflicting.full_name;
+   531→    end if;
+   532→  end if;
+   533→
+   534→  insert into public.employee (
+   535→    full_name, employee_code, nationality, date_of_birth, phone, email, address,
+   536→    emergency_contact, position, join_date, company_name, passport_number, passport_status,
+   537→    id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id
+   538→  ) values (
+   539→    p_employee->>'full_name', public.next_employee_code(),
+   540→    nullif(p_employee->>'nationality',''), (p_employee->>'date_of_birth')::date,
+   541→    nullif(p_employee->>'phone',''), nullif(p_employee->>'email',''), nullif(p_employee->>'address',''),
+   542→    nullif(p_employee->>'emergency_contact',''), nullif(p_employee->>'position',''),
+   543→    (p_employee->>'join_date')::date, nullif(p_employee->>'company_name',''),
+   544→    nullif(p_employee->>'passport_number',''), nullif(p_employee->>'passport_status',''),
+   545→    nullif(p_employee->>'id_number',''), nullif(p_employee->>'id_status',''),
+   546→    v_site, 5.0, 'active', nullif(p_employee->>'photo',''), v_is_leader, v_leader_site
+   547→  ) returning * into result;
+   548→  return result;
+   549→end; $$;
+   550→
+   551→create or replace function public.update_employee(p_id uuid, p_employee jsonb)
+   552→returns public.employee language plpgsql
+   553→security definer set search_path = public
+   554→as $$
+   555→declare result public.employee;
+   556→declare v_site uuid := nullif(p_employee->>'current_site_id','');
+   557→declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
+   558→declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
+   559→declare conflicting public.employee;
+   560→begin
+   561→  if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+   562→
+   563→  if v_site is not null and not exists (select 1 from public.site where id = v_site and is_active) then
+   564→    raise exception 'The selected site does not exist or is inactive';
+   565→  end if;
+   566→
+   567→  if v_is_leader and v_leader_site is not null then
+   568→    select * into conflicting from public.employee
+   569→      where is_team_leader and team_leader_site_id = v_leader_site
+   570→        and status <> 'deleted' and id <> p_id limit 1;
+   571→    if conflicting.id is not null then
+   572→      raise exception 'Another employee (%) is already the team leader of this site', conflicting.full_name;
+   573→    end if;
+   574→  end if;
+   575→
+   576→  update public.employee set
+   577→    full_name         = p_employee->>'full_name',
+   578→    nationality       = nullif(p_employee->>'nationality',''),
+   579→    date_of_birth     = (p_employee->>'date_of_birth')::date,
+   580→    phone             = nullif(p_employee->>'phone',''),
+   581→    email             = nullif(p_employee->>'email',''),
+   582→    address           = nullif(p_employee->>'address',''),
+   583→    emergency_contact = nullif(p_employee->>'emergency_contact',''),
+   584→    position          = nullif(p_employee->>'position',''),
+   585→    join_date         = (p_employee->>'join_date')::date,
+   586→    company_name      = nullif(p_employee->>'company_name',''),
+   587→    passport_number   = nullif(p_employee->>'passport_number',''),
+   588→    passport_status   = nullif(p_employee->>'passport_status',''),
+   589→    id_number         = nullif(p_employee->>'id_number',''),
+   590→    id_status         = nullif(p_employee->>'id_status',''),
+   591→    current_site_id   = v_site,
+   592→    photo             = nullif(p_employee->>'photo',''),
+   593→    is_team_leader    = v_is_leader,
+   594→    team_leader_site_id = case when v_is_leader then v_leader_site else null end,
+   595→    updated_at        = now()
+   596→  where id = p_id returning * into result;
+   597→  return result;
+   598→end; $$;
+   599→
+   600→-- Super-admin hard delete: soft-hide cascade (all related data preserved but hidden)
+   601→create or replace function public.delete_employee_cascade(p_id uuid)
+   602→returns void language plpgsql
+   603→security definer set search_path = public
+   604→as $$
+   605→declare emp public.employee;
+   606→begin
+   607→  if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+   608→  select * into emp from public.employee where id = p_id;
+   609→  if emp.id is null then raise exception 'Employee not found'; end if;
+   610→  if emp.status = 'pending_deletion' then
+   611→    raise exception 'This employee already has a pending deletion request';
+   612→  end if;
+   613→
+   614→  update public.attendance           set is_hidden = true where employee_id = p_id;
+   615→  update public.warning              set is_hidden = true where employee_id = p_id;
+   616→  update public.fine                 set is_hidden = true where employee_id = p_id;
+   617→  update public.leave_request        set is_hidden = true where employee_id = p_id;
+   618→  update public.cancellation_request set is_hidden = true where employee_id = p_id;
+   619→  update public.uniform_registry     set is_deleted = true, is_hidden = true where employee_id = p_id;
+   620→
+   621→  -- hide notifications that mention this employee
+   622→  update public.notification set is_hidden = true
+   623→  where (lower(title) like '%' || lower(emp.full_name) || '%'
+   624→      or lower(message) like '%' || lower(emp.full_name) || '%'
+   625→      or lower(message) like '%' || lower(emp.employee_code) || '%');
+   626→
+   627→  update public.employee set status = 'deleted', current_site_id = null,
+   628→    is_team_leader = false, team_leader_site_id = null
+   629→  where id = p_id;
+   630→end; $$;
+   631→
+   632→-- Admin-initiated removal request → CancellationRequest + pending_deletion + notify
+   633→create or replace function public.request_employee_deletion(p_employee_id uuid, p_reason text default null)
+   634→returns public.cancellation_request language plpgsql
+   635→security definer set search_path = public
+   636→as $$
+   637→declare result public.cancellation_request;
+   638→declare emp public.employee;
+   639→begin
+   640→  if not public.is_staff() then raise exception 'Access denied'; end if;
+   641→  select * into emp from public.employee where id = p_employee_id;
+   642→  if emp.id is null then raise exception 'Employee not found'; end if;
+   643→  if emp.status = 'deleted' then raise exception 'This employee is already deleted'; end if;
+   644→  if emp.status = 'pending_deletion' then raise exception 'This employee already has a pending deletion request'; end if;
+   645→
+   646→  insert into public.cancellation_request (employee_id, reason, status, requested_by)
+   647→  values (p_employee_id, p_reason, 'pending', auth.uid()) returning * into result;
+   648→
+   649→  update public.employee set status = 'pending_deletion' where id = p_employee_id;
+   650→
+   651→  perform public.notify_super_admins(
+   652→    'New Cancellation Request',
+   653→    emp.full_name || ' (' || emp.employee_code || ') is pending deletion approval' ||
+   654→    case when coalesce(p_reason,'') <> '' then ' — ' || p_reason else '' end,
+   655→    'request'
+   656→  );
+   657→  return result;
+   658→end; $$;
+   659→
+   660→-- Review a cancellation request (super admin only)
+   661→create or replace function public.review_cancellation_request(p_id uuid, p_approve boolean)
+   662→returns void language plpgsql
+   663→security definer set search_path = public
+   664→as $$
+   665→declare req public.cancellation_request;
+   666→declare emp public.employee;
+   667→begin
+   668→  if not public.is_super_admin() then raise exception 'Only super admins can review requests'; end if;
+   669→  select * into req from public.cancellation_request where id = p_id;
+   670→  if req.id is null then raise exception 'Request not found'; end if;
+   671→  if req.status <> 'pending' then raise exception 'Only pending requests can be reviewed'; end if;
+   672→  select * into emp from public.employee where id = req.employee_id;
+   673→
+   674→  if p_approve then
+   675→    update public.cancellation_request set status = 'approved', reviewed_by = auth.uid(), reviewed_at = now() where id = p_id;
+   676→    update public.employee set status = 'deleted', current_site_id = null, is_team_leader = false, team_leader_site_id = null
+   677→      where id = req.employee_id;
+   678→    update public.uniform_registry set is_deleted = true, is_hidden = true where employee_id = req.employee_id;
+   679→  else
+   680→    update public.cancellation_request set status = 'rejected', reviewed_by = auth.uid(), reviewed_at = now() where id = p_id;
+   681→    update public.employee set status = 'active' where id = req.employee_id and status = 'pending_deletion';
+   682→  end if;
+   683→
+   684→  if req.requested_by is not null then
+   685→    insert into public.notification (profile_id, title, message, type)
+   686→    values (req.requested_by,
+   687→      'Cancellation Request ' || case when p_approve then 'Approved' else 'Rejected' end,
+   688→      'The removal request for ' || coalesce(emp.full_name,'the employee') || ' has been ' ||
+   689→        case when p_approve then 'approved and the employee was removed.' else 'rejected and the employee was restored.' end,
+   690→      'request');
+   691→  end if;
+   692→end; $$;
+   693→
+   694→-- ============================================================================
+   695→-- 9. ATTENDANCE RPCs
+   696→-- ============================================================================
+   697→
+   698→-- Fetch a month (lazily auto-creating missing records, never for future days)
+   699→create or replace function public.get_month_attendance(p_month text)
+   700→returns setof public.attendance language plpgsql
+   701→security definer set search_path = public
+   702→as $$
+   703→declare
+   704→  m_start date := to_date(p_month || '-01', 'YYYY-MM-DD');
+   705→  m_end   date := (m_start + interval '1 month - 1 day')::date;
+   706→  today   date := current_date;
+   707→  last_day date;
+   708→begin
+   709→  if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
+   710→    raise exception 'Access denied';
+   711→  end if;
+   712→
+   713→  if today < m_start then
+   714→    last_day := m_start - 1;  -- future month: create nothing
+   715→  elsif today < m_end then
+   716→    last_day := today;
+   717→  else
+   718→    last_day := m_end;
+   719→  end if;
+   720→
+   721→  -- auto-create missing records: present for site employees, no_site for idle
+   722→  insert into public.attendance (employee_id, date, status)
+   723→  select e.id, d::date, case when e.current_site_id is null then 'no_site' else 'present' end
+   724→  from public.employee e
+   725→  cross join generate_series(m_start, last_day, interval '1 day') d
+   726→  where e.status <> 'deleted'
+   727→    and not exists (
+   728→      select 1 from public.attendance a
+   729→      where a.employee_id = e.id and a.date = d::date
+   730→    );
+   731→
+   732→  return query
+   733→    select a.* from public.attendance a
+   734→    join public.employee e on e.id = a.employee_id
+   735→    where to_char(a.date, 'YYYY-MM') = p_month
+   736→      and not a.is_hidden
+   737→      and e.status <> 'deleted'
+   738→    order by a.date;
+   739→end; $$;
+   740→
+   741→-- Mark one day (upsert) with rating engine + auto-warning on 3 consecutive absences
+   742→create or replace function public.mark_attendance(
+   743→  p_employee_id uuid, p_date date, p_status text, p_overtime_hours numeric default null
+   744→)
+   745→returns public.attendance language plpgsql
+   746→security definer set search_path = public
+   747→as $$
+   748→declare
+   749→  result public.attendance;
+   750→  prev public.attendance;
+   751→  ot_delta numeric := 0;
+   752→  walk date;
+   753→  absent_dates date[] := array[p_date];
+   754→begin
+   755→  if p_status not in ('present','absent','no_site','overtime','not_marked') then
+   756→    raise exception 'Invalid attendance status';
+   757→  end if;
+   758→  if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
+   759→    raise exception 'Access denied';
+   760→  end if;
+   761→
+   762→  select * into prev from public.attendance
+   763→    where employee_id = p_employee_id and date = p_date;
+   764→  if prev.id is not null then
+   765→    ot_delta := coalesce(p_overtime_hours, 0) - coalesce(prev.overtime_hours, 0);
+   766→  end if;
+   767→
+   768→  insert into public.attendance (employee_id, date, status, overtime_hours)
+   769→  values (p_employee_id, p_date, p_status,
+   770→          case when p_status = 'overtime' then p_overtime_hours else null end)
+   771→  on conflict (employee_id, date) do update set
+   772→    status = excluded.status,
+   773→    overtime_hours = case when excluded.status = 'overtime' then excluded.overtime_hours else null end
+   774→  returning * into result;
+   775→
+   776→  -- rating: +/- 0.2 stars per overtime hour delta
+   777→  if ot_delta <> 0 then
+   778→    update public.employee set rating = public.clamp_rating(rating + 0.2 * ot_delta) where id = p_employee_id;
+   779→  end if;
+   780→
+   781→  -- auto-warning: 3 consecutive absences (walking back, skipping Fridays)
+   782→  if p_status = 'absent' then
+   783→    walk := p_date - 1;
+   784→    while walk >= p_date - 7 loop
+   785→      if extract(isodow from walk) = 5 then walk := walk - 1; continue; end if;
+   786→      exit when not exists (
+   787→        select 1 from public.attendance
+   788→        where employee_id = p_employee_id and date = walk and status = 'absent' and not is_hidden
+   789→      );
+   790→      absent_dates := walk || absent_dates;
+   791→      walk := walk - 1;
+   792→    end loop;
+   793→
+   794→    if array_length(absent_dates, 1) >= 3 then
+   795→      insert into public.warning (employee_id, reason, is_auto_generated, absent_dates, created_by)
+   796→      values (p_employee_id,
+   797→              'Auto-generated: ' || array_length(absent_dates,1) || ' consecutive absences detected (' ||
+   798→              (select string_agg(to_char(d,'YYYY-MM-DD'), ', ') from unnest(absent_dates) d) || ')',
+   799→              true, to_jsonb(absent_dates), auth.uid());
+   800→      update public.employee set rating = public.clamp_rating(rating - 0.5) where id = p_employee_id;
+   801→      perform public.notify_super_admins(
+   802→        'Auto-Generated Warning',
+   803→        (select full_name || ' (' || employee_code || ') was absent 3+ consecutive days' from public.employee where id = p_employee_id),
+   804→        'warning'
+   805→      );
+   806→    end if;
+   807→  end if;
+   808→
+   809→  return result;
+   810→end; $$;
+   811→
+   812→-- Full rating recompute from a month's attendance:
+   813→-- (present + overtime days / working days excluding Fridays) * 5
+   814→create or replace function public.recalc_employee_rating(p_employee_id uuid, p_month text)
+   815→returns numeric language plpgsql
+   816→security definer set search_path = public
+   817→as $$
+   818→declare
+   819→  worked int;
+   820→  workdays int;
+   821→  new_rating numeric;
+   822→begin
+   823→  select count(*) into worked from public.attendance
+   824→    where employee_id = p_employee_id and to_char(date,'YYYY-MM') = p_month
+   825→      and status in ('present','overtime') and not is_hidden;
+   826→  select count(*) into workdays from generate_series(
+   827→    to_date(p_month || '-01','YYYY-MM-DD'),
+   828→    least(current_date, (to_date(p_month || '-01','YYYY-MM-DD') + interval '1 month - 1 day')::date),
+   829→    interval '1 day') d
+   830→  where extract(isodow from d) <> 5;
+   831→
+   832→  new_rating := public.clamp_rating(case when workdays > 0 then (worked::numeric / workdays) * 5 else 5 end);
+   833→  update public.employee set rating = new_rating where id = p_employee_id;
+   834→  return new_rating;
+   835→end; $$;
+   836→
+   837→-- Dashboard chart data: per-status counts for the last N months (incl current)
+   838→create or replace function public.get_monthly_attendance_summary(p_months int default 6)
+   839→returns table (month text, status text, count bigint) language plpgsql
+   840→security definer set search_path = public
+   841→as $$
+   842→begin
+   843→  if not public.is_staff() then raise exception 'Access denied'; end if;
+   844→  return query
+   845→    with months as (
+   846→      select to_char(date_trunc('month', current_date) - (n || ' month')::interval, 'YYYY-MM') as m
+   847→      from generate_series(0, p_months - 1) n
+   848→    )
+   849→    select months.m,
+   850→           a.status,
+   851→           count(*)::bigint
+   852→    from months
+   853→    join public.attendance a on to_char(a.date, 'YYYY-MM') = months.m
+   854→    join public.employee e on e.id = a.employee_id
+   855→    where not a.is_hidden and e.status <> 'deleted' and a.status <> 'not_marked'
+   856→    group by months.m, a.status
+   857→    order by months.m;
+   858→end; $$;
+   859→
+   860→-- ============================================================================
+   861→-- 10. LEAVE REQUEST RPCs
+   862→-- ============================================================================
+   863→
+   864→create or replace function public.create_leave_request(
+   865→  p_employee_id uuid, p_leave_type text, p_other_type_text text default null,
+   866→  p_start_date date, p_end_date date, p_total_days int, p_reason text
+   867→)
+   868→returns public.leave_request language plpgsql
+   869→security definer set search_path = public
+   870→as $$
+   871→declare result public.leave_request;
+   872→declare emp public.employee;
+   873→begin
+   874→  if p_leave_type not in ('casual','sick','annual','emergency','marriage','other') then
+   875→    raise exception 'Invalid leave type';
+   876→  end if;
+   877→  if not public.is_staff() then raise exception 'Access denied'; end if;
+   878→  select * into emp from public.employee where id = p_employee_id;
+   879→  if emp.id is null then raise exception 'Employee not found'; end if;
+   880→
+   881→  insert into public.leave_request
+   882→    (employee_id, leave_type, other_type_text, start_date, end_date, total_days, reason, status, created_by)
+   883→  values
+   884→    (p_employee_id, p_leave_type, nullif(p_other_type_text,''), p_start_date, p_end_date, p_total_days, p_reason, 'pending', auth.uid())
+   885→  returning * into result;
+   886→
+   887→  perform public.notify_super_admins(
+   888→    'New Leave Request',
+   889→    emp.full_name || ' (' || emp.employee_code || ') requested ' ||
+   890→      coalesce(nullif(p_other_type_text,''), p_leave_type) || ' leave for ' || p_total_days || ' day(s)',
+   891→    'request'
+   892→  );
+   893→  return result;
+   894→end; $$;
+   895→
+   896→create or replace function public.review_leave_request(p_id uuid, p_approve boolean)
+   897→returns void language plpgsql
+   898→security definer set search_path = public
+   899→as $$
+   900→declare req public.leave_request;
+   901→begin
+   902→  if not public.is_super_admin() then raise exception 'Only super admins can review requests'; end if;
+   903→  select * into req from public.leave_request where id = p_id;
+   904→  if req.id is null then raise exception 'Request not found'; end if;
+   905→  if req.status <> 'pending' then raise exception 'Only pending requests can be reviewed'; end if;
+   906→
+   907→  update public.leave_request
+   908→    set status = case when p_approve then 'approved' else 'rejected' end,
+   909→        reviewed_by = auth.uid(), reviewed_at = now()
+   910→    where id = p_id;
+   911→
+   912→  if req.created_by is not null then
+   913→    insert into public.notification (profile_id, title, message, type)
+   914→    values (req.created_by,
+   915→      'Leave Request ' || case when p_approve then 'Approved' else 'Rejected' end,
+   916→      'The leave request (' || coalesce(nullif(req.other_type_text,''), req.leave_type) || ', ' || req.total_days || ' day(s)) has been ' ||
+   917→        case when p_approve then 'approved.' else 'rejected.' end,
+   918→      'request');
+   919→  end if;
+   920→end; $$;
+   921→
+   922→-- ============================================================================
+   923→-- 11. WARNING + FINE RPCs
+   924→-- ============================================================================
+   925→
+   926→create or replace function public.issue_warning(p_employee_id uuid, p_reason text)
+   927→returns public.warning language plpgsql
+   928→security definer set search_path = public
+   929→as $$
+   930→declare result public.warning;
+   931→declare emp public.employee;
+   932→begin
+   933→  if not public.has_menu_permission('notifications') and not public.has_menu_permission('employees') then
+   934→    raise exception 'Access denied';
+   935→  end if;
+   936→  select * into emp from public.employee where id = p_employee_id;
+   937→  if emp.id is null then raise exception 'Employee not found'; end if;
+   938→
+   939→  insert into public.warning (employee_id, reason, created_by) values (p_employee_id, p_reason, auth.uid())
+   940→  returning * into result;
+   941→
+   942→  update public.employee set rating = public.clamp_rating(rating - 0.5) where id = p_employee_id;
+   943→
+   944→  perform public.notify_super_admins('New Warning Issued',
+   945→    emp.full_name || ' (' || emp.employee_code || ') received a warning: ' || p_reason, 'warning');
+   946→  return result;
+   947→end; $$;
+   948→
+   949→create or replace function public.issue_fine(p_employee_id uuid, p_reason text, p_amount numeric)
+   950→returns public.fine language plpgsql
+   951→security definer set search_path = public
+   952→as $$
+   953→declare result public.fine;
+   954→declare emp public.employee;
+   955→begin
+   956→  if not public.has_menu_permission('notifications') and not public.has_menu_permission('employees') then
+   957→    raise exception 'Access denied';
+   958→  end if;
+   959→  if p_amount < 0 then raise exception 'Fine amount cannot be negative'; end if;
+   960→  select * into emp from public.employee where id = p_employee_id;
+   961→  if emp.id is null then raise exception 'Employee not found'; end if;
+   962→
+   963→  insert into public.fine (employee_id, reason, amount, created_by) values (p_employee_id, p_reason, p_amount, auth.uid())
+   964→  returning * into result;
+   965→
+   966→  update public.employee set rating = public.clamp_rating(rating - 1.0) where id = p_employee_id;
+   967→
+   968→  perform public.notify_super_admins('New Fine Issued',
+   969→    emp.full_name || ' (' || emp.employee_code || ') was fined SAR ' || p_amount::text || ': ' || p_reason, 'fine');
+   970→  return result;
+   971→end; $$;
+   972→
+   973→-- ============================================================================
+   974→-- 12. NOTIFICATION RPCs
+   975→-- ============================================================================
+   976→
+   977→create or replace function public.mark_all_notifications_read(p_type text default null)
+   978→returns void language plpgsql
+   979→security definer set search_path = public
+   980→as $$
+   981→begin
+   982→  update public.notification set read = true
+   983→  where profile_id = auth.uid() and not read
+   984→    and (p_type is null or type = p_type);
+   985→end; $$;
+   986→
+   987→-- ============================================================================
+   988→-- 13. UNIFORM REGISTRY RPCs
+   989→-- ============================================================================
+   990→
+   991→create or replace function public.create_uniform_entry(
+   992→  p_employee_id uuid, p_document_type text, p_document_number text, p_items jsonb,
+   993→  p_site_name text default null, p_team_leader_name text default null,
+   994→  p_created_at timestamptz default now(), p_token_number int default null,
+   995→  p_is_renewal boolean default false, p_previous_token_id int default null
+   996→)
+   997→returns public.uniform_registry language plpgsql
+   998→security definer set search_path = public
+   999→as $$
+  1000→declare
+  1001→  result public.uniform_registry;
+  1002→  emp public.employee;
+  1003→  v_uniform_id int;
+  1004→  v_token int;
+  1005→begin
+  1006→  if not public.is_staff() then raise exception 'Access denied'; end if;
+  1007→  if p_document_type not in ('id','passport') then raise exception 'Invalid document type'; end if;
+  1008→  select * into emp from public.employee where id = p_employee_id;
+  1009→  if emp.id is null then raise exception 'Employee not found'; end if;
+  1010→
+  1011→  select coalesce(max(uniform_id),0) + 1 into v_uniform_id from public.uniform_registry;
+  1012→  select coalesce(max(token_number),0) + 1 into v_token from public.uniform_registry;
+  1013→  if p_token_number is not null and p_token_number > 0 then v_token := p_token_number; end if;
+  1014→  if exists (select 1 from public.uniform_registry where uniform_id = v_uniform_id) then
+  1015→    v_uniform_id := v_uniform_id + 1;
+  1016→  end if;
+  1017→
+  1018→  insert into public.uniform_registry
+  1019→    (uniform_id, token_number, employee_id, employee_name, document_type, document_number,
+  1020→     items, site_name, team_leader_name, is_renewal, previous_token_id, created_at, renewal_date)
+  1021→  values
+  1022→    (v_uniform_id, v_token, p_employee_id, emp.full_name, p_document_type, p_document_number,
+  1023→     p_items, nullif(p_site_name,''), nullif(p_team_leader_name,''), p_is_renewal, p_previous_token_id,
+  1024→     p_created_at, p_created_at + interval '6 months')
+  1025→  returning * into result;
+  1026→  return result;
+  1027→end; $$;
+  1028→
+  1029→create or replace function public.update_uniform_entry(
+  1030→  p_id uuid, p_token_number int, p_document_type text, p_document_number text,
+  1031→  p_items jsonb, p_site_name text default null, p_team_leader_name text default null,
+  1032→  p_created_at timestamptz
+  1033→)
+  1034→returns public.uniform_registry language plpgsql
+  1035→security definer set search_path = public
+  1036→as $$
+  1037→declare result public.uniform_registry;
+  1038→begin
+  1039→  if not public.is_staff() then raise exception 'Access denied'; end if;
+  1040→  if p_document_type not in ('id','passport') then raise exception 'Invalid document type'; end if;
+  1041→  update public.uniform_registry set
+  1042→    token_number = p_token_number,
+  1043→    document_type = p_document_type,
+  1044→    document_number = p_document_number,
+  1045→    items = p_items,
+  1046→    site_name = nullif(p_site_name,''),
+  1047→    team_leader_name = nullif(p_team_leader_name,''),
+  1048→    created_at = p_created_at,
+  1049→    renewal_date = p_created_at + interval '6 months'
+  1050→  where id = p_id and not is_deleted and not is_hidden
+  1051→  returning * into result;
+  1052→  if result.id is null then raise exception 'Entry not found'; end if;
+  1053→  return result;
+  1054→end; $$;
+  1055→
+  1056→create or replace function public.delete_uniform_entry(p_id uuid)
+  1057→returns void language plpgsql
+  1058→security definer set search_path = public
+  1059→as $$
+  1060→begin
+  1061→  if not public.is_staff() then raise exception 'Access denied'; end if;
+  1062→  update public.uniform_registry set is_deleted = true where id = p_id and not is_deleted;
+  1063→end; $$;
+  1064→
+  1065→-- ============================================================================
+  1066→-- 14. REALTIME PUBLICATION
+  1067→-- ============================================================================
+  1068→-- Adds every operational table to the Supabase Realtime stream so the UI gets
+  1069→-- live updates (postgres_changes) as data changes anywhere.
+  1070→do $$
+  1071→begin
+  1072→  alter publication supabase_realtime add table public.profiles;
+  1073→  alter publication supabase_realtime add table public.menu_permission;
+  1074→  alter publication supabase_realtime add table public.site;
+  1075→  alter publication supabase_realtime add table public.employee;
+  1076→  alter publication supabase_realtime add table public.attendance;
+  1077→  alter publication supabase_realtime add table public.notification;
+  1078→  alter publication supabase_realtime add table public.warning;
+  1079→  alter publication supabase_realtime add table public.fine;
+  1080→  alter publication supabase_realtime add table public.leave_request;
+  1081→  alter publication supabase_realtime add table public.cancellation_request;
+  1082→  alter publication supabase_realtime add table public.uniform_registry;
+  1083→exception
+  1084→  when duplicate_object then null; -- already in publication
+  1085→end $$;
+  1086→

@@ -1,0 +1,1110 @@
+     1→'use client';
+     2→
+     3→import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+     4→import {
+     5→  FileText,
+     6→  Plus,
+     7→  Clock,
+     8→  CheckCircle,
+     9→  XCircle,
+    10→  Search,
+    11→  X,
+    12→  CalendarDays,
+    13→  Loader2,
+    14→  Filter,
+    15→  ChevronLeft,
+    16→  ChevronRight,
+    17→  ChevronsLeft,
+    18→  ChevronsRight,
+    19→  AlertCircle,
+    20→  User,
+    21→  Download,
+    22→  Printer,
+    23→  MessageCircle,
+    24→} from 'lucide-react';
+    25→import jsPDF from 'jspdf';
+    26→import { Card, CardContent } from '@/components/ui/card';
+    27→import { Button } from '@/components/ui/button';
+    28→import { Input } from '@/components/ui/input';
+    29→import { Label } from '@/components/ui/label';
+    30→import { Textarea } from '@/components/ui/textarea';
+    31→import { Badge } from '@/components/ui/badge';
+    32→import { Skeleton } from '@/components/ui/skeleton';
+    33→import { Separator } from '@/components/ui/separator';
+    34→import {
+    35→  Table,
+    36→  TableBody,
+    37→  TableCell,
+    38→  TableHead,
+    39→  TableHeader,
+    40→  TableRow,
+    41→} from '@/components/ui/table';
+    42→import {
+    43→  Dialog,
+    44→  DialogContent,
+    45→  DialogHeader,
+    46→  DialogTitle,
+    47→  DialogDescription,
+    48→  DialogFooter,
+    49→} from '@/components/ui/dialog';
+    50→import {
+    51→  Select,
+    52→  SelectContent,
+    53→  SelectItem,
+    54→  SelectTrigger,
+    55→  SelectValue,
+    56→} from '@/components/ui/select';
+    57→import { useToast } from '@/hooks/use-toast';
+    58→import { useAuthStore } from '@/store/auth-store';
+    59→import { cn } from '@/lib/utils';
+    60→
+    61→/* ───────── Types ───────── */
+    62→interface Employee {
+    63→  id: string;
+    64→  fullName: string;
+    65→  employeeId: string;
+    66→  position: string | null;
+    67→  companyName: string | null;
+    68→  phone: string | null;
+    69→  nationality: string | null;
+    70→  idNumber: string | null;
+    71→}
+    72→
+    73→interface LeaveRequest {
+    74→  id: string;
+    75→  employeeId: string;
+    76→  employee: Employee;
+    77→  type: string;
+    78→  otherTypeText: string | null;
+    79→  startDate: string;
+    80→  endDate: string;
+    81→  totalDays: number;
+    82→  reason: string;
+    83→  status: string;
+    84→  createdBy: { id: string; name: string; email: string };
+    85→  reviewedBy: string | null;
+    86→  reviewedAt: string | null;
+    87→  createdAt: string;
+    88→  updatedAt: string;
+    89→}
+    90→
+    91→/* ───────── Constants ───────── */
+    92→const LEAVE_TYPES = [
+    93→  { value: 'casual', label: 'Casual Leave' },
+    94→  { value: 'sick', label: 'Sick Leave' },
+    95→  { value: 'annual', label: 'Annual Leave' },
+    96→  { value: 'emergency', label: 'Emergency Leave' },
+    97→  { value: 'marriage', label: 'Marriage Leave' },
+    98→  { value: 'other', label: 'Other' },
+    99→];
+   100→
+   101→const STATUS_CONFIG: Record<string, { label: string; color: string; icon: React.ElementType }> = {
+   102→  pending: { label: 'Pending', color: 'bg-amber-500/15 text-amber-400 border-amber-500/25', icon: Clock },
+   103→  approved: { label: 'Approved', color: 'bg-green-500/15 text-green-400 border-green-500/25', icon: CheckCircle },
+   104→  rejected: { label: 'Rejected', color: 'bg-red-500/15 text-red-400 border-red-500/25', icon: XCircle },
+   105→};
+   106→
+   107→/* ───────── PDF & Print Helpers ───────── */
+   108→function formatFormalDate(dateStr: string): string {
+   109→  try {
+   110→    const d = new Date(dateStr);
+   111→    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+   112→  } catch {
+   113→    return dateStr;
+   114→  }
+   115→}
+   116→
+   117→function generateLeavePdfDoc(req: LeaveRequest): jsPDF {
+   118→  const doc = new jsPDF();
+   119→  const typeLabels: Record<string, string> = {
+   120→    casual: 'Casual Leave',
+   121→    sick: 'Sick Leave',
+   122→    annual: 'Annual Leave',
+   123→    emergency: 'Emergency Leave',
+   124→    marriage: 'Marriage Leave',
+   125→    other: `Other (${req.otherTypeText || ''})`,
+   126→  };
+   127→  const leaveType = typeLabels[req.type] || req.type;
+   128→  const submissionDate = formatFormalDate(new Date().toISOString());
+   129→  const statusLabel = req.status.charAt(0).toUpperCase() + req.status.slice(1);
+   130→
+   131→  // Company header
+   132→  doc.setFontSize(18);
+   133→  doc.setFont('helvetica', 'bold');
+   134→  doc.text('ARABIAN SHIELD MANPOWER LLC.', 105, 25, { align: 'center' });
+   135→  doc.setDrawColor(139, 0, 0);
+   136→  doc.setLineWidth(1.5);
+   137→  doc.line(20, 32, 190, 32);
+   138→
+   139→  // Title
+   140→  let y = 42;
+   141→  doc.setFontSize(16);
+   142→  doc.setFont('helvetica', 'bold');
+   143→  doc.setTextColor(139, 0, 0);
+   144→  doc.text('LEAVE APPLICATION FORM', 105, y, { align: 'center' });
+   145→  y += 12;
+   146→
+   147→  doc.setTextColor(30, 30, 30);
+   148→  doc.setFontSize(10);
+   149→  doc.setFont('helvetica', 'normal');
+   150→  doc.text(`Reference: LEAVE-${req.id.substring(0, 8)}`, 20, y);
+   151→  doc.text(`Application Date: ${formatFormalDate(req.createdAt)}`, 190, y, { align: 'right' });
+   152→  doc.text(`Status: ${statusLabel}`, 190, y + 7, { align: 'right' });
+   153→  y += 14;
+   154→
+   155→  // Separator
+   156→  doc.setDrawColor(180, 180, 180);
+   157→  doc.setLineWidth(0.3);
+   158→  doc.line(20, y, 190, y);
+   159→  y += 10;
+   160→
+   161→  // Section: Employee Information
+   162→  doc.setFont('helvetica', 'bold');
+   163→  doc.setFontSize(11);
+   164→  doc.setTextColor(139, 0, 0);
+   165→  doc.text('EMPLOYEE INFORMATION', 20, y);
+   166→  y += 8;
+   167→  doc.setDrawColor(180, 180, 180);
+   168→  doc.line(20, y, 190, y);
+   169→  y += 7;
+   170→
+   171→  doc.setTextColor(30, 30, 30);
+   172→  doc.setFontSize(10);
+   173→  const empFields = [
+   174→    ['Employee Name', req.employee.fullName],
+   175→    ['Employee ID', req.employee.employeeId],
+   176→    ['Designation', req.employee.position || 'N/A'],
+   177→    ['Company', req.employee.companyName || 'N/A'],
+   178→    ['Contact', req.employee.phone || 'N/A'],
+   179→    ['Nationality', req.employee.nationality || 'N/A'],
+   180→  ];
+   181→  for (const [label, value] of empFields) {
+   182→    doc.setFont('helvetica', 'bold');
+   183→    doc.text(`${label}:`, 20, y);
+   184→    doc.setFont('helvetica', 'normal');
+   185→    doc.text(value, 70, y);
+   186→    y += 7;
+   187→  }
+   188→  y += 5;
+   189→
+   190→  // Section: Leave Details
+   191→  doc.setFont('helvetica', 'bold');
+   192→  doc.setFontSize(11);
+   193→  doc.setTextColor(139, 0, 0);
+   194→  doc.text('LEAVE DETAILS', 20, y);
+   195→  y += 8;
+   196→  doc.setDrawColor(180, 180, 180);
+   197→  doc.line(20, y, 190, y);
+   198→  y += 7;
+   199→
+   200→  doc.setTextColor(30, 30, 30);
+   201→  doc.setFontSize(10);
+   202→  const leaveFields = [
+   203→    ['Leave Type', leaveType],
+   204→    ['Start Date', formatFormalDate(req.startDate)],
+   205→    ['End Date', formatFormalDate(req.endDate)],
+   206→    ['Total Days', `${req.totalDays} day${req.totalDays > 1 ? 's' : ''}`],
+   207→  ];
+   208→  for (const [label, value] of leaveFields) {
+   209→    doc.setFont('helvetica', 'bold');
+   210→    doc.text(`${label}:`, 20, y);
+   211→    doc.setFont('helvetica', 'normal');
+   212→    doc.text(value, 70, y);
+   213→    y += 7;
+   214→  }
+   215→  y += 5;
+   216→
+   217→  // Section: Reason
+   218→  doc.setFont('helvetica', 'bold');
+   219→  doc.setFontSize(11);
+   220→  doc.setTextColor(139, 0, 0);
+   221→  doc.text('REASON FOR LEAVE', 20, y);
+   222→  y += 8;
+   223→  doc.setDrawColor(180, 180, 180);
+   224→  doc.line(20, y, 190, y);
+   225→  y += 7;
+   226→
+   227→  doc.setTextColor(50, 50, 50);
+   228→  doc.setFont('helvetica', 'italic');
+   229→  doc.setFontSize(10);
+   230→  const reasonLines = doc.splitTextToSize(req.reason, 170);
+   231→  doc.text(reasonLines, 20, y);
+   232→  y += reasonLines.length * 6 + 10;
+   233→
+   234→  // Review status if applicable
+   235→  if (req.status !== 'pending' && req.reviewedBy) {
+   236→    doc.setTextColor(30, 30, 30);
+   237→    doc.setFont('helvetica', 'bold');
+   238→    doc.setFontSize(10);
+   239→    doc.text(`${statusLabel} by: ${req.reviewedBy}`, 20, y);
+   240→    y += 10;
+   241→  }
+   242→
+   243→  // Signature area
+   244→  y += 10;
+   245→  doc.setDrawColor(160, 160, 160);
+   246→  doc.setLineWidth(0.3);
+   247→  doc.line(20, y, 190, y);
+   248→  y += 15;
+   249→
+   250→  doc.setTextColor(30, 30, 30);
+   251→  doc.setFontSize(10);
+   252→  doc.setFont('helvetica', 'normal');
+   253→  doc.text('Employee Signature: _______________', 25, y);
+   254→  doc.text('HR / Office Admin: _______________', 115, y);
+   255→  y += 20;
+   256→
+   257→  // Footer
+   258→  doc.setDrawColor(200, 200, 200);
+   259→  doc.line(20, y, 190, y);
+   260→  y += 7;
+   261→  doc.setFontSize(8);
+   262→  doc.setTextColor(120, 120, 120);
+   263→  doc.text('This is a computer-generated document from Arabian Shield Manpower LLC.', 105, y, { align: 'center' });
+   264→
+   265→  return doc;
+   266→}
+   267→
+   268→function downloadLeaveRequestPdf(req: LeaveRequest) {
+   269→  const doc = generateLeavePdfDoc(req);
+   270→  const filename = `leave-application-${req.employee.fullName.replace(/\s+/g, '-').toLowerCase()}-${req.id.substring(0, 8)}.pdf`;
+   271→  doc.save(filename);
+   272→}
+   273→
+   274→function printLeaveRequest(req: LeaveRequest) {
+   275→  const typeLabels: Record<string, string> = {
+   276→    casual: 'Casual', sick: 'Sick', annual: 'Annual',
+   277→    emergency: 'Emergency', marriage: 'Marriage',
+   278→    other: `Other (${req.otherTypeText || ''})`,
+   279→  };
+   280→  const leaveType = typeLabels[req.type] || req.type;
+   281→  const submissionDate = formatFormalDate(new Date().toISOString());
+   282→  const statusLabel = req.status.charAt(0).toUpperCase() + req.status.slice(1);
+   283→
+   284→  const html = `<!DOCTYPE html>
+   285→<html lang="en">
+   286→<head><meta charset="UTF-8" /><title>Leave Application - ${req.employee.fullName}</title>
+   287→<style>
+   288→  * { margin: 0; padding: 0; box-sizing: border-box; }
+   289→  body { font-family: 'Times New Roman', Times, serif; background: #f0f0f0; padding: 40px 20px; display: flex; justify-content: center; }
+   290→  .leave-form { max-width: 900px; width: 100%; background: white; border: 1px solid #999; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+   291→  .header { text-align: center; padding: 20px 20px 10px; border-bottom: 2px solid #c00; }
+   292→  .header h1 { font-size: 28px; font-weight: bold; letter-spacing: 2px; color: #8b0000; margin-bottom: 4px; }
+   293→  .header h2 { font-size: 18px; font-weight: normal; color: #333; margin-top: 4px; }
+   294→  .content { padding: 24px 30px 30px; }
+   295→  .field-row { display: flex; margin-bottom: 16px; border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+   296→  .field-label { width: 180px; font-weight: bold; color: #1a1a1a; font-size: 14px; }
+   297→  .field-value { flex: 1; font-size: 14px; color: #222; border-bottom: 1px dotted #aaa; padding-left: 8px; }
+   298→  .section-title { font-weight: bold; margin: 20px 0 10px; font-size: 16px; background: #f5f5f5; padding: 6px 10px; border-left: 4px solid #8b0000; }
+   299→  .signature-area { margin-top: 36px; display: flex; justify-content: space-between; padding-top: 20px; border-top: 1px dashed #ccc; }
+   300→  .signature { text-align: center; width: 200px; }
+   301→  .signature-line { margin-top: 40px; border-top: 1px solid #333; width: 100%; }
+   302→  .signature p { margin-top: 8px; font-size: 12px; color: #555; }
+   303→  .footer { text-align: center; font-size: 11px; color: #666; padding: 15px; border-top: 1px solid #eee; margin-top: 20px; }
+   304→</style></head>
+   305→<body>
+   306→<div class="leave-form">
+   307→  <div class="header"><h1>LEAVE APPLICATION FORM</h1><h2>Arabian Shield Manpower LLC.</h2></div>
+   308→  <div class="content">
+   309→    <div class="field-row"><div class="field-label">EMPLOYEE NAME</div><div class="field-value">${req.employee.fullName}</div></div>
+   310→    <div class="field-row"><div class="field-label">EMPLOYEE ID</div><div class="field-value">${req.employee.employeeId}</div></div>
+   311→    <div class="field-row"><div class="field-label">DESIGNATION</div><div class="field-value">${req.employee.position || 'N/A'}</div></div>
+   312→    <div class="field-row"><div class="field-label">COMPANY NAME</div><div class="field-value">${req.employee.companyName || 'N/A'}</div></div>
+   313→    <div class="field-row"><div class="field-label">CONTACT NUMBER</div><div class="field-value">${req.employee.phone || 'N/A'}</div></div>
+   314→    <div class="field-row"><div class="field-label">NATIONALITY</div><div class="field-value">${req.employee.nationality || 'N/A'}</div></div>
+   315→    <div class="field-row"><div class="field-label">APP. SUBMISSION DATE</div><div class="field-value">${submissionDate}</div></div>
+   316→    <div class="field-row"><div class="field-label">STATUS</div><div class="field-value">${statusLabel}</div></div>
+   317→    <div class="section-title">Leave Details</div>
+   318→    <div class="field-row"><div class="field-label">Type of Leave</div><div class="field-value">${leaveType}</div></div>
+   319→    <div class="field-row"><div class="field-label">Leave Period</div><div class="field-value">From: ${formatFormalDate(req.startDate)}  To: ${formatFormalDate(req.endDate)}</div></div>
+   320→    <div class="field-row"><div class="field-label">Total No. of Days</div><div class="field-value">${req.totalDays} DAYS</div></div>
+   321→    <div class="section-title">Reason for Leave</div>
+   322→    <div class="field-row"><div class="field-value" style="border:none; white-space: pre-wrap;">${req.reason}</div></div>
+   323→    <div class="signature-area">
+   324→      <div class="signature"><div class="signature-line"></div><p>Employee Signature</p></div>
+   325→      <div class="signature"><div class="signature-line"></div><p>HR / OFFICE ADMIN</p></div>
+   326→    </div>
+   327→  </div>
+   328→  <div class="footer">This is a computer-generated document from Arabian Shield Manpower LLC.</div>
+   329→</div>
+   330→</body></html>`;
+   331→
+   332→  const printWindow = window.open('', '_blank');
+   333→  if (printWindow) {
+   334→    printWindow.document.write(html);
+   335→    printWindow.document.close();
+   336→    printWindow.print();
+   337→  }
+   338→}
+   339→
+   340→async function sendLeaveRequestWhatsApp(req: LeaveRequest) {
+   341→  try {
+   342→    const doc = generateLeavePdfDoc(req);
+   343→    const pdfBlob = doc.output('blob');
+   344→    const file = new File([pdfBlob], `leave-application-${req.employee.fullName.replace(/\s+/g, '-')}.pdf`, { type: 'application/pdf' });
+   345→
+   346→    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+   347→      await navigator.share({
+   348→        files: [file],
+   349→        title: 'Leave Application',
+   350→        text: `Leave Application - ${req.employee.fullName} (${req.employee.employeeId})`,
+   351→      });
+   352→    } else {
+   353→      // Fallback: download PDF first, then open WhatsApp with text
+   354→      const filename = `leave-application-${req.employee.fullName.replace(/\s+/g, '-').toLowerCase()}-${req.id.substring(0, 8)}.pdf`;
+   355→      doc.save(filename);
+   356→      const message = encodeURIComponent(
+   357→        `*LEAVE APPLICATION - ARABIAN SHIELD MANPOWER LLC.*\n\nEmployee: ${req.employee.fullName}\nID: ${req.employee.employeeId}\nType: ${req.type}\nFrom: ${formatFormalDate(req.startDate)} To: ${formatFormalDate(req.endDate)}\nDays: ${req.totalDays}\nReason: ${req.reason}\n\nPlease find the attached PDF for complete details.`
+   358→      );
+   359→      window.open(`https://wa.me/?text=${message}`, '_blank');
+   360→    }
+   361→  } catch (err) {
+   362→    // User cancelled share or error
+   363→    if ((err as Error).name !== 'AbortError') {
+   364→      console.error('Share failed:', err);
+   365→    }
+   366→  }
+   367→}
+   368→
+   369→/* ───────── Searchable Employee Dropdown ───────── */
+   370→interface SearchableEmployeeSelectProps {
+   371→  employees: Employee[];
+   372→  value: string;
+   373→  onChange: (id: string) => void;
+   374→}
+   375→
+   376→function SearchableEmployeeSelect({ employees, value, onChange }: SearchableEmployeeSelectProps) {
+   377→  const [open, setOpen] = useState(false);
+   378→  const [search, setSearch] = useState('');
+   379→  const containerRef = useRef<HTMLDivElement>(null);
+   380→  const inputRef = useRef<HTMLInputElement>(null);
+   381→
+   382→  const selected = employees.find((e) => e.id === value);
+   383→
+   384→  const filtered = search
+   385→    ? employees.filter(
+   386→        (e) =>
+   387→          e.fullName.toLowerCase().includes(search.toLowerCase()) ||
+   388→          e.employeeId.toLowerCase().includes(search.toLowerCase()) ||
+   389→          (e.idNumber && e.idNumber.toLowerCase().includes(search.toLowerCase()))
+   390→      )
+   391→    : employees;
+   392→
+   393→  useEffect(() => {
+   394→    function handleClickOutside(e: MouseEvent) {
+   395→      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+   396→        setOpen(false);
+   397→        setSearch('');
+   398→      }
+   399→    }
+   400→    document.addEventListener('mousedown', handleClickOutside);
+   401→    return () => document.removeEventListener('mousedown', handleClickOutside);
+   402→  }, []);
+   403→
+   404→  useEffect(() => {
+   405→    if (open && inputRef.current) {
+   406→      setTimeout(() => inputRef.current?.focus(), 50);
+   407→    }
+   408→  }, [open]);
+   409→
+   410→  return (
+   411→    <div ref={containerRef} className="relative w-full">
+   412→      <button
+   413→        type="button"
+   414→        onClick={() => setOpen(!open)}
+   415→        className="flex items-center gap-2 w-full h-10 rounded-lg border border-slate-600 bg-slate-900 px-3 text-sm text-white hover:bg-slate-800 transition-colors text-left"
+   416→      >
+   417→        <User className="h-4 w-4 text-slate-500 shrink-0" />
+   418→        <span className="truncate flex-1">
+   419→          {selected ? `${selected.fullName} - ${selected.idNumber || selected.employeeId}` : 'Select employee...'}
+   420→        </span>
+   421→      </button>
+   422→
+   423→      {open && (
+   424→        <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-slate-800 border border-slate-600 rounded-lg shadow-xl shadow-black/40 overflow-hidden">
+   425→          <div className="p-2 border-b border-slate-700">
+   426→            <div className="relative">
+   427→              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
+   428→              <input
+   429→                ref={inputRef}
+   430→                type="text"
+   431→                value={search}
+   432→                onChange={(e) => setSearch(e.target.value)}
+   433→                placeholder="Search by name or ID..."
+   434→                className="w-full h-8 pl-8 pr-3 bg-slate-900 border border-slate-600 rounded-md text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500/50"
+   435→              />
+   436→            </div>
+   437→          </div>
+   438→          <div className="max-h-56 overflow-y-auto">
+   439→            {filtered.length === 0 ? (
+   440→              <div className="px-3 py-4 text-center text-sm text-slate-500">No employees found</div>
+   441→            ) : (
+   442→              filtered.map((emp) => (
+   443→                <button
+   444→                  key={emp.id}
+   445→                  type="button"
+   446→                  onClick={() => {
+   447→                    onChange(emp.id);
+   448→                    setOpen(false);
+   449→                    setSearch('');
+   450→                  }}
+   451→                  className={cn(
+   452→                    'flex items-center gap-2 w-full px-3 py-2 text-sm text-left transition-colors hover:bg-slate-700/50',
+   453→                    emp.id === value ? 'bg-slate-700/70 text-white' : 'text-slate-300'
+   454→                  )}
+   455→                >
+   456→                  <span className="truncate flex-1">{emp.fullName} - {emp.idNumber || emp.employeeId}</span>
+   457→                </button>
+   458→              ))
+   459→            )}
+   460→          </div>
+   461→        </div>
+   462→      )}
+   463→    </div>
+   464→  );
+   465→}
+   466→
+   467→/* ───────── Status Badge ───────── */
+   468→function LeaveStatusBadge({ status }: { status: string }) {
+   469→  const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.pending;
+   470→  const Icon = cfg.icon;
+   471→  return (
+   472→    <Badge className={cn('gap-1', cfg.color)}>
+   473→      <Icon className="h-3 w-3" />
+   474→      {cfg.label}
+   475→    </Badge>
+   476→  );
+   477→}
+   478→
+   479→/* ───────── Empty State ───────── */
+   480→function EmptyState({ hasFilters }: { hasFilters: boolean }) {
+   481→  return (
+   482→    <div className="flex flex-col items-center justify-center py-16 text-center">
+   483→      <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-700/50 mb-4">
+   484→        <FileText className="h-8 w-8 text-slate-500" />
+   485→      </div>
+   486→      <h3 className="text-base font-semibold text-white mb-1">
+   487→        {hasFilters ? 'No leave requests found' : 'No leave requests yet'}
+   488→      </h3>
+   489→      <p className="text-sm text-slate-500 max-w-sm">
+   490→        {hasFilters
+   491→          ? 'Try adjusting your filters to find what you\'re looking for.'
+   492→          : 'Create a new leave request to get started.'}
+   493→      </p>
+   494→    </div>
+   495→  );
+   496→}
+   497→
+   498→/* ───────── Table Skeleton ───────── */
+   499→function TableSkeleton() {
+   500→  return (
+   501→    <div className="space-y-3 p-4">
+   502→      {Array.from({ length: 6 }).map((_, i) => (
+   503→        <div key={i} className="flex items-center gap-4">
+   504→          <Skeleton className="h-10 w-10 rounded-full bg-slate-700" />
+   505→          <div className="flex-1 space-y-2">
+   506→            <Skeleton className="h-4 w-40 bg-slate-700" />
+   507→            <Skeleton className="h-3 w-24 bg-slate-700" />
+   508→          </div>
+   509→          <Skeleton className="h-5 w-20 bg-slate-700" />
+   510→          <Skeleton className="h-5 w-16 bg-slate-700" />
+   511→          <Skeleton className="h-5 w-16 bg-slate-700" />
+   512→        </div>
+   513→      ))}
+   514→    </div>
+   515→  );
+   516→}
+   517→
+   518→/* ───────── Main Component ───────── */
+   519→export function LeaveRequestPage() {
+   520→  const { user } = useAuthStore();
+   521→  const { toast } = useToast();
+   522→
+   523→  // Data state
+   524→  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
+   525→  const [employees, setEmployees] = useState<Employee[]>([]);
+   526→  const [isLoading, setIsLoading] = useState(true);
+   527→  const [statusFilter, setStatusFilter] = useState<string>('all');
+   528→  const [searchQuery, setSearchQuery] = useState('');
+   529→  const [debouncedSearch, setDebouncedSearch] = useState('');
+   530→
+   531→  // Dialog states
+   532→  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+   533→  const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
+   534→  const [reviewingRequest, setReviewingRequest] = useState<LeaveRequest | null>(null);
+   535→  const [reviewAction, setReviewAction] = useState<'approved' | 'rejected'>('approved');
+   536→  const [isSubmitting, setIsSubmitting] = useState(false);
+   537→  const [isReviewing, setIsReviewing] = useState(false);
+   538→
+   539→  // Form state
+   540→  const [formData, setFormData] = useState({
+   541→    employeeId: '',
+   542→    type: 'casual',
+   543→    otherTypeText: '',
+   544→    startDate: '',
+   545→    endDate: '',
+   546→    totalDays: 1,
+   547→    reason: '',
+   548→  });
+   549→
+   550→  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   551→
+   552→  // Debounce search
+   553→  useEffect(() => {
+   554→    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+   555→    debounceTimerRef.current = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+   556→    return () => { if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current); };
+   557→  }, [searchQuery]);
+   558→
+   559→  // Fetch leave requests
+   560→  const fetchLeaveRequests = useCallback(async () => {
+   561→    setIsLoading(true);
+   562→    try {
+   563→      const params = new URLSearchParams();
+   564→      if (statusFilter && statusFilter !== 'all') params.set('status', statusFilter);
+   565→      const res = await fetch(`/api/leave-requests?${params}`);
+   566→      const json = await res.json();
+   567→      if (json.success) {
+   568→        setLeaveRequests(json.data.leaveRequests || []);
+   569→      }
+   570→    } catch {
+   571→      toast({ title: 'Error', description: 'Failed to fetch leave requests', variant: 'destructive' });
+   572→    } finally {
+   573→      setIsLoading(false);
+   574→    }
+   575→  }, [statusFilter, toast]);
+   576→
+   577→  // Fetch employees for the form dropdown
+   578→  const fetchEmployees = useCallback(async () => {
+   579→    try {
+   580→      const res = await fetch('/api/employees?limit=1000&status=active');
+   581→      const json = await res.json();
+   582→      if (json.success) {
+   583→        setEmployees(json.data.employees || []);
+   584→      }
+   585→    } catch {
+   586→      // silent
+   587→    }
+   588→  }, []);
+   589→
+   590→  useEffect(() => {
+   591→    fetchLeaveRequests();
+   592→  }, [fetchLeaveRequests]);
+   593→
+   594→  useEffect(() => {
+   595→    fetchEmployees();
+   596→  }, [fetchEmployees]);
+   597→
+   598→  // Calculate total days between start and end date
+   599→  useEffect(() => {
+   600→    if (formData.startDate && formData.endDate) {
+   601→      const start = new Date(formData.startDate);
+   602→      const end = new Date(formData.endDate);
+   603→      const diffTime = end.getTime() - start.getTime();
+   604→      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+   605→      setFormData((prev) => ({ ...prev, totalDays: diffDays > 0 ? diffDays : 1 }));
+   606→    }
+   607→  }, [formData.startDate, formData.endDate]);
+   608→
+   609→  // Filter by search
+   610→  const filteredRequests = useMemo(() => {
+   611→    if (!debouncedSearch) return leaveRequests;
+   612→    const q = debouncedSearch.toLowerCase();
+   613→    return leaveRequests.filter(
+   614→      (r) =>
+   615→        r.employee.fullName.toLowerCase().includes(q) ||
+   616→        r.employee.employeeId.toLowerCase().includes(q) ||
+   617→        r.type.toLowerCase().includes(q) ||
+   618→        r.reason.toLowerCase().includes(q)
+   619→    );
+   620→  }, [leaveRequests, debouncedSearch]);
+   621→
+   622→  // Stats
+   623→  const stats = useMemo(() => ({
+   624→    total: leaveRequests.length,
+   625→    pending: leaveRequests.filter((r) => r.status === 'pending').length,
+   626→    approved: leaveRequests.filter((r) => r.status === 'approved').length,
+   627→    rejected: leaveRequests.filter((r) => r.status === 'rejected').length,
+   628→  }), [leaveRequests]);
+   629→
+   630→  // Handle create leave request
+   631→  const handleCreate = async () => {
+   632→    if (!formData.employeeId || !formData.type || !formData.startDate || !formData.endDate || !formData.reason) {
+   633→      toast({ title: 'Validation Error', description: 'Please fill in all required fields', variant: 'destructive' });
+   634→      return;
+   635→    }
+   636→    if (!user) {
+   637→      toast({ title: 'Error', description: 'You must be logged in', variant: 'destructive' });
+   638→      return;
+   639→    }
+   640→    setIsSubmitting(true);
+   641→    try {
+   642→      const res = await fetch('/api/leave-requests', {
+   643→        method: 'POST',
+   644→        headers: { 'Content-Type': 'application/json' },
+   645→        body: JSON.stringify({
+   646→          employeeId: formData.employeeId,
+   647→          type: formData.type,
+   648→          otherTypeText: formData.type === 'other' ? formData.otherTypeText : undefined,
+   649→          startDate: formData.startDate,
+   650→          endDate: formData.endDate,
+   651→          totalDays: formData.totalDays,
+   652→          reason: formData.reason,
+   653→          createdById: user.id,
+   654→        }),
+   655→      });
+   656→      const json = await res.json();
+   657→      if (json.success) {
+   658→        toast({ title: 'Success', description: 'Leave request created successfully' });
+   659→        setCreateDialogOpen(false);
+   660→        resetForm();
+   661→        fetchLeaveRequests();
+   662→      } else {
+   663→        toast({ title: 'Error', description: json.error || 'Failed to create leave request', variant: 'destructive' });
+   664→      }
+   665→    } catch {
+   666→      toast({ title: 'Error', description: 'Something went wrong', variant: 'destructive' });
+   667→    } finally {
+   668→      setIsSubmitting(false);
+   669→    }
+   670→  };
+   671→
+   672→  // Handle review (approve/reject)
+   673→  const handleReview = async () => {
+   674→    if (!reviewingRequest || !user) return;
+   675→    setIsReviewing(true);
+   676→    try {
+   677→      const res = await fetch(`/api/leave-requests/${reviewingRequest.id}`, {
+   678→        method: 'PUT',
+   679→        headers: { 'Content-Type': 'application/json' },
+   680→        body: JSON.stringify({
+   681→          status: reviewAction,
+   682→          reviewedBy: user.id,
+   683→        }),
+   684→      });
+   685→      const json = await res.json();
+   686→      if (json.success) {
+   687→        toast({
+   688→          title: reviewAction === 'approved' ? 'Leave Approved' : 'Leave Rejected',
+   689→          description: `The leave request has been ${reviewAction}.`,
+   690→        });
+   691→        setReviewDialogOpen(false);
+   692→        setReviewingRequest(null);
+   693→        fetchLeaveRequests();
+   694→      } else {
+   695→        toast({ title: 'Error', description: json.error || 'Failed to review request', variant: 'destructive' });
+   696→      }
+   697→    } catch {
+   698→      toast({ title: 'Error', description: 'Something went wrong', variant: 'destructive' });
+   699→    } finally {
+   700→      setIsReviewing(false);
+   701→    }
+   702→  };
+   703→
+   704→  const resetForm = () => {
+   705→    setFormData({
+   706→      employeeId: '',
+   707→      type: 'casual',
+   708→      otherTypeText: '',
+   709→      startDate: '',
+   710→      endDate: '',
+   711→      totalDays: 1,
+   712→      reason: '',
+   713→    });
+   714→  };
+   715→
+   716→  const openCreateDialog = () => {
+   717→    resetForm();
+   718→    setCreateDialogOpen(true);
+   719→  };
+   720→
+   721→  const openReviewDialog = (request: LeaveRequest, action: 'approved' | 'rejected') => {
+   722→    setReviewingRequest(request);
+   723→    setReviewAction(action);
+   724→    setReviewDialogOpen(true);
+   725→  };
+   726→
+   727→  const formatLeaveType = (type: string, otherText?: string | null) => {
+   728→    const found = LEAVE_TYPES.find((t) => t.value === type);
+   729→    if (type === 'other' && otherText) return otherText;
+   730→    return found?.label || type;
+   731→  };
+   732→
+   733→  const formatDate = (dateStr: string) => {
+   734→    try {
+   735→      return new Date(dateStr).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+   736→    } catch {
+   737→      return dateStr;
+   738→    }
+   739→  };
+   740→
+   741→  const isSuperAdmin = user?.role === 'super_admin';
+   742→
+   743→  return (
+   744→    <div className="flex flex-col gap-6">
+   745→      {/* Page Header */}
+   746→      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+   747→        <div>
+   748→          <h2 className="text-2xl font-bold text-white">Leave Requests</h2>
+   749→          <p className="text-slate-400 mt-1">Manage employee leave requests and approvals.</p>
+   750→        </div>
+   751→        <Button
+   752→          onClick={openCreateDialog}
+   753→          className="bg-blue-500 hover:bg-blue-600 text-white gap-2 self-start"
+   754→        >
+   755→          <Plus className="h-4 w-4" />
+   756→          New Leave Request
+   757→        </Button>
+   758→      </div>
+   759→
+   760→      {/* Stats Cards */}
+   761→      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+   762→        {[
+   763→          { title: 'Total', value: stats.total, color: 'text-blue-400', bgColor: 'bg-blue-500/10' },
+   764→          { title: 'Pending', value: stats.pending, color: 'text-amber-400', bgColor: 'bg-amber-500/10' },
+   765→          { title: 'Approved', value: stats.approved, color: 'text-green-400', bgColor: 'bg-green-500/10' },
+   766→          { title: 'Rejected', value: stats.rejected, color: 'text-red-400', bgColor: 'bg-red-500/10' },
+   767→        ].map((stat) => (
+   768→          <Card key={stat.title} className="bg-slate-800/50 border-slate-700/50 py-3">
+   769→            <CardContent className="px-4 py-0">
+   770→              <p className="text-xs text-slate-400 font-medium">{stat.title}</p>
+   771→              <p className={cn('text-2xl font-bold', stat.color)}>{isLoading ? '...' : stat.value}</p>
+   772→            </CardContent>
+   773→          </Card>
+   774→        ))}
+   775→      </div>
+   776→
+   777→      {/* Search & Filters */}
+   778→      <Card className="bg-slate-800 border-slate-700 rounded-xl">
+   779→        <CardContent className="p-4">
+   780→          <div className="flex flex-col sm:flex-row gap-3">
+   781→            <div className="relative flex-1">
+   782→              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+   783→              <Input
+   784→                placeholder="Search by name, ID, type, reason..."
+   785→                value={searchQuery}
+   786→                onChange={(e) => setSearchQuery(e.target.value)}
+   787→                className="pl-10 bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 h-9"
+   788→              />
+   789→              {searchQuery && (
+   790→                <button
+   791→                  onClick={() => setSearchQuery('')}
+   792→                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+   793→                >
+   794→                  <X className="h-4 w-4" />
+   795→                </button>
+   796→              )}
+   797→            </div>
+   798→            <Select value={statusFilter} onValueChange={setStatusFilter}>
+   799→              <SelectTrigger className="w-[160px] bg-slate-900 border-slate-600 text-white h-9">
+   800→                <Filter className="h-4 w-4 mr-2 text-slate-400" />
+   801→                <SelectValue placeholder="Status" />
+   802→              </SelectTrigger>
+   803→              <SelectContent className="bg-slate-800 border-slate-700">
+   804→                <SelectItem value="all">All Status</SelectItem>
+   805→                <SelectItem value="pending">Pending</SelectItem>
+   806→                <SelectItem value="approved">Approved</SelectItem>
+   807→                <SelectItem value="rejected">Rejected</SelectItem>
+   808→              </SelectContent>
+   809→            </Select>
+   810→          </div>
+   811→        </CardContent>
+   812→      </Card>
+   813→
+   814→      {/* Leave Requests Table */}
+   815→      <Card className="bg-slate-800 border-slate-700 rounded-xl overflow-hidden">
+   816→        {isLoading ? (
+   817→          <TableSkeleton />
+   818→        ) : filteredRequests.length === 0 ? (
+   819→          <EmptyState hasFilters={!!debouncedSearch || statusFilter !== 'all'} />
+   820→        ) : (
+   821→          <div className="overflow-x-auto">
+   822→            <Table>
+   823→              <TableHeader>
+   824→                <TableRow className="border-slate-700/50 hover:bg-transparent">
+   825→                  <TableHead className="text-slate-400 font-medium">Employee</TableHead>
+   826→                  <TableHead className="text-slate-400 font-medium">Leave Type</TableHead>
+   827→                  <TableHead className="text-slate-400 font-medium">Duration</TableHead>
+   828→                  <TableHead className="text-slate-400 font-medium">Reason</TableHead>
+   829→                  <TableHead className="text-slate-400 font-medium">Status</TableHead>
+   830→                  <TableHead className="text-slate-400 font-medium">Created</TableHead>
+   831→                  <TableHead className="text-slate-400 font-medium text-right">Document</TableHead>
+   832→                  {isSuperAdmin && (
+   833→                    <TableHead className="text-slate-400 font-medium text-right">Actions</TableHead>
+   834→                  )}
+   835→                </TableRow>
+   836→              </TableHeader>
+   837→              <TableBody>
+   838→                {filteredRequests.map((request) => (
+   839→                  <TableRow
+   840→                    key={request.id}
+   841→                    className="border-slate-700/50 hover:bg-slate-700/30 transition-colors"
+   842→                  >
+   843→                    <TableCell>
+   844→                      <div>
+   845→                        <p className="text-sm font-medium text-white">{request.employee.fullName}</p>
+   846→                        <p className="text-xs text-slate-500">{request.employee.employeeId}</p>
+   847→                      </div>
+   848→                    </TableCell>
+   849→                    <TableCell>
+   850→                      <span className="text-sm text-slate-300">
+   851→                        {formatLeaveType(request.type, request.otherTypeText)}
+   852→                      </span>
+   853→                    </TableCell>
+   854→                    <TableCell>
+   855→                      <div>
+   856→                        <p className="text-sm text-white font-medium">{request.totalDays} day{request.totalDays > 1 ? 's' : ''}</p>
+   857→                        <p className="text-xs text-slate-500">
+   858→                          {formatDate(request.startDate)} - {formatDate(request.endDate)}
+   859→                        </p>
+   860→                      </div>
+   861→                    </TableCell>
+   862→                    <TableCell>
+   863→                      <p className="text-sm text-slate-300 max-w-[200px] truncate" title={request.reason}>
+   864→                        {request.reason}
+   865→                      </p>
+   866→                    </TableCell>
+   867→                    <TableCell>
+   868→                      <LeaveStatusBadge status={request.status} />
+   869→                    </TableCell>
+   870→                    <TableCell>
+   871→                      <p className="text-xs text-slate-500">{formatDate(request.createdAt)}</p>
+   872→                    </TableCell>
+   873→                    <TableCell>
+   874→                      <div className="flex items-center justify-end gap-1">
+   875→                        <Button
+   876→                          variant="ghost"
+   877→                          size="sm"
+   878→                          className="h-7 text-slate-400 hover:text-white hover:bg-slate-700/50 gap-1"
+   879→                          onClick={() => downloadLeaveRequestPdf(request)}
+   880→                          title="Download PDF"
+   881→                        >
+   882→                          <Download className="h-3.5 w-3.5" />
+   883→                        </Button>
+   884→                        <Button
+   885→                          variant="ghost"
+   886→                          size="sm"
+   887→                          className="h-7 text-slate-400 hover:text-white hover:bg-slate-700/50 gap-1"
+   888→                          onClick={() => printLeaveRequest(request)}
+   889→                          title="Print"
+   890→                        >
+   891→                          <Printer className="h-3.5 w-3.5" />
+   892→                        </Button>
+   893→                        <Button
+   894→                          variant="ghost"
+   895→                          size="sm"
+   896→                          className="h-7 text-green-400 hover:text-green-300 hover:bg-green-500/10 gap-1"
+   897→                          onClick={() => sendLeaveRequestWhatsApp(request)}
+   898→                          title="Send via WhatsApp"
+   899→                        >
+   900→                          <MessageCircle className="h-3.5 w-3.5" />
+   901→                        </Button>
+   902→                      </div>
+   903→                    </TableCell>
+   904→                    {isSuperAdmin && (
+   905→                      <TableCell>
+   906→                        {request.status === 'pending' ? (
+   907→                          <div className="flex items-center justify-end gap-1">
+   908→                            <Button
+   909→                              variant="ghost"
+   910→                              size="sm"
+   911→                              className="h-7 text-green-400 hover:text-green-300 hover:bg-green-500/10 gap-1"
+   912→                              onClick={() => openReviewDialog(request, 'approved')}
+   913→                            >
+   914→                              <CheckCircle className="h-3.5 w-3.5" />
+   915→                              Approve
+   916→                            </Button>
+   917→                            <Button
+   918→                              variant="ghost"
+   919→                              size="sm"
+   920→                              className="h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10 gap-1"
+   921→                              onClick={() => openReviewDialog(request, 'rejected')}
+   922→                            >
+   923→                              <XCircle className="h-3.5 w-3.5" />
+   924→                              Reject
+   925→                            </Button>
+   926→                          </div>
+   927→                        ) : (
+   928→                          <div className="text-right">
+   929→                            {request.reviewedBy && (
+   930→                              <p className="text-xs text-slate-500">by {request.reviewedBy}</p>
+   931→                            )}
+   932→                          </div>
+   933→                        )}
+   934→                      </TableCell>
+   935→                    )}
+   936→                  </TableRow>
+   937→                ))}
+   938→              </TableBody>
+   939→            </Table>
+   940→          </div>
+   941→        )}
+   942→      </Card>
+   943→
+   944→      {/* Create Leave Request Dialog */}
+   945→      <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+   946→        <DialogContent className="bg-slate-800 border-slate-700 text-white max-w-lg max-h-[90vh] overflow-y-auto">
+   947→          <DialogHeader>
+   948→            <DialogTitle className="text-white">New Leave Request</DialogTitle>
+   949→            <DialogDescription className="text-slate-400">
+   950→              Submit a leave request for an employee.
+   951→            </DialogDescription>
+   952→          </DialogHeader>
+   953→          <div className="space-y-4 py-4">
+   954→            {/* Employee Select */}
+   955→            <div className="space-y-2">
+   956→              <Label className="text-slate-300">Employee *</Label>
+   957→              <SearchableEmployeeSelect
+   958→                employees={employees}
+   959→                value={formData.employeeId}
+   960→                onChange={(id) => setFormData((prev) => ({ ...prev, employeeId: id }))}
+   961→              />
+   962→            </div>
+   963→
+   964→            {/* Leave Type */}
+   965→            <div className="space-y-2">
+   966→              <Label className="text-slate-300">Leave Type *</Label>
+   967→              <Select
+   968→                value={formData.type}
+   969→                onValueChange={(val) => setFormData((prev) => ({ ...prev, type: val }))}
+   970→              >
+   971→                <SelectTrigger className="bg-slate-900 border-slate-600 text-white">
+   972→                  <SelectValue placeholder="Select leave type" />
+   973→                </SelectTrigger>
+   974→                <SelectContent className="bg-slate-800 border-slate-700">
+   975→                  {LEAVE_TYPES.map((lt) => (
+   976→                    <SelectItem key={lt.value} value={lt.value}>
+   977→                      {lt.label}
+   978→                    </SelectItem>
+   979→                  ))}
+   980→                </SelectContent>
+   981→              </Select>
+   982→            </div>
+   983→
+   984→            {/* Other Type Text */}
+   985→            {formData.type === 'other' && (
+   986→              <div className="space-y-2">
+   987→                <Label className="text-slate-300">Specify Leave Type *</Label>
+   988→                <Input
+   989→                  value={formData.otherTypeText}
+   990→                  onChange={(e) => setFormData((prev) => ({ ...prev, otherTypeText: e.target.value }))}
+   991→                  placeholder="Enter leave type..."
+   992→                  className="bg-slate-900 border-slate-600 text-white"
+   993→                />
+   994→              </div>
+   995→            )}
+   996→
+   997→            {/* Date Range */}
+   998→            <div className="grid grid-cols-2 gap-4">
+   999→              <div className="space-y-2">
+  1000→                <Label className="text-slate-300">Start Date *</Label>
+  1001→                <Input
+  1002→                  type="date"
+  1003→                  value={formData.startDate}
+  1004→                  onChange={(e) => setFormData((prev) => ({ ...prev, startDate: e.target.value }))}
+  1005→                  className="bg-slate-900 border-slate-600 text-white"
+  1006→                />
+  1007→              </div>
+  1008→              <div className="space-y-2">
+  1009→                <Label className="text-slate-300">End Date *</Label>
+  1010→                <Input
+  1011→                  type="date"
+  1012→                  value={formData.endDate}
+  1013→                  onChange={(e) => setFormData((prev) => ({ ...prev, endDate: e.target.value }))}
+  1014→                  className="bg-slate-900 border-slate-600 text-white"
+  1015→                />
+  1016→              </div>
+  1017→            </div>
+  1018→
+  1019→            {/* Total Days */}
+  1020→            <div className="space-y-2">
+  1021→              <Label className="text-slate-300">Total Days</Label>
+  1022→              <div className="flex items-center gap-2">
+  1023→                <Input
+  1024→                  type="number"
+  1025→                  min={1}
+  1026→                  value={formData.totalDays}
+  1027→                  onChange={(e) => setFormData((prev) => ({ ...prev, totalDays: parseInt(e.target.value) || 1 }))}
+  1028→                  className="bg-slate-900 border-slate-600 text-white w-24"
+  1029→                />
+  1030→                <span className="text-sm text-slate-400">day{formData.totalDays > 1 ? 's' : ''}</span>
+  1031→              </div>
+  1032→            </div>
+  1033→
+  1034→            {/* Reason */}
+  1035→            <div className="space-y-2">
+  1036→              <Label className="text-slate-300">Reason *</Label>
+  1037→              <Textarea
+  1038→                value={formData.reason}
+  1039→                onChange={(e) => setFormData((prev) => ({ ...prev, reason: e.target.value }))}
+  1040→                placeholder="Enter the reason for the leave..."
+  1041→                className="bg-slate-900 border-slate-600 text-white min-h-[80px]"
+  1042→              />
+  1043→            </div>
+  1044→          </div>
+  1045→          <DialogFooter>
+  1046→            <Button
+  1047→              variant="ghost"
+  1048→              onClick={() => setCreateDialogOpen(false)}
+  1049→              className="text-slate-400 hover:text-white"
+  1050→            >
+  1051→              Cancel
+  1052→            </Button>
+  1053→            <Button
+  1054→              onClick={handleCreate}
+  1055→              disabled={isSubmitting}
+  1056→              className="bg-blue-500 hover:bg-blue-600 text-white gap-2"
+  1057→            >
+  1058→              {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+  1059→              Submit Request
+  1060→            </Button>
+  1061→          </DialogFooter>
+  1062→        </DialogContent>
+  1063→      </Dialog>
+  1064→
+  1065→      {/* Review Confirmation Dialog */}
+  1066→      <Dialog open={reviewDialogOpen} onOpenChange={setReviewDialogOpen}>
+  1067→        <DialogContent className="bg-slate-800 border-slate-700 text-white max-w-md">
+  1068→          <DialogHeader>
+  1069→            <DialogTitle className="text-white">
+  1070→              {reviewAction === 'approved' ? 'Approve Leave Request' : 'Reject Leave Request'}
+  1071→            </DialogTitle>
+  1072→            <DialogDescription className="text-slate-400">
+  1073→              {reviewingRequest && (
+  1074→                <>
+  1075→                  You are about to {reviewAction === 'approved' ? 'approve' : 'reject'} the{' '}
+  1076→                  <span className="text-white font-medium">{formatLeaveType(reviewingRequest.type, reviewingRequest.otherTypeText)}</span> leave
+  1077→                  request for <span className="text-white font-medium">{reviewingRequest.employee.fullName}</span>{' '}
+  1078→                  ({reviewingRequest.totalDays} day{reviewingRequest.totalDays > 1 ? 's' : ''}).
+  1079→                </>
+  1080→              )}
+  1081→            </DialogDescription>
+  1082→          </DialogHeader>
+  1083→          <DialogFooter className="gap-2">
+  1084→            <Button
+  1085→              variant="ghost"
+  1086→              onClick={() => setReviewDialogOpen(false)}
+  1087→              className="text-slate-400 hover:text-white"
+  1088→            >
+  1089→              Cancel
+  1090→            </Button>
+  1091→            <Button
+  1092→              onClick={handleReview}
+  1093→              disabled={isReviewing}
+  1094→              className={cn(
+  1095→                'gap-2 text-white',
+  1096→                reviewAction === 'approved'
+  1097→                  ? 'bg-green-500 hover:bg-green-600'
+  1098→                  : 'bg-red-500 hover:bg-red-600'
+  1099→              )}
+  1100→            >
+  1101→              {isReviewing && <Loader2 className="h-4 w-4 animate-spin" />}
+  1102→              {reviewAction === 'approved' ? 'Approve' : 'Reject'}
+  1103→            </Button>
+  1104→          </DialogFooter>
+  1105→        </DialogContent>
+  1106→      </Dialog>
+  1107→    </div>
+  1108→  );
+  1109→}
+  1110→

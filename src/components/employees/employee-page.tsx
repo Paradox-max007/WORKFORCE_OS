@@ -25,6 +25,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
+import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
 import { cn } from '@/lib/utils';
 import type { CampWithCount, DocumentStatus, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
@@ -35,8 +36,8 @@ const EMPTY_FORM: EmployeeInput = {
   full_name: '', nationality: null, date_of_birth: null, phone: null, email: null,
   address: null, emergency_contact: null, position: null, join_date: null,
   company_name: null, passport_number: null, passport_status: null, id_number: null,
-  id_status: null, current_site_id: null, camp_id: null, photo: null,
-  is_team_leader: false, team_leader_site_id: null,
+  id_status: null, current_site_id: null, camp_id: null, camp_block: null, camp_room: null,
+  photo: null, is_team_leader: false, team_leader_site_id: null,
 };
 
 const DOC_STATUSES: { value: DocumentStatus; label: string; cls: string }[] = [
@@ -84,6 +85,8 @@ export function EmployeePage() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [regionFilter, setRegionFilter] = useState('all');
+  const [countryFilter, setCountryFilter] = useState('all');
   const [page, setPage] = useState(1);
   const PER_PAGE = 20;
 
@@ -132,22 +135,58 @@ export function EmployeePage() {
   const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
   const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
 
+  // countries present in the directory, grouped by region (Africans, Asians, …)
+  const regionCountries = useMemo(
+    () => countriesByRegion((employees ?? []).map((e) => e.nationality)),
+    [employees],
+  );
+  const countryOptions = useMemo(() => {
+    const present = new Set((employees ?? []).map((e) => e.nationality).filter(Boolean) as string[]);
+    if (regionFilter === 'all') {
+      return Object.values(regionCountries).flat().sort((a, b) => a.localeCompare(b));
+    }
+    if (regionFilter === '__others__') {
+      const others = [...present].filter((c) =>
+        !NATIONALITY_REGIONS.some((r) => r.countries.some((rc) => rc.toLowerCase() === c.toLowerCase())),
+      );
+      return others.sort((a, b) => a.localeCompare(b));
+    }
+    const region = NATIONALITY_REGIONS.find((r) => r.key === regionFilter);
+    if (!region) return [];
+    const inRegion = region.countries.filter((c) => present.has(c));
+    return inRegion.length > 0 ? inRegion : region.countries;
+  }, [regionFilter, regionCountries, employees]);
+
   // filtering
   const filtered = useMemo(() => {
     const list = employees ?? [];
     const q = debouncedSearch.toLowerCase().trim();
+    const region = regionFilter === 'all' ? null : NATIONALITY_REGIONS.find((r) => r.key === regionFilter) ?? null;
     return list.filter((e) => {
       if (statusFilter === 'active' && e.status !== 'active') return false;
       if (statusFilter === 'working' && (e.status !== 'active' || !e.current_site_id)) return false;
       if (statusFilter === 'idle' && (e.status !== 'active' || e.current_site_id)) return false;
       if (statusFilter === 'pending_deletion' && e.status !== 'pending_deletion') return false;
+      // nationality region + country filters
+      if (region) {
+        const nat = (e.nationality ?? '').trim().toLowerCase();
+        if (!nat) return false;
+        if (region.key === '__others__') {
+          const known = NATIONALITY_REGIONS.some((r) =>
+            r.countries.some((c) => c.toLowerCase() === nat));
+          if (known) return false;
+        } else if (!region.countries.some((c) => c.toLowerCase() === nat)) {
+          return false;
+        }
+      }
+      if (countryFilter !== 'all' && (e.nationality ?? '') !== countryFilter) return false;
       if (q) {
         const hay = `${e.full_name} ${e.employee_code} ${e.nationality ?? ''} ${e.phone ?? ''} ${e.position ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [employees, debouncedSearch, statusFilter]);
+  }, [employees, debouncedSearch, statusFilter, regionFilter, countryFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
   const safePage = Math.min(page, totalPages);
@@ -179,6 +218,8 @@ export function EmployeePage() {
       id_status: emp.id_status,
       current_site_id: emp.current_site_id,
       camp_id: emp.camp_id,
+      camp_block: emp.camp_block,
+      camp_room: emp.camp_room,
       photo: emp.photo,
       is_team_leader: emp.is_team_leader,
       team_leader_site_id: emp.team_leader_site_id,
@@ -216,6 +257,8 @@ export function EmployeePage() {
       company_name: form.company_name ? nullify(form.company_name) : null,
       passport_number: form.passport_number ? nullify(form.passport_number) : null,
       id_number: form.id_number ? nullify(form.id_number) : null,
+      camp_block: form.camp_id ? nullify(form.camp_block ?? '') : null,
+      camp_room: form.camp_id ? nullify(form.camp_room ?? '') : null,
     };
     try {
       if (editingId) {
@@ -329,8 +372,35 @@ export function EmployeePage() {
             <SelectItem value="pending_deletion">Pending Deletion</SelectItem>
           </SelectContent>
         </Select>
-        {(search || statusFilter !== 'all') && (
-          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setPage(1); }}>
+        {/* Nationality region + country filters (e.g. Africans → Burundi) */}
+        <Select
+          value={regionFilter}
+          onValueChange={(v) => { setRegionFilter(v); setCountryFilter('all'); setPage(1); }}
+        >
+          <SelectTrigger className="h-10 w-44 bg-card" aria-label="Filter by nationality region">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Regions</SelectItem>
+            {NATIONALITY_REGIONS.map((r) => (
+              <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>
+            ))}
+            <SelectItem value="__others__">Others</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={countryFilter} onValueChange={(v) => { setCountryFilter(v); setPage(1); }}>
+          <SelectTrigger className="h-10 w-44 bg-card" aria-label="Filter by nationality country">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Countries</SelectItem>
+            {countryOptions.map((c) => (
+              <SelectItem key={c} value={c}>{c}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {(search || statusFilter !== 'all' || regionFilter !== 'all' || countryFilter !== 'all') && (
+          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setRegionFilter('all'); setCountryFilter('all'); setPage(1); }}>
             <X size={14} className="mr-1" /> Reset
           </Button>
         )}
@@ -602,8 +672,9 @@ export function EmployeePage() {
                   <Input value={form.emergency_contact ?? ''} onChange={(e) => setForm((f) => ({ ...f, emergency_contact: e.target.value }))} placeholder="+966 5xx xxx xxxx" className="h-11" />
                 </div>
                 <div className="space-y-2 sm:col-span-2">
-                  <Label>Address</Label>
-                  <Textarea value={form.address ?? ''} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} placeholder="Labour camp / accommodation address" rows={2} />
+                  <Label>Home Country Address</Label>
+                  <Textarea value={form.address ?? ''} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} placeholder="Home country address as per passport / official documents (house, street, city, country)" rows={2} />
+                  <p className="text-[11px] text-muted-foreground">As printed in the passport / official documents — not the accommodation address.</p>
                 </div>
               </div>
             </TabsContent>
@@ -652,25 +723,41 @@ export function EmployeePage() {
                   </div>
                 )}
 
-                {/* Camp assignment */}
+                {/* Camp assignment + block/room */}
                 <div className="space-y-2 sm:col-span-2">
                   <Label className="flex items-center gap-1.5"><Tent size={13} className="text-amber-500" /> Accommodation Camp</Label>
-                  <Select
-                    value={form.camp_id ?? 'none'}
-                    onValueChange={(v) => setForm((f) => ({ ...f, camp_id: v === 'none' ? null : v }))}
-                  >
-                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">🟡 No camp assigned</SelectItem>
-                      {activeCamps.map((c) => (
-                        <SelectItem key={c.id} value={c.id}>
-                          {c.name}{c.employee_count != null ? ` (${c.employee_count})` : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Select
+                      value={form.camp_id ?? 'none'}
+                      onValueChange={(v) => setForm((f) => ({ ...f, camp_id: v === 'none' ? null : v }))}
+                    >
+                      <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">🟡 No camp assigned</SelectItem>
+                        {activeCamps.map((c) => (
+                          <SelectItem key={c.id} value={c.id}>
+                            {c.name}{c.employee_count != null ? ` (${c.employee_count})` : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      value={form.camp_block ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, camp_block: e.target.value }))}
+                      disabled={!form.camp_id}
+                      placeholder={form.camp_id ? 'Block no. (e.g. B)' : 'Block — pick a camp first'}
+                      className="h-11 disabled:opacity-50"
+                    />
+                    <Input
+                      value={form.camp_room ?? ''}
+                      onChange={(e) => setForm((f) => ({ ...f, camp_room: e.target.value }))}
+                      disabled={!form.camp_id}
+                      placeholder={form.camp_id ? 'Room no. (e.g. 204)' : 'Room — pick a camp first'}
+                      className="h-11 disabled:opacity-50"
+                    />
+                  </div>
                   <p className="text-[11px] text-muted-foreground">
-                    Where the employee stays. Each employee belongs to exactly one camp — change it anytime here or from the Camps page.
+                    Where the employee stays — camp, block and room number. Each employee belongs to exactly one camp — change it anytime here or from the Camps page.
                   </p>
                 </div>
 

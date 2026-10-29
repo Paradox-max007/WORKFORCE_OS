@@ -139,6 +139,14 @@ const nextEmployeeCode = (): string => {
 // API implementation
 // ---------------------------------------------------------------------------
 
+/** Sites the current profile is allowed to mark (super admins → null = every site). */
+const mySiteAllowance = (): Set<string> | null => {
+  const me = currentProfile();
+  if (!me) return new Set();
+  if (me.role === 'super_admin') return null;
+  return new Set(db.siteAssignments.filter((x) => x.profile_id === me.id).map((x) => x.site_id));
+};
+
 export const demoApi = {
   mode: 'demo' as const,
 
@@ -255,6 +263,30 @@ export const demoApi = {
     saveAndEmit(['menu_permission']);
   },
 
+  // ---- admin site assignments (attendance scoping) ---------------------------
+  async getSiteAssignments(profileId: string): Promise<string[]> {
+    return db.siteAssignments.filter((x) => x.profile_id === profileId).map((x) => x.site_id);
+  },
+
+  async setSiteAssignment(profileId: string, siteId: string, allowed: boolean): Promise<void> {
+    const me = currentProfile();
+    if (!me || me.role !== 'super_admin') throw new Error('Only super admins can assign sites');
+    const target = db.profiles.find((p) => p.id === profileId);
+    if (!target) throw new Error('Profile not found');
+    if (target.role === 'super_admin') throw new Error('Super admins can access every site already');
+    if (allowed) {
+      if (!db.sites.some((s) => s.id === siteId)) throw new Error('Site not found');
+      if (!db.siteAssignments.some((x) => x.profile_id === profileId && x.site_id === siteId)) {
+        db.siteAssignments.push({ profile_id: profileId, site_id: siteId });
+      }
+    } else {
+      db.siteAssignments = db.siteAssignments.filter(
+        (x) => !(x.profile_id === profileId && x.site_id === siteId),
+      );
+    }
+    saveAndEmit(['admin_site']);
+  },
+
   // ---- sites -----------------------------------------------------------------
   async listSites(): Promise<SiteWithCount[]> {
     return db.sites.map((s) => ({
@@ -348,7 +380,10 @@ export const demoApi = {
     saveAndEmit(['camp', 'employee']);
   },
 
-  async assignEmployeeCamp(employeeId: string, campId: string | null): Promise<EmployeeVM> {
+  async assignEmployeeCamp(
+    employeeId: string, campId: string | null,
+    block?: string | null, room?: string | null,
+  ): Promise<EmployeeVM> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
     if (campId) {
@@ -356,6 +391,8 @@ export const demoApi = {
       if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
     }
     e.camp_id = campId;
+    e.camp_block = campId ? (block ?? '').trim() || null : null;
+    e.camp_room = campId ? (room ?? '').trim() || null : null;
     e.updated_at = nowISO();
     saveAndEmit(['employee', 'camp']);
     return attachEmployeeVM(e);
@@ -400,6 +437,8 @@ export const demoApi = {
       id_status: input.id_status,
       current_site_id: input.current_site_id || null,
       camp_id: input.camp_id || null,
+      camp_block: input.camp_id ? (input.camp_block ?? '').trim() || null : null,
+      camp_room: input.camp_id ? (input.camp_room ?? '').trim() || null : null,
       rating: 5,
       status: 'active',
       photo: input.photo || null,
@@ -447,6 +486,8 @@ export const demoApi = {
       id_status: input.id_status,
       current_site_id: input.current_site_id || null,
       camp_id: input.camp_id || null,
+      camp_block: input.camp_id ? (input.camp_block ?? '').trim() || null : null,
+      camp_room: input.camp_id ? (input.camp_room ?? '').trim() || null : null,
       photo: input.photo || null,
       is_team_leader: input.is_team_leader,
       team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
@@ -530,10 +571,14 @@ export const demoApi = {
       saveAndEmit(['attendance']);
     }
 
+    // normal admins only see rows for employees at their assigned sites
+    const allowedSites = mySiteAllowance();
     return db.attendance.filter((a) => {
       if (!a.date.startsWith(month) || a.is_hidden) return false;
       const e = db.employees.find((x) => x.id === a.employee_id);
-      return e ? e.status !== 'deleted' : false;
+      if (!e || e.status === 'deleted') return false;
+      if (allowedSites === null) return true;
+      return e.current_site_id !== null && allowedSites.has(e.current_site_id);
     });
   },
 
@@ -542,6 +587,20 @@ export const demoApi = {
   async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
+
+    // site-scoped marking: normal admins only mark their assigned sites
+    const me = currentProfile();
+    if (me && me.role !== 'super_admin') {
+      if (!e.current_site_id) {
+        throw new Error('This employee has no site — only super admins can mark idle employees');
+      }
+      const assigned = db.siteAssignments.some(
+        (x) => x.profile_id === me.id && x.site_id === e.current_site_id,
+      );
+      if (!assigned) {
+        throw new Error('Access denied — you can only mark attendance for your assigned sites');
+      }
+    }
 
     const trimmed = (value ?? '').trim();
     const prev = db.attendance.find((a) => a.employee_id === employeeId && a.date === date);

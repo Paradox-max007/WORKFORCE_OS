@@ -32,7 +32,7 @@ create table if not exists public.profiles (
 create table if not exists public.menu_permission (
   id          uuid primary key default gen_random_uuid(),
   profile_id  uuid not null references public.profiles(id) on delete cascade,
-  menu_key    text not null check (menu_key in ('employees','sites','attendance','leave_requests','cancellation_requests','notifications')),
+  menu_key    text not null check (menu_key in ('employees','sites','camps','attendance','leave_requests','cancellation_requests','notifications')),
   allowed     boolean not null default false,
   unique (profile_id, menu_key)
 );
@@ -67,6 +67,8 @@ create table if not exists public.employee (
   id_status           text check (id_status in ('Valid','Expired','N/A')),
   current_site_id     uuid references public.site(id) on delete set null,
   camp_id             uuid references public.camp(id) on delete set null,
+  camp_block          text,                           -- block number inside the camp
+  camp_room           text,                           -- room number inside the camp
   rating              numeric(2,1) not null default 5.0 check (rating >= 0 and rating <= 5),
   status              text not null default 'active' check (status in ('active','pending_deletion','deleted')),
   photo               text,                            -- base64 data-url
@@ -86,6 +88,26 @@ create table if not exists public.camp (
   is_active   boolean not null default true,
   created_at  timestamptz not null default now()
 );
+
+-- Sites assigned to normal admins: they can only MARK ATTENDANCE for the crews
+-- of the sites assigned here (super admins can mark every site).
+create table if not exists public.admin_site (
+  id         uuid primary key default gen_random_uuid(),
+  profile_id uuid not null references public.profiles(id) on delete cascade,
+  site_id    uuid not null references public.site(id) on delete cascade,
+  unique (profile_id, site_id)
+);
+
+-- ---------------------------------------------------------------------------
+-- Migration guards (make re-running this file safe on older installs)
+-- ---------------------------------------------------------------------------
+-- older installs created menu_permission without the 'camps' menu key
+alter table public.menu_permission drop constraint if exists menu_permission_menu_key_check;
+alter table public.menu_permission add constraint menu_permission_menu_key_check
+  check (menu_key in ('employees','sites','camps','attendance','leave_requests','cancellation_requests','notifications'));
+-- camp block / room columns for older installs
+alter table public.employee add column if not exists camp_block text;
+alter table public.employee add column if not exists camp_room text;
 
 -- Daily attendance (Excel-style marking: hours worked, or absent)
 create table if not exists public.attendance (
@@ -211,6 +233,8 @@ create index if not exists idx_uniform_emp          on public.uniform_registry(e
 create index if not exists idx_uniform_token        on public.uniform_registry(token_number);
 create index if not exists idx_uniform_created      on public.uniform_registry(created_at);
 create index if not exists idx_menu_perm_profile    on public.menu_permission(profile_id);
+create index if not exists idx_admin_site_profile   on public.admin_site(profile_id);
+create index if not exists idx_admin_site_site      on public.admin_site(site_id);
 
 -- ============================================================================
 -- 3. HELPER + SECURITY FUNCTIONS
@@ -320,6 +344,7 @@ create trigger trg_profiles_touch before update on public.profiles
 
 alter table public.profiles            enable row level security;
 alter table public.menu_permission     enable row level security;
+alter table public.admin_site         enable row level security;
 alter table public.site                enable row level security;
 alter table public.camp                enable row level security;
 alter table public.employee            enable row level security;
@@ -339,6 +364,11 @@ create policy profiles_select on public.profiles
 -- menu permissions: read self, super admins read all
 drop policy if exists menu_perm_select on public.menu_permission;
 create policy menu_perm_select on public.menu_permission
+  for select using (profile_id = auth.uid() or public.is_super_admin());
+
+-- site assignments: read self, super admins read all (writes via RPC below)
+drop policy if exists admin_site_select on public.admin_site;
+create policy admin_site_select on public.admin_site
   for select using (profile_id = auth.uid() or public.is_super_admin());
 
 -- notifications: read + update (mark read) own rows
@@ -445,6 +475,28 @@ begin
   insert into public.menu_permission (profile_id, menu_key, allowed)
   values (p_profile_id, p_menu_key, p_allowed)
   on conflict (profile_id, menu_key) do update set allowed = p_allowed;
+end; $$;
+
+-- Assign / unassign a site to a normal admin (super admin only). Assigned admins
+-- can mark attendance for the crews of their assigned sites only.
+create or replace function public.set_admin_site(p_profile_id uuid, p_site_id uuid, p_allowed boolean)
+returns void language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can assign sites'; end if;
+  if (select role from public.profiles where id = p_profile_id) = 'super_admin' then
+    raise exception 'Super admins can access every site already';
+  end if;
+  if p_allowed then
+    if not exists (select 1 from public.site where id = p_site_id) then
+      raise exception 'Site not found';
+    end if;
+    insert into public.admin_site (profile_id, site_id) values (p_profile_id, p_site_id)
+    on conflict (profile_id, site_id) do nothing;
+  else
+    delete from public.admin_site where profile_id = p_profile_id and site_id = p_site_id;
+  end if;
 end; $$;
 
 -- ============================================================================
@@ -564,8 +616,13 @@ begin
   delete from public.camp where id = p_id;
 end; $$;
 
--- Move an employee to a camp (one employee → exactly one camp; p_camp_id null unassigns)
-create or replace function public.assign_employee_camp(p_employee_id uuid, p_camp_id uuid default null)
+-- Move an employee to a camp (one employee → exactly one camp; p_camp_id null
+-- unassigns and clears the block/room). p_block / p_room capture where inside
+-- the camp the employee stays.
+create or replace function public.assign_employee_camp(
+  p_employee_id uuid, p_camp_id uuid default null,
+  p_block text default null, p_room text default null
+)
 returns public.employee language plpgsql
 security definer set search_path = public
 as $$
@@ -577,8 +634,12 @@ begin
   if p_camp_id is not null and not exists (select 1 from public.camp where id = p_camp_id and is_active) then
     raise exception 'The selected camp does not exist or is inactive';
   end if;
-  update public.employee set camp_id = p_camp_id, updated_at = now()
-  where id = p_employee_id and status <> 'deleted'
+  update public.employee
+     set camp_id    = p_camp_id,
+         camp_block = case when p_camp_id is null then null else nullif(btrim(coalesce(p_block, '')), '') end,
+         camp_room  = case when p_camp_id is null then null else nullif(btrim(coalesce(p_room, '')), '') end,
+         updated_at = now()
+   where id = p_employee_id and status <> 'deleted'
   returning * into result;
   if result.id is null then raise exception 'Employee not found'; end if;
   return result;
@@ -606,6 +667,8 @@ as $$
 declare result public.employee;
 declare v_site uuid := nullif(p_employee->>'current_site_id','');
 declare v_camp uuid := nullif(p_employee->>'camp_id','');
+declare v_block text := nullif(btrim(coalesce(p_employee->>'camp_block','')), '');
+declare v_room  text := nullif(btrim(coalesce(p_employee->>'camp_room','')), '');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
 declare conflicting public.employee;
@@ -620,6 +683,11 @@ begin
   if v_camp is not null and not exists (select 1 from public.camp where id = v_camp and is_active) then
     raise exception 'The selected camp does not exist or is inactive';
   end if;
+  -- block/room only make sense while the employee stays in a camp
+  if v_camp is null then
+    v_block := null;
+    v_room := null;
+  end if;
 
   -- one team leader per site
   if v_is_leader and v_leader_site is not null then
@@ -633,7 +701,8 @@ begin
   insert into public.employee (
     full_name, employee_code, nationality, date_of_birth, phone, email, address,
     emergency_contact, position, join_date, company_name, passport_number, passport_status,
-    id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id, camp_id
+    id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id,
+    camp_id, camp_block, camp_room
   ) values (
     p_employee->>'full_name', public.next_employee_code(),
     nullif(p_employee->>'nationality',''), (p_employee->>'date_of_birth')::date,
@@ -642,7 +711,8 @@ begin
     (p_employee->>'join_date')::date, nullif(p_employee->>'company_name',''),
     nullif(p_employee->>'passport_number',''), nullif(p_employee->>'passport_status',''),
     nullif(p_employee->>'id_number',''), nullif(p_employee->>'id_status',''),
-    v_site, 5.0, 'active', nullif(p_employee->>'photo',''), v_is_leader, v_leader_site, v_camp
+    v_site, 5.0, 'active', nullif(p_employee->>'photo',''), v_is_leader, v_leader_site, v_camp,
+    v_block, v_room
   ) returning * into result;
   return result;
 end; $$;
@@ -654,6 +724,8 @@ as $$
 declare result public.employee;
 declare v_site uuid := nullif(p_employee->>'current_site_id','');
 declare v_camp uuid := nullif(p_employee->>'camp_id','');
+declare v_block text := nullif(btrim(coalesce(p_employee->>'camp_block','')), '');
+declare v_room  text := nullif(btrim(coalesce(p_employee->>'camp_room','')), '');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
 declare conflicting public.employee;
@@ -665,6 +737,11 @@ begin
   end if;
   if v_camp is not null and not exists (select 1 from public.camp where id = v_camp and is_active) then
     raise exception 'The selected camp does not exist or is inactive';
+  end if;
+  -- block/room only make sense while the employee stays in a camp
+  if v_camp is null then
+    v_block := null;
+    v_room := null;
   end if;
 
   if v_is_leader and v_leader_site is not null then
@@ -693,6 +770,8 @@ begin
     id_status         = nullif(p_employee->>'id_status',''),
     current_site_id   = v_site,
     camp_id           = v_camp,
+    camp_block        = v_block,
+    camp_room         = v_room,
     photo             = nullif(p_employee->>'photo',''),
     is_team_leader    = v_is_leader,
     team_leader_site_id = case when v_is_leader then v_leader_site else null end,
@@ -799,7 +878,8 @@ end; $$;
 -- 9. ATTENDANCE RPCs
 -- ============================================================================
 
--- Fetch a month (lazily auto-creating missing records, never for future days)
+-- Fetch a month (lazily auto-creating missing records, never for future days).
+-- Normal admins only receive rows for employees working at THEIR assigned sites.
 create or replace function public.get_month_attendance(p_month text)
 returns setof public.attendance language plpgsql
 security definer set search_path = public
@@ -841,6 +921,13 @@ begin
     where to_char(a.date, 'YYYY-MM') = p_month
       and not a.is_hidden
       and e.status <> 'deleted'
+      and (
+        public.is_super_admin()
+        or exists (
+          select 1 from public.admin_site s
+          where s.profile_id = auth.uid() and s.site_id = e.current_site_id
+        )
+      )
     order by a.date;
 end; $$;
 
@@ -860,9 +947,24 @@ declare
   ot_delta numeric := 0;
   walk date;
   absent_dates date[] := array[p_date];
+  v_emp_site uuid;
 begin
   if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
     raise exception 'Access denied';
+  end if;
+
+  -- site-scoped marking: normal admins may only mark attendance for their
+  -- assigned sites (and never for idle employees — super admins can).
+  select current_site_id into v_emp_site from public.employee where id = p_employee_id;
+  if not public.is_super_admin() then
+    if v_emp_site is null then
+      raise exception 'This employee has no site — only super admins can mark idle employees';
+    end if;
+    if not exists (
+      select 1 from public.admin_site where profile_id = auth.uid() and site_id = v_emp_site
+    ) then
+      raise exception 'Access denied — you can only mark attendance for your assigned sites';
+    end if;
   end if;
 
   -- parse the cell value
@@ -1197,6 +1299,7 @@ do $$
 begin
   alter publication supabase_realtime add table public.profiles;
   alter publication supabase_realtime add table public.menu_permission;
+  alter publication supabase_realtime add table public.admin_site;
   alter publication supabase_realtime add table public.site;
   alter publication supabase_realtime add table public.camp;
   alter publication supabase_realtime add table public.employee;

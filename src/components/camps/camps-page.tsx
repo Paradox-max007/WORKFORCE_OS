@@ -806,11 +806,12 @@ function CampFormDialog({
 
 // ---------------------------------------------------------------------------
 // Move resident dialog (per-row + bulk). The selected destination is fully
-// controlled by the parent so it resets cleanly between openings.
+// controlled by the parent so it resets cleanly between openings. Moving to
+// another camp requires the new BLOCK and ROOM number where the employee stays.
 // ---------------------------------------------------------------------------
 function MoveResidentDialog({
   open, onOpenChange, title, description, destinations, allowNoCamp, busy,
-  target, onTargetChange, onConfirm,
+  target, onTargetChange, onConfirm, showRoom, initialBlock = '', initialRoom = '',
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -821,9 +822,18 @@ function MoveResidentDialog({
   busy: boolean;
   target: string;
   onTargetChange: (value: string) => void;
-  onConfirm: (campId: string | null) => void;
+  onConfirm: (campId: string | null, block: string, room: string) => void;
+  /** bulk moves skip the block/room prompt (they're edited per-resident after) */
+  showRoom: boolean;
+  initialBlock?: string;
+  initialRoom?: string;
 }) {
   const selectId = useId();
+  const [block, setBlock] = useState(initialBlock);
+  const [room, setRoom] = useState(initialRoom);
+
+  const blockInvalid = showRoom && target !== '__none__' && block.trim() === '';
+  const roomInvalid = showRoom && target !== '__none__' && room.trim() === '';
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -865,6 +875,33 @@ function MoveResidentDialog({
               No other active camps available{allowNoCamp ? '' : ' — create or reactivate one first'}.
             </p>
           )}
+
+          {showRoom && target && target !== '__none__' && (
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <div className="space-y-1.5">
+                <Label htmlFor={`${selectId}-block`}>Block no. *</Label>
+                <Input
+                  id={`${selectId}-block`}
+                  value={block}
+                  onChange={(e) => setBlock(e.target.value)}
+                  placeholder="e.g. B"
+                  className="h-11"
+                />
+                {blockInvalid && <p className="text-xs text-rose-500">Block is required.</p>}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor={`${selectId}-room`}>Room no. *</Label>
+                <Input
+                  id={`${selectId}-room`}
+                  value={room}
+                  onChange={(e) => setRoom(e.target.value)}
+                  placeholder="e.g. 204"
+                  className="h-11"
+                />
+                {roomInvalid && <p className="text-xs text-rose-500">Room is required.</p>}
+              </div>
+            </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -872,8 +909,8 @@ function MoveResidentDialog({
             Cancel
           </Button>
           <Button
-            onClick={() => onConfirm(target === '__none__' ? null : target)}
-            disabled={!target || busy}
+            onClick={() => onConfirm(target === '__none__' ? null : target, block.trim(), room.trim())}
+            disabled={!target || busy || blockInvalid || roomInvalid}
             className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
           >
             {busy ? <Loader2 size={16} className="animate-spin" /> : <ArrowLeftRight size={16} />}
@@ -899,6 +936,18 @@ function CampResidentsView({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pickerValue, setPickerValue] = useState<string | null>(null);
   const [addingId, setAddingId] = useState<string | null>(null);
+
+  // "assign into this camp" dialog (block + room are required)
+  const [assignTarget, setAssignTarget] = useState<EmployeeVM | null>(null);
+  const [assignBlock, setAssignBlock] = useState('');
+  const [assignRoom, setAssignRoom] = useState('');
+  const [assigning, setAssigning] = useState(false);
+
+  // "edit block/room" dialog for an existing resident
+  const [editRoomEmp, setEditRoomEmp] = useState<EmployeeVM | null>(null);
+  const [editRoomBlock, setEditRoomBlock] = useState('');
+  const [editRoomValue, setEditRoomValue] = useState('');
+  const [savingRoom, setSavingRoom] = useState(false);
 
   const [moveEmp, setMoveEmp] = useState<EmployeeVM | null>(null);
   const [moveTarget, setMoveTarget] = useState('');
@@ -969,37 +1018,68 @@ function CampResidentsView({
     });
   };
 
-  // ---- add / transfer a resident into this camp -------------------------------
-  const handleAdd = async (id: string | null) => {
+  // ---- add / transfer a resident into this camp (block & room required) --------
+  const handlePickEmployee = (id: string | null) => {
     setPickerValue(null);
-    if (!id || addingId || !camp.is_active) return;
+    if (!id || !camp.is_active) return;
     const emp = (employees ?? []).find((e) => e.id === id);
     if (!emp) return;
     setAddingId(id);
+    setAssignBlock('');
+    setAssignRoom('');
+    setAssignTarget(emp);
+    setAddingId(null);
+  };
+
+  const handleConfirmAssign = async () => {
+    if (!assignTarget || assigning) return;
+    setAssigning(true);
     try {
-      await dataApi.assignEmployeeCamp(id, camp.id);
+      await dataApi.assignEmployeeCamp(assignTarget.id, camp.id, assignBlock, assignRoom);
       toast.success(`Moved to ${camp.name}`, {
-        description: emp.camp_name
-          ? `${emp.full_name} was transferred from "${emp.camp_name}" to "${camp.name}".`
-          : `${emp.full_name} now stays at "${camp.name}".`,
+        description: `${assignTarget.full_name} now stays at "${camp.name}" — Block ${assignBlock}, Room ${assignRoom}.`,
       });
+      setAssignTarget(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to add the resident');
     } finally {
-      setAddingId(null);
+      setAssigning(false);
+    }
+  };
+
+  // ---- update an existing resident's block / room ------------------------------
+  const openEditRoom = (emp: EmployeeVM) => {
+    setEditRoomBlock(emp.camp_block ?? '');
+    setEditRoomValue(emp.camp_room ?? '');
+    setEditRoomEmp(emp);
+  };
+
+  const handleSaveRoom = async () => {
+    if (!editRoomEmp || savingRoom) return;
+    setSavingRoom(true);
+    try {
+      await dataApi.assignEmployeeCamp(editRoomEmp.id, camp.id, editRoomBlock, editRoomValue);
+      toast.success('Room updated', {
+        description: `${editRoomEmp.full_name} — Block ${editRoomBlock || '—'}, Room ${editRoomValue || '—'} at "${camp.name}".`,
+      });
+      setEditRoomEmp(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update the room');
+    } finally {
+      setSavingRoom(false);
     }
   };
 
   // ---- move one resident to another active camp (or no camp) ------------------
-  const handleMove = async (emp: EmployeeVM, campId: string | null) => {
+  const handleMove = async (emp: EmployeeVM, campId: string | null, block: string, room: string) => {
     if (moving) return;
     setMoving(true);
     try {
-      await dataApi.assignEmployeeCamp(emp.id, campId);
+      await dataApi.assignEmployeeCamp(emp.id, campId, block, room);
       if (campId) {
         const dest = destinations.find((c) => c.id === campId);
         toast.success('Resident moved', {
-          description: `${emp.full_name} was moved from "${camp.name}" to "${dest?.name ?? 'another camp'}".`,
+          description: `${emp.full_name} was moved from "${camp.name}" to "${dest?.name ?? 'another camp'}" — Block ${block || '—'}, Room ${room || '—'}.`,
         });
       } else {
         toast.success('Resident moved out', {
@@ -1016,14 +1096,14 @@ function CampResidentsView({
   };
 
   // ---- bulk move selected residents to an active camp -------------------------
-  const handleBulkMove = async (campId: string) => {
+  const handleBulkMove = async (campId: string, block: string, room: string) => {
     if (!campId || selected.size === 0 || bulkMoving) return;
     const dest = destinations.find((c) => c.id === campId);
     setBulkMoving(true);
     try {
-      await Promise.all([...selected].map((id) => dataApi.assignEmployeeCamp(id, campId)));
+      await Promise.all([...selected].map((id) => dataApi.assignEmployeeCamp(id, campId, block, room)));
       toast.success(`${selected.size} resident${selected.size === 1 ? '' : 's'} moved`, {
-        description: `They were moved from "${camp.name}" to "${dest?.name ?? 'another camp'}".`,
+        description: `They were moved from "${camp.name}" to "${dest?.name ?? 'another camp'}"${block ? ` — Block ${block}` : ''}${room ? `, Room ${room}` : ''}.`,
       });
       setSelected(new Set());
       setBulkMoveOpen(false);
@@ -1140,13 +1220,13 @@ function CampResidentsView({
             <EmployeeCombobox
               employees={addable}
               value={pickerValue}
-              onChange={handleAdd}
+              onChange={handlePickEmployee}
               disabled={loading || !!addingId || !camp.is_active}
               placeholder={camp.is_active ? 'Add resident to this camp…' : 'Camp is inactive'}
               emptyText="No employees available."
             />
             <p className="mt-1.5 text-[11px] text-muted-foreground">
-              Employees not yet in a camp, or transfer from another camp.
+              Employees not yet in a camp, or transfer from another camp — you'll pick their block & room next.
             </p>
           </div>
           {selected.size > 0 && (
@@ -1220,6 +1300,7 @@ function CampResidentsView({
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Resident</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">ID</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Position</TableHead>
+                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Block / Room</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Work Site</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Rating</TableHead>
                     <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Actions</TableHead>
@@ -1260,6 +1341,17 @@ function CampResidentsView({
                         {emp.position ?? <span className="text-muted-foreground/50">—</span>}
                       </TableCell>
                       <TableCell className="px-3 py-3">
+                        {emp.camp_block || emp.camp_room ? (
+                          <span className="inline-flex items-center gap-1.5 text-[13px]">
+                            <BedDouble size={13} className="shrink-0 text-amber-500" aria-hidden />
+                            <span className="font-medium">Block {emp.camp_block ?? '—'}</span>
+                            <span className="text-muted-foreground">· Room {emp.camp_room ?? '—'}</span>
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground/60">Not set</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="px-3 py-3">
                         <SiteBadge name={emp.site_name} />
                       </TableCell>
                       <TableCell className="px-3 py-3">
@@ -1267,6 +1359,16 @@ function CampResidentsView({
                       </TableCell>
                       <TableCell className="px-3 py-3">
                         <div className="flex justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => openEditRoom(emp)}
+                            title="Edit block / room"
+                            aria-label={`Edit ${emp.full_name}'s block and room`}
+                            className="size-8 text-muted-foreground hover:bg-amber-500/10 hover:text-amber-500"
+                          >
+                            <Pencil size={14} />
+                          </Button>
                           <Button
                             variant="ghost"
                             size="icon"
@@ -1329,9 +1431,23 @@ function CampResidentsView({
                       {emp.position ?? 'No position'}
                     </span>
                     <SiteBadge name={emp.site_name} />
+                    {(emp.camp_block || emp.camp_room) && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <BedDouble size={12} className="text-amber-500" aria-hidden />
+                        Block {emp.camp_block ?? '—'} · Room {emp.camp_room ?? '—'}
+                      </span>
+                    )}
                     <RatingStars rating={emp.rating} />
                   </div>
                   <div className="mt-3 flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 flex-1 gap-1.5 hover:border-amber-500/40 hover:bg-amber-500/10 hover:text-amber-500"
+                      onClick={() => openEditRoom(emp)}
+                    >
+                      <Pencil size={13} /> Room
+                    </Button>
                     <Button
                       variant="outline"
                       size="sm"
@@ -1356,8 +1472,115 @@ function CampResidentsView({
         )}
       </div>
 
-      {/* ---- Move single resident dialog ---- */}
+      {/* ---- Assign into this camp (block + room required) ---- */}
+      <Dialog open={!!assignTarget} onOpenChange={(o) => { if (!o) setAssignTarget(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <BedDouble className="size-5 text-amber-500" />
+              Assign to {camp.name}
+            </DialogTitle>
+            <DialogDescription>
+              {assignTarget
+                ? `${assignTarget.full_name}${assignTarget.camp_name ? ` is transferred from "${assignTarget.camp_name}"` : ' joins this camp'} — mention the block and room number where they stay.`
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="assign-block">Block no. *</Label>
+              <Input
+                id="assign-block"
+                value={assignBlock}
+                onChange={(e) => setAssignBlock(e.target.value)}
+                placeholder="e.g. B"
+                className="h-11"
+                onKeyDown={(e) => { if (e.key === 'Enter' && assignBlock.trim() && assignRoom.trim()) void handleConfirmAssign(); }}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="assign-room">Room no. *</Label>
+              <Input
+                id="assign-room"
+                value={assignRoom}
+                onChange={(e) => setAssignRoom(e.target.value)}
+                placeholder="e.g. 204"
+                className="h-11"
+                onKeyDown={(e) => { if (e.key === 'Enter' && assignBlock.trim() && assignRoom.trim()) void handleConfirmAssign(); }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAssignTarget(null)} disabled={assigning}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleConfirmAssign()}
+              disabled={!assignBlock.trim() || !assignRoom.trim() || assigning}
+              className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+            >
+              {assigning ? <Loader2 size={16} className="animate-spin" /> : <BedDouble size={16} />}
+              Assign
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- Edit block / room of an existing resident ---- */}
+      <Dialog open={!!editRoomEmp} onOpenChange={(o) => { if (!o) setEditRoomEmp(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="size-5 text-amber-500" />
+              Edit Block / Room
+            </DialogTitle>
+            <DialogDescription>
+              {editRoomEmp ? `Where does ${editRoomEmp.full_name} stay inside "${camp.name}"?` : ''}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-room-block">Block no. *</Label>
+              <Input
+                id="edit-room-block"
+                value={editRoomBlock}
+                onChange={(e) => setEditRoomBlock(e.target.value)}
+                placeholder="e.g. B"
+                className="h-11"
+                onKeyDown={(e) => { if (e.key === 'Enter' && editRoomBlock.trim() && editRoomValue.trim()) void handleSaveRoom(); }}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-room-value">Room no. *</Label>
+              <Input
+                id="edit-room-value"
+                value={editRoomValue}
+                onChange={(e) => setEditRoomValue(e.target.value)}
+                placeholder="e.g. 204"
+                className="h-11"
+                onKeyDown={(e) => { if (e.key === 'Enter' && editRoomBlock.trim() && editRoomValue.trim()) void handleSaveRoom(); }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditRoomEmp(null)} disabled={savingRoom}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleSaveRoom()}
+              disabled={!editRoomBlock.trim() || !editRoomValue.trim() || savingRoom}
+              className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+            >
+              {savingRoom ? <Loader2 size={16} className="animate-spin" /> : <Pencil size={16} />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- Move single resident dialog (remounts per employee to reset the room inputs) ---- */}
       <MoveResidentDialog
+        key={moveEmp ? `move-${moveEmp.id}` : 'move-closed'}
         open={!!moveEmp}
         onOpenChange={(o) => {
           if (!o) setMoveEmp(null);
@@ -1370,27 +1593,30 @@ function CampResidentsView({
         }
         destinations={destinations}
         allowNoCamp
+        showRoom
         busy={moving}
         target={moveTarget}
         onTargetChange={setMoveTarget}
-        onConfirm={(campId) => {
-          if (moveEmp) void handleMove(moveEmp, campId);
+        onConfirm={(campId, block, room) => {
+          if (moveEmp) void handleMove(moveEmp, campId, block, room);
         }}
       />
 
-      {/* ---- Bulk move dialog ---- */}
+      {/* ---- Bulk move dialog (remounts on open so the room inputs reset) ---- */}
       <MoveResidentDialog
+        key={bulkMoveOpen ? `bulk-${selected.size}` : 'bulk-closed'}
         open={bulkMoveOpen}
         onOpenChange={setBulkMoveOpen}
         title={`Move ${selected.size} ${selected.size === 1 ? 'Resident' : 'Residents'}`}
-        description={`Move ${selected.size} selected resident${selected.size === 1 ? '' : 's'} from "${camp.name}" to another active camp.`}
+        description={`Move ${selected.size} selected resident${selected.size === 1 ? '' : 's'} from "${camp.name}" to another active camp — you can set each resident's block & room afterwards.`}
         destinations={destinations}
         allowNoCamp={false}
+        showRoom={false}
         busy={bulkMoving}
         target={bulkTarget}
         onTargetChange={setBulkTarget}
-        onConfirm={(campId) => {
-          if (campId) void handleBulkMove(campId);
+        onConfirm={(campId, block, room) => {
+          if (campId) void handleBulkMove(campId, block, room);
         }}
       />
 

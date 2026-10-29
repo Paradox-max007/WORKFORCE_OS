@@ -34,6 +34,37 @@ const STATUS_COLORS: Record<string, string> = {
   absent: '#ef4444',
 };
 
+/** Custom readable chart tooltip (recharts' default pie tooltip renders black
+ *  text on a dark tooltip in dark mode — this replaces it in both charts). */
+function ChartTooltip({
+  active, payload, label,
+}: {
+  active?: boolean;
+  payload?: { name?: string; value?: number | string; color?: string; fill?: string; payload?: { color?: string } }[];
+  label?: string | number;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  return (
+    <div className="rounded-lg border bg-card px-3 py-2 text-xs shadow-xl">
+      {label !== undefined && label !== '' && (
+        <p className="mb-1 font-semibold text-foreground">{label}</p>
+      )}
+      <div className="space-y-1">
+        {payload.map((p, i) => {
+          const dot = p.color ?? p.fill ?? p.payload?.color ?? '#71717a';
+          return (
+            <p key={i} className="flex items-center gap-1.5 whitespace-nowrap text-muted-foreground">
+              <span className="size-2 shrink-0 rounded-full" style={{ background: dot }} />
+              {p.name}:{' '}
+              <span className="font-semibold tabular-nums text-foreground">{p.value}</span>
+            </p>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 interface DayOption {
   value: string;
   label: string;
@@ -270,10 +301,7 @@ export function DashboardPage() {
                   <YAxis tick={{ fontSize: 12, fill: 'var(--muted-foreground)' }} axisLine={false} tickLine={false} />
                   <Tooltip
                     cursor={{ fill: 'rgba(128,128,128,0.08)' }}
-                    contentStyle={{
-                      background: 'var(--popover)', border: '1px solid var(--border)',
-                      borderRadius: 12, fontSize: 12, color: 'var(--popover-foreground)',
-                    }}
+                    content={<ChartTooltip />}
                   />
                   <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
                   <Bar dataKey="present" name="Present" stackId="a" fill={STATUS_COLORS.present} animationDuration={900} />
@@ -318,10 +346,7 @@ export function DashboardPage() {
                     ))}
                   </Pie>
                   <Tooltip
-                    contentStyle={{
-                      background: 'var(--popover)', border: '1px solid var(--border)',
-                      borderRadius: 12, fontSize: 12, color: 'var(--popover-foreground)',
-                    }}
+                    content={<ChartTooltip />}
                   />
                 </PieChart>
               </ResponsiveContainer>

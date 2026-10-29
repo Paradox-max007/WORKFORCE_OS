@@ -1,0 +1,1438 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Camp Management (labour accommodation)
+     5→// ----------------------------------------------------------------------------
+     6→// A camp = accommodation where employees STAY. One employee belongs to at
+     7→// most ONE camp (employee.camp_id) — moving a resident is a single reassign
+     8→// via dataApi.assignEmployeeCamp. Deactivating a camp KEEPS its residents (it
+     9→// just stops accepting new ones); deleting a camp unassigns them (employees
+    10→// are never deleted).
+    11→// ============================================================================
+    12→//
+    13→// Layout of this file:
+    14→//   1. helpers
+    15→//   2. CampsPage            — main view switcher (list ⇆ camp residents)
+    16→//   3. StatChip             — small summary chip
+    17→//   4. CampCard             — one camp card in the grid
+    18→//   5. CampFormDialog       — create / edit camp dialog
+    19→//   6. MoveResidentDialog   — small "move to another camp" dialog (row + bulk)
+    20→//   7. CampResidentsView    — per-camp residents management sub-view
+    21→// ============================================================================
+    22→
+    23→import { AnimatePresence, motion } from 'framer-motion';
+    24→import {
+    25→  ArrowLeft, ArrowLeftRight, BedDouble, Eye, Loader2, MapPin, Pencil, Plus,
+    26→  Power, PowerOff, Search, Tent, Trash2, TriangleAlert, UserMinus, Users, X,
+    27→} from 'lucide-react';
+    28→import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+    29→import { toast } from 'sonner';
+    30→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    31→import {
+    32→  AnimatedCounter, EmptyState, PageHeader, RatingStars, SectionTitle, SiteBadge,
+    33→  SkeletonRows,
+    34→} from '@/components/shared/primitives';
+    35→import {
+    36→  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+    37→  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    38→} from '@/components/ui/alert-dialog';
+    39→import { Badge } from '@/components/ui/badge';
+    40→import { Button } from '@/components/ui/button';
+    41→import { Checkbox } from '@/components/ui/checkbox';
+    42→import {
+    43→  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+    44→} from '@/components/ui/dialog';
+    45→import { Input } from '@/components/ui/input';
+    46→import { Label } from '@/components/ui/label';
+    47→import {
+    48→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    49→} from '@/components/ui/select';
+    50→import { Skeleton } from '@/components/ui/skeleton';
+    51→import {
+    52→  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+    53→} from '@/components/ui/table';
+    54→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    55→import { Textarea } from '@/components/ui/textarea';
+    56→import { dataApi } from '@/lib/data';
+    57→import { fmtDate, initials } from '@/lib/format';
+    58→import { cn } from '@/lib/utils';
+    59→import type { CampWithCount, EmployeeVM } from '@/lib/types';
+    60→import { useRealtimeVersion } from '@/store/realtime';
+    61→
+    62→// ---------------------------------------------------------------------------
+    63→// Helpers
+    64→// ---------------------------------------------------------------------------
+    65→
+    66→type SubView = 'list' | 'residents';
+    67→type CampTab = 'active' | 'inactive';
+    68→
+    69→const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+    70→
+    71→/** "" → null, otherwise the trimmed value (what the data layer expects). */
+    72→const nullify = (v: string): string | null => (v.trim() === '' ? null : v.trim());
+    73→
+    74→/** Capacity string → whole non-negative number, or null when blank. */
+    75→const parseCapacity = (raw: string): number | null => {
+    76→  const t = raw.trim();
+    77→  if (t === '') return null;
+    78→  const n = Number(t);
+    79→  if (Number.isNaN(n) || n < 0) return null; // invalid text is guarded by the caller
+    80→  return Math.max(0, Math.floor(n));
+    81→};
+    82→
+    83→const isCapacityInvalid = (raw: string): boolean => {
+    84→  const t = raw.trim();
+    85→  if (t === '') return false;
+    86→  const n = Number(t);
+    87→  return Number.isNaN(n) || n < 0;
+    88→};
+    89→
+    90→// ---------------------------------------------------------------------------
+    91→// Main page
+    92→// ---------------------------------------------------------------------------
+    93→export function CampsPage() {
+    94→  const version = useRealtimeVersion(['camp', 'employee']);
+    95→
+    96→  const [camps, setCamps] = useState<CampWithCount[] | null>(null);
+    97→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    98→
+    99→  const [subView, setSubView] = useState<SubView>('list');
+   100→  const [viewCampId, setViewCampId] = useState<string | null>(null);
+   101→  const [tab, setTab] = useState<CampTab>('active');
+   102→  const [search, setSearch] = useState('');
+   103→  const [debouncedSearch, setDebouncedSearch] = useState('');
+   104→  const [togglingId, setTogglingId] = useState<string | null>(null);
+   105→
+   106→  // dialogs
+   107→  const [formOpen, setFormOpen] = useState(false);
+   108→  const [editTarget, setEditTarget] = useState<CampWithCount | null>(null);
+   109→  const [deleteTarget, setDeleteTarget] = useState<CampWithCount | null>(null);
+   110→  const [dialogBusy, setDialogBusy] = useState(false);
+   111→
+   112→  // ---- data loading (re-fetches whenever camps or employees change) --------
+   113→  useEffect(() => {
+   114→    let cancelled = false;
+   115→    (async () => {
+   116→      try {
+   117→        const [c, e] = await Promise.all([dataApi.listCamps(), dataApi.listEmployees()]);
+   118→        if (!cancelled) {
+   119→          setCamps(c);
+   120→          setEmployees(e);
+   121→        }
+   122→      } catch {
+   123→        if (!cancelled) {
+   124→          setCamps([]);
+   125→          setEmployees([]);
+   126→        }
+   127→      }
+   128→    })();
+   129→    return () => {
+   130→      cancelled = true;
+   131→    };
+   132→  }, [version]);
+   133→
+   134→  // ---- search debounce (300ms) ---------------------------------------------
+   135→  useEffect(() => {
+   136→    const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 300);
+   137→    return () => clearTimeout(t);
+   138→  }, [search]);
+   139→
+   140→  // ---- derived values --------------------------------------------------------
+   141→  const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
+   142→  const inactiveCamps = useMemo(() => (camps ?? []).filter((c) => !c.is_active), [camps]);
+   143→  const housedCount = useMemo(
+   144→    () => (employees ?? []).filter((e) => e.camp_id !== null && e.status === 'active').length,
+   145→    [employees],
+   146→  );
+   147→  const loading = camps === null;
+   148→
+   149→  const viewCamp = useMemo(
+   150→    () => (camps ?? []).find((c) => c.id === viewCampId) ?? null,
+   151→    [camps, viewCampId],
+   152→  );
+   153→  const showResidentsView = subView === 'residents' && !!viewCamp;
+   154→
+   155→  const matchesSearch = (c: CampWithCount): boolean => {
+   156→    if (!debouncedSearch) return true;
+   157→    const hay = `${c.name} ${c.location ?? ''} ${c.notes ?? ''}`.toLowerCase();
+   158→    return hay.includes(debouncedSearch);
+   159→  };
+   160→
+   161→  // ---- actions ---------------------------------------------------------------
+   162→
+   163→  const openCreate = () => {
+   164→    setEditTarget(null);
+   165→    setFormOpen(true);
+   166→  };
+   167→  const openEdit = (camp: CampWithCount) => {
+   168→    setEditTarget(camp);
+   169→    setFormOpen(true);
+   170→  };
+   171→
+   172→  const openResidents = (camp: CampWithCount) => {
+   173→    setViewCampId(camp.id);
+   174→    setSubView('residents');
+   175→  };
+   176→  const backToList = () => {
+   177→    setSubView('list');
+   178→    setViewCampId(null);
+   179→  };
+   180→
+   181→  /** Toggle active/inactive. Deactivating KEEPS residents — it only stops new
+   182→   *  assignments — so no confirmation is needed and it is instantly reversible. */
+   183→  const handleToggleActive = async (camp: CampWithCount) => {
+   184→    setTogglingId(camp.id);
+   185→    try {
+   186→      await dataApi.updateCamp(camp.id, {
+   187→        name: camp.name,
+   188→        location: camp.location,
+   189→        capacity: camp.capacity,
+   190→        notes: camp.notes,
+   191→        is_active: !camp.is_active,
+   192→      });
+   193→      if (camp.is_active) {
+   194→        toast.success('Camp deactivated', {
+   195→          description: `"${camp.name}" no longer accepts new residents — current residents keep their rooms.`,
+   196→        });
+   197→      } else {
+   198→        toast.success('Camp activated', {
+   199→          description: `"${camp.name}" can accept new residents again.`,
+   200→        });
+   201→      }
+   202→    } catch (err) {
+   203→      toast.error(err instanceof Error ? err.message : 'Failed to update the camp');
+   204→    } finally {
+   205→      setTogglingId(null);
+   206→    }
+   207→  };
+   208→
+   209→  const handleConfirmDelete = async () => {
+   210→    if (!deleteTarget) return;
+   211→    setDialogBusy(true);
+   212→    try {
+   213→      await dataApi.deleteCamp(deleteTarget.id);
+   214→      toast.success('Camp deleted', {
+   215→        description: `"${deleteTarget.name}" was removed.${
+   216→          deleteTarget.employee_count > 0
+   217→            ? ` ${deleteTarget.employee_count} employee(s) were left without a camp — not deleted.`
+   218→            : ''
+   219→        }`,
+   220→      });
+   221→      setDeleteTarget(null);
+   222→    } catch (err) {
+   223→      toast.error(err instanceof Error ? err.message : 'Failed to delete the camp');
+   224→    } finally {
+   225→      setDialogBusy(false);
+   226→    }
+   227→  };
+   228→
+   229→  // ---- grid renderer (shared by both tabs) ----------------------------------
+   230→  const renderGrid = (list: CampWithCount[], tabValue: CampTab) => {
+   231→    if (loading) {
+   232→      return <SkeletonRows rows={6} />;
+   233→    }
+   234→    const filtered = list.filter(matchesSearch);
+   235→    if (filtered.length === 0) {
+   236→      const searching = debouncedSearch.length > 0;
+   237→      const noCampsAtAll = (camps ?? []).length === 0;
+   238→      return (
+   239→        <EmptyState
+   240→          icon={<Tent size={22} />}
+   241→          title={
+   242→            searching
+   243→              ? 'No matching camps'
+   244→              : tabValue === 'active'
+   245→                ? noCampsAtAll
+   246→                  ? 'No camps yet'
+   247→                  : 'No active camps'
+   248→                : 'No inactive camps'
+   249→          }
+   250→          description={
+   251→            searching
+   252→              ? 'Try a different search term — search covers camp name, location and notes.'
+   253→              : tabValue === 'active'
+   254→                ? noCampsAtAll
+   255→                  ? 'Create your first camp — the accommodation where your crews stay.'
+   256→                  : 'All camps are inactive. Reactivate one from the Inactive tab to accept residents again.'
+   257→                : 'Camps you deactivate will be moved here. Residents keep their rooms — a deactivated camp just stops accepting new ones.'
+   258→          }
+   259→          action={
+   260→            !searching && tabValue === 'active' ? (
+   261→              <Button onClick={openCreate} className="brand-gradient font-semibold text-white">
+   262→                <Plus size={16} /> New Camp
+   263→              </Button>
+   264→            ) : undefined
+   265→          }
+   266→        />
+   267→      );
+   268→    }
+   269→    return (
+   270→      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+   271→        <AnimatePresence>
+   272→          {filtered.map((camp, i) => (
+   273→            <CampCard
+   274→              key={camp.id}
+   275→              camp={camp}
+   276→              index={i}
+   277→              busy={togglingId === camp.id}
+   278→              onToggle={handleToggleActive}
+   279→              onEdit={openEdit}
+   280→              onDelete={setDeleteTarget}
+   281→              onViewResidents={openResidents}
+   282→            />
+   283→          ))}
+   284→        </AnimatePresence>
+   285→      </div>
+   286→    );
+   287→  };
+   288→
+   289→  // ---- render ----------------------------------------------------------------
+   290→  return (
+   291→    <div className="mx-auto max-w-7xl">
+   292→      <AnimatePresence mode="wait">
+   293→        {showResidentsView && viewCamp ? (
+   294→          <motion.div
+   295→            key="camp-residents"
+   296→            initial={{ opacity: 0, x: 32 }}
+   297→            animate={{ opacity: 1, x: 0 }}
+   298→            exit={{ opacity: 0, x: 32 }}
+   299→            transition={{ duration: 0.3, ease: EASE }}
+   300→          >
+   301→            <CampResidentsView
+   302→              camp={viewCamp}
+   303→              camps={camps ?? []}
+   304→              employees={employees}
+   305→              onBack={backToList}
+   306→            />
+   307→          </motion.div>
+   308→        ) : (
+   309→          <motion.div
+   310→            key="camp-list"
+   311→            initial={{ opacity: 0, y: 16 }}
+   312→            animate={{ opacity: 1, y: 0 }}
+   313→            exit={{ opacity: 0, y: -16 }}
+   314→            transition={{ duration: 0.3, ease: EASE }}
+   315→          >
+   316→            <div className="space-y-6">
+   317→              <PageHeader
+   318→                title="Camp Management"
+   319→                description="Accommodation where your crews stay"
+   320→                actions={
+   321→                  <Button
+   322→                    onClick={openCreate}
+   323→                    className="h-10 brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   324→                  >
+   325→                    <Plus size={16} /> New Camp
+   326→                  </Button>
+   327→                }
+   328→              />
+   329→
+   330→              {/* ---- summary chips ---- */}
+   331→              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
+   332→                <StatChip
+   333→                  icon={<Tent size={17} />}
+   334→                  label="Total Camps"
+   335→                  value={(camps ?? []).length}
+   336→                  tone="brand"
+   337→                  index={0}
+   338→                  loading={loading}
+   339→                />
+   340→                <StatChip
+   341→                  icon={<BedDouble size={17} />}
+   342→                  label="Active Camps"
+   343→                  value={activeCamps.length}
+   344→                  tone="emerald"
+   345→                  index={1}
+   346→                  loading={loading}
+   347→                />
+   348→                <StatChip
+   349→                  icon={<Users size={17} />}
+   350→                  label="Employees Housed"
+   351→                  value={housedCount}
+   352→                  tone="amber"
+   353→                  index={2}
+   354→                  loading={loading}
+   355→                />
+   356→              </div>
+   357→
+   358→              {/* ---- tabs + search ---- */}
+   359→              <Tabs value={tab} onValueChange={(v) => setTab(v as CampTab)}>
+   360→                <div className="card-glow rounded-xl border bg-card">
+   361→                  <div className="flex flex-col gap-3 border-b p-4 lg:flex-row lg:items-center lg:justify-between">
+   362→                    <TabsList className="h-11 w-full gap-1 sm:w-auto">
+   363→                      <TabsTrigger value="active" className="h-9 gap-2 px-4">
+   364→                        <Power size={15} className="text-emerald-500" />
+   365→                        Active
+   366→                        <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500">
+   367→                          {activeCamps.length}
+   368→                        </span>
+   369→                      </TabsTrigger>
+   370→                      <TabsTrigger value="inactive" className="h-9 gap-2 px-4">
+   371→                        <PowerOff size={15} className="text-zinc-400" />
+   372→                        Inactive
+   373→                        <span className="rounded-full bg-zinc-500/15 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-zinc-400">
+   374→                          {inactiveCamps.length}
+   375→                        </span>
+   376→                      </TabsTrigger>
+   377→                    </TabsList>
+   378→                    <div className="relative w-full lg:max-w-xs">
+   379→                      <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   380→                      <Input
+   381→                        value={search}
+   382→                        onChange={(e) => setSearch(e.target.value)}
+   383→                        placeholder="Search camps by name, location or notes…"
+   384→                        aria-label="Search camps"
+   385→                        className="h-10 pl-9 pr-9"
+   386→                      />
+   387→                      {search && (
+   388→                        <button
+   389→                          type="button"
+   390→                          onClick={() => setSearch('')}
+   391→                          aria-label="Clear search"
+   392→                          className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+   393→                        >
+   394→                          <X size={14} />
+   395→                        </button>
+   396→                      )}
+   397→                    </div>
+   398→                  </div>
+   399→
+   400→                  <TabsContent value="active" className="mt-0 p-4">
+   401→                    {renderGrid(activeCamps, 'active')}
+   402→                  </TabsContent>
+   403→                  <TabsContent value="inactive" className="mt-0 p-4">
+   404→                    {renderGrid(inactiveCamps, 'inactive')}
+   405→                  </TabsContent>
+   406→                </div>
+   407→              </Tabs>
+   408→            </div>
+   409→          </motion.div>
+   410→        )}
+   411→      </AnimatePresence>
+   412→
+   413→      {/* ---- Create / Edit camp dialog ---- */}
+   414→      <CampFormDialog open={formOpen} onOpenChange={setFormOpen} editing={editTarget} />
+   415→
+   416→      {/* ---- Delete confirmation ---- */}
+   417→      <AlertDialog
+   418→        open={!!deleteTarget}
+   419→        onOpenChange={(o) => {
+   420→          if (!o) setDeleteTarget(null);
+   421→        }}
+   422→      >
+   423→        <AlertDialogContent>
+   424→          <AlertDialogHeader>
+   425→            <AlertDialogTitle className="flex items-center gap-2">
+   426→              <Trash2 className="size-5 text-rose-500" /> Delete Camp
+   427→            </AlertDialogTitle>
+   428→            <AlertDialogDescription>
+   429→              Are you sure you want to permanently delete{' '}
+   430→              <span className="font-medium text-foreground">{deleteTarget?.name}</span>?
+   431→            </AlertDialogDescription>
+   432→          </AlertDialogHeader>
+   433→          <div className="rounded-lg border border-rose-500/25 bg-rose-500/10 p-3">
+   434→            <p className="text-sm font-medium text-rose-600 dark:text-rose-400">
+   435→              {deleteTarget && deleteTarget.employee_count > 0
+   436→                ? `${deleteTarget.employee_count} employee${deleteTarget.employee_count === 1 ? '' : 's'} will be left without a camp — they are NOT deleted.`
+   437→                : 'No employees are housed here.'}
+   438→            </p>
+   439→            <p className="mt-1 text-xs text-muted-foreground">
+   440→              Their camp assignment will simply be cleared. This action cannot be undone.
+   441→            </p>
+   442→          </div>
+   443→          <AlertDialogFooter>
+   444→            <AlertDialogCancel disabled={dialogBusy}>Cancel</AlertDialogCancel>
+   445→            <Button
+   446→              onClick={handleConfirmDelete}
+   447→              disabled={dialogBusy}
+   448→              className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90"
+   449→            >
+   450→              {dialogBusy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+   451→              Delete Camp
+   452→            </Button>
+   453→          </AlertDialogFooter>
+   454→        </AlertDialogContent>
+   455→      </AlertDialog>
+   456→    </div>
+   457→  );
+   458→}
+   459→
+   460→// ---------------------------------------------------------------------------
+   461→// Summary stat chip
+   462→// ---------------------------------------------------------------------------
+   463→function StatChip({
+   464→  icon, label, value, tone, index, loading,
+   465→}: {
+   466→  icon: ReactNode;
+   467→  label: string;
+   468→  value: number;
+   469→  tone: 'brand' | 'emerald' | 'amber';
+   470→  index: number;
+   471→  loading: boolean;
+   472→}) {
+   473→  const tones: Record<string, string> = {
+   474→    brand: 'bg-brand/10 text-brand',
+   475→    emerald: 'bg-emerald-500/10 text-emerald-500',
+   476→    amber: 'bg-amber-500/10 text-amber-500',
+   477→  };
+   478→  return (
+   479→    <motion.div
+   480→      initial={{ opacity: 0, y: 8 }}
+   481→      animate={{ opacity: 1, y: 0 }}
+   482→      transition={{ delay: Math.min(index * 0.05, 0.3), duration: 0.35, ease: EASE }}
+   483→      className="card-glow flex items-center justify-between gap-3 rounded-xl border bg-card p-4"
+   484→    >
+   485→      <div className="min-w-0">
+   486→        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+   487→        {loading ? (
+   488→          <Skeleton className="mt-1.5 h-7 w-14" />
+   489→        ) : (
+   490→          <p className="mt-1 text-xl font-semibold tracking-tight">
+   491→            <AnimatedCounter value={value} />
+   492→          </p>
+   493→        )}
+   494→      </div>
+   495→      <div className={cn('shrink-0 rounded-lg p-2.5', tones[tone])}>{icon}</div>
+   496→    </motion.div>
+   497→  );
+   498→}
+   499→
+   500→// ---------------------------------------------------------------------------
+   501→// Camp card (grid tile)
+   502→// ---------------------------------------------------------------------------
+   503→function CampCard({
+   504→  camp, index, busy, onToggle, onEdit, onDelete, onViewResidents,
+   505→}: {
+   506→  camp: CampWithCount;
+   507→  index: number;
+   508→  busy: boolean;
+   509→  onToggle: (camp: CampWithCount) => void;
+   510→  onEdit: (camp: CampWithCount) => void;
+   511→  onDelete: (camp: CampWithCount) => void;
+   512→  onViewResidents: (camp: CampWithCount) => void;
+   513→}) {
+   514→  return (
+   515→    <motion.div
+   516→      initial={{ opacity: 0, y: 8 }}
+   517→      animate={{ opacity: 1, y: 0 }}
+   518→      exit={{ opacity: 0, scale: 0.96, y: 8, transition: { duration: 0.18, ease: 'easeIn' } }}
+   519→      transition={{ delay: Math.min(index * 0.05, 0.5), duration: 0.35, ease: EASE }}
+   520→      whileHover={{ y: -4 }}
+   521→      className={cn(
+   522→        'card-glow group relative flex flex-col gap-4 rounded-xl border bg-card p-5',
+   523→        !camp.is_active && 'opacity-80',
+   524→      )}
+   525→    >
+   526→      {/* header: icon, name, per-card actions */}
+   527→      <div className="flex items-start justify-between gap-2">
+   528→        <div className="flex min-w-0 items-center gap-3">
+   529→          <div
+   530→            className={cn(
+   531→              'flex size-10 shrink-0 items-center justify-center rounded-lg',
+   532→              camp.is_active ? 'bg-brand/10 text-brand' : 'bg-zinc-500/10 text-zinc-400',
+   533→            )}
+   534→          >
+   535→            <Tent size={20} />
+   536→          </div>
+   537→          <div className="min-w-0">
+   538→            <h3 className="truncate text-base font-semibold" title={camp.name}>
+   539→              {camp.name}
+   540→            </h3>
+   541→            <p className="mt-0.5 text-[11px] text-muted-foreground">
+   542→              Created {fmtDate(camp.created_at)}
+   543→            </p>
+   544→          </div>
+   545→        </div>
+   546→        <div className="flex shrink-0 items-center gap-0.5">
+   547→          <Button
+   548→            variant="ghost"
+   549→            size="icon"
+   550→            disabled={busy}
+   551→            onClick={() => onToggle(camp)}
+   552→            title={camp.is_active ? 'Deactivate camp' : 'Activate camp'}
+   553→            aria-label={camp.is_active ? `Deactivate camp ${camp.name}` : `Activate camp ${camp.name}`}
+   554→            className={cn(
+   555→              'size-8',
+   556→              camp.is_active
+   557→                ? 'text-amber-500 hover:bg-amber-500/10 hover:text-amber-500'
+   558→                : 'text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-500',
+   559→            )}
+   560→          >
+   561→            {busy ? (
+   562→              <Loader2 size={15} className="animate-spin" />
+   563→            ) : camp.is_active ? (
+   564→              <PowerOff size={15} />
+   565→            ) : (
+   566→              <Power size={15} />
+   567→            )}
+   568→          </Button>
+   569→          <Button
+   570→            variant="ghost"
+   571→            size="icon"
+   572→            onClick={() => onEdit(camp)}
+   573→            title="Edit camp"
+   574→            aria-label={`Edit camp ${camp.name}`}
+   575→            className="size-8 text-muted-foreground hover:bg-brand/10 hover:text-brand"
+   576→          >
+   577→            <Pencil size={14} />
+   578→          </Button>
+   579→          <Button
+   580→            variant="ghost"
+   581→            size="icon"
+   582→            onClick={() => onDelete(camp)}
+   583→            title="Delete camp"
+   584→            aria-label={`Delete camp ${camp.name}`}
+   585→            className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
+   586→          >
+   587→            <Trash2 size={15} />
+   588→          </Button>
+   589→        </div>
+   590→      </div>
+   591→
+   592→      {/* location / capacity meta */}
+   593→      <div className="space-y-1">
+   594→        <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+   595→          <MapPin size={12} className="shrink-0 text-muted-foreground/60" />
+   596→          {camp.location ?? <span className="text-muted-foreground/50">No location</span>}
+   597→        </p>
+   598→        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   599→          <BedDouble size={12} className="shrink-0 text-muted-foreground/60" />
+   600→          {camp.capacity !== null
+   601→            ? `${camp.capacity} ${camp.capacity === 1 ? 'bed' : 'beds'}`
+   602→            : 'No limit'}
+   603→        </p>
+   604→      </div>
+   605→
+   606→      {/* notes (truncated to 2 lines) */}
+   607→      {camp.notes && (
+   608→        <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground" title={camp.notes}>
+   609→          {camp.notes}
+   610→        </p>
+   611→      )}
+   612→
+   613→      {/* counts + main action */}
+   614→      <div className="mt-auto space-y-3 border-t pt-4">
+   615→        <div className="flex flex-wrap items-center gap-2">
+   616→          <Badge variant="secondary" className="gap-1 border-brand/25 bg-brand/10 text-brand">
+   617→            <Users size={11} />
+   618→            {camp.employee_count} {camp.employee_count === 1 ? 'resident' : 'residents'}
+   619→          </Badge>
+   620→          {!camp.is_active && (
+   621→            <Badge variant="secondary" className="border-zinc-500/25 bg-zinc-500/10 text-zinc-400">
+   622→              Inactive
+   623→            </Badge>
+   624→          )}
+   625→        </div>
+   626→        <Button
+   627→          variant="outline"
+   628→          className="h-9 w-full gap-2 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+   629→          onClick={() => onViewResidents(camp)}
+   630→        >
+   631→          <Eye size={15} /> View Residents
+   632→        </Button>
+   633→      </div>
+   634→    </motion.div>
+   635→  );
+   636→}
+   637→
+   638→// ---------------------------------------------------------------------------
+   639→// Create / Edit camp dialog
+   640→// ---------------------------------------------------------------------------
+   641→function CampFormDialog({
+   642→  open, onOpenChange, editing,
+   643→}: {
+   644→  open: boolean;
+   645→  onOpenChange: (open: boolean) => void;
+   646→  editing: CampWithCount | null;
+   647→}) {
+   648→  const [name, setName] = useState('');
+   649→  const [location, setLocation] = useState('');
+   650→  const [capacity, setCapacity] = useState('');
+   651→  const [notes, setNotes] = useState('');
+   652→  const [busy, setBusy] = useState(false);
+   653→
+   654→  // Reset the form every time the dialog opens
+   655→  useEffect(() => {
+   656→    if (open) {
+   657→      setName(editing?.name ?? '');
+   658→      setLocation(editing?.location ?? '');
+   659→      setCapacity(editing?.capacity !== null && editing?.capacity !== undefined ? String(editing.capacity) : '');
+   660→      setNotes(editing?.notes ?? '');
+   661→      setBusy(false);
+   662→    }
+   663→  }, [open, editing]);
+   664→
+   665→  const trimmedName = name.trim();
+   666→  const capInvalid = isCapacityInvalid(capacity);
+   667→  const cap = parseCapacity(capacity);
+   668→
+   669→  const unchanged =
+   670→    !!editing &&
+   671→    trimmedName === editing.name &&
+   672→    location.trim() === (editing.location ?? '') &&
+   673→    capacity.trim() === (editing.capacity === null ? '' : String(editing.capacity)) &&
+   674→    notes.trim() === (editing.notes ?? '');
+   675→
+   676→  const submit = async () => {
+   677→    if (!trimmedName || busy || unchanged || capInvalid) return;
+   678→    setBusy(true);
+   679→    try {
+   680→      if (editing) {
+   681→        await dataApi.updateCamp(editing.id, {
+   682→          name: trimmedName,
+   683→          location: nullify(location),
+   684→          capacity: cap,
+   685→          notes: nullify(notes),
+   686→          is_active: editing.is_active,
+   687→        });
+   688→        toast.success('Camp updated', {
+   689→          description: `Details for "${trimmedName}" were saved. Current residents are unaffected.`,
+   690→        });
+   691→      } else {
+   692→        const created = await dataApi.createCamp(
+   693→          trimmedName,
+   694→          nullify(location),
+   695→          cap,
+   696→          nullify(notes),
+   697→        );
+   698→        toast.success('Camp created', {
+   699→          description: `"${created.name}" has been added. You can now house employees in it.`,
+   700→        });
+   701→      }
+   702→      onOpenChange(false);
+   703→    } catch (err) {
+   704→      toast.error(err instanceof Error ? err.message : 'Failed to save the camp');
+   705→    } finally {
+   706→      setBusy(false);
+   707→    }
+   708→  };
+   709→
+   710→  return (
+   711→    <Dialog open={open} onOpenChange={onOpenChange}>
+   712→      <DialogContent className="sm:max-w-md">
+   713→        <DialogHeader>
+   714→          <DialogTitle>{editing ? 'Edit Camp' : 'Add New Camp'}</DialogTitle>
+   715→          <DialogDescription>
+   716→            {editing
+   717→              ? `Update the details of "${editing.name}". Current residents are unaffected.`
+   718→              : 'Enter the details for the new accommodation camp.'}
+   719→          </DialogDescription>
+   720→        </DialogHeader>
+   721→
+   722→        <div className="space-y-4">
+   723→          <div className="space-y-2">
+   724→            <Label htmlFor="camp-name">
+   725→              Camp Name <span className="text-rose-500">*</span>
+   726→            </Label>
+   727→            <Input
+   728→              id="camp-name"
+   729→              value={name}
+   730→              onChange={(e) => setName(e.target.value)}
+   731→              placeholder="e.g. Al Quoz Labour Camp"
+   732→              className="h-11"
+   733→              onKeyDown={(e) => {
+   734→                if (e.key === 'Enter') submit();
+   735→              }}
+   736→            />
+   737→          </div>
+   738→          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+   739→            <div className="space-y-2">
+   740→              <Label htmlFor="camp-location">Location</Label>
+   741→              <Input
+   742→                id="camp-location"
+   743→                value={location}
+   744→                onChange={(e) => setLocation(e.target.value)}
+   745→                placeholder="e.g. Dubai — Al Quoz 3"
+   746→                className="h-11"
+   747→                onKeyDown={(e) => {
+   748→                  if (e.key === 'Enter') submit();
+   749→                }}
+   750→              />
+   751→            </div>
+   752→            <div className="space-y-2">
+   753→              <Label htmlFor="camp-capacity">Capacity (beds)</Label>
+   754→              <Input
+   755→                id="camp-capacity"
+   756→                type="number"
+   757→                min={0}
+   758→                step={1}
+   759→                value={capacity}
+   760→                onChange={(e) => setCapacity(e.target.value)}
+   761→                placeholder="Optional"
+   762→                className="h-11"
+   763→                onKeyDown={(e) => {
+   764→                  if (e.key === 'Enter') submit();
+   765→                }}
+   766→              />
+   767→              {capInvalid ? (
+   768→                <p className="text-xs text-rose-500">
+   769→                  Capacity must be a non-negative whole number.
+   770→                </p>
+   771→              ) : (
+   772→                <p className="text-xs text-muted-foreground">Optional — leave empty for no limit.</p>
+   773→              )}
+   774→            </div>
+   775→          </div>
+   776→          <div className="space-y-2">
+   777→            <Label htmlFor="camp-notes">Notes</Label>
+   778→            <Textarea
+   779→              id="camp-notes"
+   780→              value={notes}
+   781→              onChange={(e) => setNotes(e.target.value)}
+   782→              placeholder="Anything worth knowing about this camp…"
+   783→              className="min-h-[80px] resize-none"
+   784→              rows={3}
+   785→            />
+   786→          </div>
+   787→        </div>
+   788→
+   789→        <DialogFooter>
+   790→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+   791→            Cancel
+   792→          </Button>
+   793→          <Button
+   794→            onClick={submit}
+   795→            disabled={!trimmedName || busy || unchanged || capInvalid}
+   796→            className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   797→          >
+   798→            {busy ? <Loader2 size={16} className="animate-spin" /> : editing ? <Pencil size={16} /> : <Plus size={16} />}
+   799→            {editing ? 'Save Changes' : 'Add Camp'}
+   800→          </Button>
+   801→        </DialogFooter>
+   802→      </DialogContent>
+   803→    </Dialog>
+   804→  );
+   805→}
+   806→
+   807→// ---------------------------------------------------------------------------
+   808→// Move resident dialog (per-row + bulk). The selected destination is fully
+   809→// controlled by the parent so it resets cleanly between openings.
+   810→// ---------------------------------------------------------------------------
+   811→function MoveResidentDialog({
+   812→  open, onOpenChange, title, description, destinations, allowNoCamp, busy,
+   813→  target, onTargetChange, onConfirm,
+   814→}: {
+   815→  open: boolean;
+   816→  onOpenChange: (open: boolean) => void;
+   817→  title: string;
+   818→  description: string;
+   819→  destinations: CampWithCount[];
+   820→  allowNoCamp: boolean;
+   821→  busy: boolean;
+   822→  target: string;
+   823→  onTargetChange: (value: string) => void;
+   824→  onConfirm: (campId: string | null) => void;
+   825→}) {
+   826→  const selectId = useId();
+   827→
+   828→  return (
+   829→    <Dialog open={open} onOpenChange={onOpenChange}>
+   830→      <DialogContent className="sm:max-w-sm">
+   831→        <DialogHeader>
+   832→          <DialogTitle className="flex items-center gap-2">
+   833→            <ArrowLeftRight className="size-5 text-brand" />
+   834→            {title}
+   835→          </DialogTitle>
+   836→          <DialogDescription>{description}</DialogDescription>
+   837→        </DialogHeader>
+   838→
+   839→        <div className="space-y-2">
+   840→          <Label htmlFor={selectId}>Destination camp</Label>
+   841→          <Select value={target} onValueChange={onTargetChange}>
+   842→            <SelectTrigger id={selectId} className="h-11 w-full">
+   843→              <SelectValue placeholder="Choose a destination…" />
+   844→            </SelectTrigger>
+   845→            <SelectContent>
+   846→              {allowNoCamp && (
+   847→                <SelectItem value="__none__" className="gap-2">
+   848→                  <UserMinus size={14} className="text-amber-500" />
+   849→                  No camp (unassigned)
+   850→                </SelectItem>
+   851→              )}
+   852→              {destinations.map((c) => (
+   853→                <SelectItem key={c.id} value={c.id} className="gap-2">
+   854→                  <Tent size={14} />
+   855→                  <span className="truncate">{c.name}</span>
+   856→                  <span className="ml-1 shrink-0 text-xs text-muted-foreground">
+   857→                    · {c.employee_count} {c.employee_count === 1 ? 'resident' : 'residents'}
+   858→                  </span>
+   859→                </SelectItem>
+   860→              ))}
+   861→            </SelectContent>
+   862→          </Select>
+   863→          {destinations.length === 0 && (
+   864→            <p className="text-xs text-muted-foreground">
+   865→              No other active camps available{allowNoCamp ? '' : ' — create or reactivate one first'}.
+   866→            </p>
+   867→          )}
+   868→        </div>
+   869→
+   870→        <DialogFooter>
+   871→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+   872→            Cancel
+   873→          </Button>
+   874→          <Button
+   875→            onClick={() => onConfirm(target === '__none__' ? null : target)}
+   876→            disabled={!target || busy}
+   877→            className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   878→          >
+   879→            {busy ? <Loader2 size={16} className="animate-spin" /> : <ArrowLeftRight size={16} />}
+   880→            Move
+   881→          </Button>
+   882→        </DialogFooter>
+   883→      </DialogContent>
+   884→    </Dialog>
+   885→  );
+   886→}
+   887→
+   888→// ---------------------------------------------------------------------------
+   889→// Per-camp residents sub-view
+   890→// ---------------------------------------------------------------------------
+   891→function CampResidentsView({
+   892→  camp, camps, employees, onBack,
+   893→}: {
+   894→  camp: CampWithCount;
+   895→  camps: CampWithCount[];
+   896→  employees: EmployeeVM[] | null;
+   897→  onBack: () => void;
+   898→}) {
+   899→  const [selected, setSelected] = useState<Set<string>>(new Set());
+   900→  const [pickerValue, setPickerValue] = useState<string | null>(null);
+   901→  const [addingId, setAddingId] = useState<string | null>(null);
+   902→
+   903→  const [moveEmp, setMoveEmp] = useState<EmployeeVM | null>(null);
+   904→  const [moveTarget, setMoveTarget] = useState('');
+   905→  const [moving, setMoving] = useState(false);
+   906→  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+   907→  const [bulkTarget, setBulkTarget] = useState('');
+   908→  const [bulkMoving, setBulkMoving] = useState(false);
+   909→  const [removeTarget, setRemoveTarget] = useState<{ ids: string[]; label: string } | null>(null);
+   910→  const [removing, setRemoving] = useState(false);
+   911→
+   912→  const loading = employees === null;
+   913→
+   914→  const residents = useMemo(() => {
+   915→    const list = (employees ?? []).filter((e) => e.camp_id === camp.id && e.status !== 'deleted');
+   916→    return [...list].sort((a, b) => a.full_name.localeCompare(b.full_name));
+   917→  }, [employees, camp.id]);
+   918→
+   919→  // every non-deleted employee who is not already a resident here (pick one to
+   920→  // house here — instantly transferred out of any previous camp)
+   921→  const addable = useMemo(
+   922→    () => (employees ?? []).filter((e) => e.status !== 'deleted' && e.camp_id !== camp.id),
+   923→    [employees, camp.id],
+   924→  );
+   925→
+   926→  // move destinations: other ACTIVE camps only (inactive camps don't accept new
+   927→  // residents — assignments to them are rejected by the data layer)
+   928→  const destinations = useMemo(
+   929→    () => camps.filter((c) => c.is_active && c.id !== camp.id),
+   930→    [camps, camp.id],
+   931→  );
+   932→
+   933→  // occupancy
+   934→  const limit = camp.capacity !== null && camp.capacity > 0 ? camp.capacity : null;
+   935→  const usagePct = limit !== null ? Math.min(100, (residents.length / limit) * 100) : 0;
+   936→  const full = limit !== null && residents.length >= limit;
+   937→  const nearlyFull = limit !== null && !full && usagePct > 85;
+   938→
+   939→  const allSelected = residents.length > 0 && residents.every((e) => selected.has(e.id));
+   940→  const someSelected = !allSelected && residents.some((e) => selected.has(e.id));
+   941→
+   942→  const openMove = (emp: EmployeeVM) => {
+   943→    setMoveTarget('');
+   944→    setMoveEmp(emp);
+   945→  };
+   946→  const openBulkMove = () => {
+   947→    setBulkTarget('');
+   948→    setBulkMoveOpen(true);
+   949→  };
+   950→
+   951→  const toggleOne = (id: string) => {
+   952→    setSelected((prev) => {
+   953→      const next = new Set(prev);
+   954→      if (next.has(id)) next.delete(id);
+   955→      else next.add(id);
+   956→      return next;
+   957→    });
+   958→  };
+   959→  const toggleAll = () => {
+   960→    setSelected(allSelected ? new Set() : new Set(residents.map((e) => e.id)));
+   961→  };
+   962→
+   963→  const deselect = (id: string) => {
+   964→    setSelected((prev) => {
+   965→      if (!prev.has(id)) return prev;
+   966→      const next = new Set(prev);
+   967→      next.delete(id);
+   968→      return next;
+   969→    });
+   970→  };
+   971→
+   972→  // ---- add / transfer a resident into this camp -------------------------------
+   973→  const handleAdd = async (id: string | null) => {
+   974→    setPickerValue(null);
+   975→    if (!id || addingId || !camp.is_active) return;
+   976→    const emp = (employees ?? []).find((e) => e.id === id);
+   977→    if (!emp) return;
+   978→    setAddingId(id);
+   979→    try {
+   980→      await dataApi.assignEmployeeCamp(id, camp.id);
+   981→      toast.success(`Moved to ${camp.name}`, {
+   982→        description: emp.camp_name
+   983→          ? `${emp.full_name} was transferred from "${emp.camp_name}" to "${camp.name}".`
+   984→          : `${emp.full_name} now stays at "${camp.name}".`,
+   985→      });
+   986→    } catch (err) {
+   987→      toast.error(err instanceof Error ? err.message : 'Failed to add the resident');
+   988→    } finally {
+   989→      setAddingId(null);
+   990→    }
+   991→  };
+   992→
+   993→  // ---- move one resident to another active camp (or no camp) ------------------
+   994→  const handleMove = async (emp: EmployeeVM, campId: string | null) => {
+   995→    if (moving) return;
+   996→    setMoving(true);
+   997→    try {
+   998→      await dataApi.assignEmployeeCamp(emp.id, campId);
+   999→      if (campId) {
+  1000→        const dest = destinations.find((c) => c.id === campId);
+  1001→        toast.success('Resident moved', {
+  1002→          description: `${emp.full_name} was moved from "${camp.name}" to "${dest?.name ?? 'another camp'}".`,
+  1003→        });
+  1004→      } else {
+  1005→        toast.success('Resident moved out', {
+  1006→          description: `${emp.full_name} was removed from "${camp.name}" and now has no camp.`,
+  1007→        });
+  1008→      }
+  1009→      deselect(emp.id);
+  1010→      setMoveEmp(null);
+  1011→    } catch (err) {
+  1012→      toast.error(err instanceof Error ? err.message : 'Failed to move the resident');
+  1013→    } finally {
+  1014→      setMoving(false);
+  1015→    }
+  1016→  };
+  1017→
+  1018→  // ---- bulk move selected residents to an active camp -------------------------
+  1019→  const handleBulkMove = async (campId: string) => {
+  1020→    if (!campId || selected.size === 0 || bulkMoving) return;
+  1021→    const dest = destinations.find((c) => c.id === campId);
+  1022→    setBulkMoving(true);
+  1023→    try {
+  1024→      await Promise.all([...selected].map((id) => dataApi.assignEmployeeCamp(id, campId)));
+  1025→      toast.success(`${selected.size} resident${selected.size === 1 ? '' : 's'} moved`, {
+  1026→        description: `They were moved from "${camp.name}" to "${dest?.name ?? 'another camp'}".`,
+  1027→      });
+  1028→      setSelected(new Set());
+  1029→      setBulkMoveOpen(false);
+  1030→    } catch (err) {
+  1031→      toast.error(err instanceof Error ? err.message : 'Failed to move the resident(s)');
+  1032→    } finally {
+  1033→      setBulkMoving(false);
+  1034→    }
+  1035→  };
+  1036→
+  1037→  // ---- remove resident(s) — set to "no camp", never delete --------------------
+  1038→  const handleRemove = async () => {
+  1039→    if (!removeTarget || removing) return;
+  1040→    setRemoving(true);
+  1041→    try {
+  1042→      await Promise.all(removeTarget.ids.map((id) => dataApi.assignEmployeeCamp(id, null)));
+  1043→      toast.success(`${removeTarget.ids.length} resident${removeTarget.ids.length === 1 ? '' : 's'} removed`, {
+  1044→        description: `They were left without a camp — not deleted.`,
+  1045→      });
+  1046→      setSelected(new Set());
+  1047→      setRemoveTarget(null);
+  1048→    } catch (err) {
+  1049→      toast.error(err instanceof Error ? err.message : 'Failed to remove the resident(s)');
+  1050→    } finally {
+  1051→      setRemoving(false);
+  1052→    }
+  1053→  };
+  1054→
+  1055→  const avatar = (emp: EmployeeVM, sizeClass: string, textClass: string) => (
+  1056→    <span
+  1057→      className={cn(
+  1058→        'flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 font-bold text-brand',
+  1059→        sizeClass,
+  1060→        textClass,
+  1061→      )}
+  1062→    >
+  1063→      {emp.photo ? (
+  1064→        <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+  1065→      ) : (
+  1066→        initials(emp.full_name)
+  1067→      )}
+  1068→    </span>
+  1069→  );
+  1070→
+  1071→  return (
+  1072→    <div className="space-y-6">
+  1073→      {/* ---- header: back, camp identity, occupancy ---- */}
+  1074→      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+  1075→        <div className="flex items-start gap-3">
+  1076→          <Button
+  1077→            variant="outline"
+  1078→            size="icon"
+  1079→            onClick={onBack}
+  1080→            aria-label="Back to camps"
+  1081→            className="size-10 shrink-0"
+  1082→          >
+  1083→            <ArrowLeft size={17} />
+  1084→          </Button>
+  1085→          <div
+  1086→            className={cn(
+  1087→              'flex size-10 shrink-0 items-center justify-center rounded-xl p-2.5',
+  1088→              camp.is_active ? 'bg-brand/10 text-brand' : 'bg-zinc-500/10 text-zinc-400',
+  1089→            )}
+  1090→          >
+  1091→            <Tent size={20} />
+  1092→          </div>
+  1093→          <div className="min-w-0">
+  1094→            <div className="flex flex-wrap items-center gap-2">
+  1095→              <h1 className="text-xl font-semibold tracking-tight md:text-2xl">{camp.name}</h1>
+  1096→              <Badge variant="secondary" className="tabular-nums">
+  1097→                {residents.length} {residents.length === 1 ? 'resident' : 'residents'}
+  1098→              </Badge>
+  1099→              {!camp.is_active && (
+  1100→                <Badge variant="secondary" className="border-zinc-500/25 bg-zinc-500/10 text-zinc-400">
+  1101→                  Inactive
+  1102→                </Badge>
+  1103→              )}
+  1104→            </div>
+  1105→            <p className="mt-1 truncate text-sm text-muted-foreground">
+  1106→              {camp.location ? `${camp.location} · ` : ''}Created {fmtDate(camp.created_at)}
+  1107→            </p>
+  1108→            {limit !== null ? (
+  1109→              <div className="mt-2.5 w-full max-w-sm">
+  1110→                <div className="flex items-center justify-between text-xs">
+  1111→                  <span className="text-muted-foreground">Occupancy</span>
+  1112→                  <span
+  1113→                    className={cn(
+  1114→                      'font-medium tabular-nums',
+  1115→                      full ? 'text-rose-500' : nearlyFull ? 'text-amber-500' : 'text-foreground',
+  1116→                    )}
+  1117→                  >
+  1118→                    {residents.length} / {limit} beds{full ? ' · Full' : nearlyFull ? ' · Nearly full' : ''}
+  1119→                  </span>
+  1120→                </div>
+  1121→                <div className="mt-1 h-2 overflow-hidden rounded-full bg-muted">
+  1122→                  <motion.div
+  1123→                    className={cn('h-full rounded-full', full ? 'bg-rose-500' : nearlyFull ? 'bg-amber-500' : 'bg-brand')}
+  1124→                    initial={{ width: 0 }}
+  1125→                    animate={{ width: `${usagePct}%` }}
+  1126→                    transition={{ duration: 0.7, ease: EASE }}
+  1127→                  />
+  1128→                </div>
+  1129→              </div>
+  1130→            ) : (
+  1131→              <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+  1132→                <BedDouble size={13} className="text-muted-foreground/60" /> No capacity limit
+  1133→              </p>
+  1134→            )}
+  1135→          </div>
+  1136→        </div>
+  1137→
+  1138→        <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto lg:shrink-0">
+  1139→          <div className="w-full sm:w-72">
+  1140→            <EmployeeCombobox
+  1141→              employees={addable}
+  1142→              value={pickerValue}
+  1143→              onChange={handleAdd}
+  1144→              disabled={loading || !!addingId || !camp.is_active}
+  1145→              placeholder={camp.is_active ? 'Add resident to this camp…' : 'Camp is inactive'}
+  1146→              emptyText="No employees available."
+  1147→            />
+  1148→            <p className="mt-1.5 text-[11px] text-muted-foreground">
+  1149→              Employees not yet in a camp, or transfer from another camp.
+  1150→            </p>
+  1151→          </div>
+  1152→          {selected.size > 0 && (
+  1153→            <>
+  1154→              <Button
+  1155→                variant="outline"
+  1156→                onClick={openBulkMove}
+  1157→                className="gap-2 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+  1158→              >
+  1159→                <ArrowLeftRight size={16} /> Move Selected ({selected.size})
+  1160→              </Button>
+  1161→              <Button
+  1162→                variant="destructive"
+  1163→                onClick={() =>
+  1164→                  setRemoveTarget({
+  1165→                    ids: [...selected],
+  1166→                    label: `${selected.size} selected resident${selected.size === 1 ? '' : 's'}`,
+  1167→                  })
+  1168→                }
+  1169→                className="gap-2"
+  1170→              >
+  1171→                <UserMinus size={16} /> Remove Selected ({selected.size})
+  1172→              </Button>
+  1173→            </>
+  1174→          )}
+  1175→        </div>
+  1176→      </div>
+  1177→
+  1178→      {/* ---- residents card ---- */}
+  1179→      <div className="card-glow rounded-xl border bg-card">
+  1180→        <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
+  1181→          <SectionTitle
+  1182→            icon={<Users size={16} />}
+  1183→            title="Residents"
+  1184→            sub="Sorted alphabetically — one employee stays in at most one camp"
+  1185→          />
+  1186→        </div>
+  1187→
+  1188→        {loading ? (
+  1189→          <div className="space-y-3 p-4">
+  1190→            {Array.from({ length: 4 }).map((_, i) => (
+  1191→              <Skeleton key={i} className="h-24 rounded-xl" />
+  1192→            ))}
+  1193→          </div>
+  1194→        ) : residents.length === 0 ? (
+  1195→          <div className="p-4">
+  1196→            <EmptyState
+  1197→              icon={<Users size={22} />}
+  1198→              title="No one lives here yet"
+  1199→              description={
+  1200→                camp.is_active
+  1201→                  ? 'Use the picker above to house employees in this camp — they can be transferred from another camp too.'
+  1202→                  : 'This camp is inactive. Reactivate it to start accepting residents.'
+  1203→              }
+  1204→            />
+  1205→          </div>
+  1206→        ) : (
+  1207→          <>
+  1208→            {/* ---- Desktop table ---- */}
+  1209→            <div className="hidden overflow-x-auto p-2 md:block">
+  1210→              <Table>
+  1211→                <TableHeader>
+  1212→                  <TableRow>
+  1213→                    <TableHead className="w-10 px-3 py-3">
+  1214→                      <Checkbox
+  1215→                        checked={allSelected ? true : someSelected ? 'indeterminate' : false}
+  1216→                        onCheckedChange={toggleAll}
+  1217→                        aria-label="Select all residents"
+  1218→                      />
+  1219→                    </TableHead>
+  1220→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Resident</TableHead>
+  1221→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">ID</TableHead>
+  1222→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Position</TableHead>
+  1223→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Work Site</TableHead>
+  1224→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Rating</TableHead>
+  1225→                    <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Actions</TableHead>
+  1226→                  </TableRow>
+  1227→                </TableHeader>
+  1228→                <TableBody>
+  1229→                  {residents.map((emp, i) => (
+  1230→                    <motion.tr
+  1231→                      key={emp.id}
+  1232→                      initial={{ opacity: 0, y: 8 }}
+  1233→                      animate={{ opacity: 1, y: 0 }}
+  1234→                      transition={{ delay: Math.min(i * 0.03, 0.3), duration: 0.28, ease: EASE }}
+  1235→                      className={cn(
+  1236→                        'border-b border-border/40 transition-colors last:border-0 hover:bg-muted/30',
+  1237→                        selected.has(emp.id) && 'bg-brand/5',
+  1238→                      )}
+  1239→                    >
+  1240→                      <TableCell className="px-3 py-3">
+  1241→                        <Checkbox
+  1242→                          checked={selected.has(emp.id)}
+  1243→                          onCheckedChange={() => toggleOne(emp.id)}
+  1244→                          aria-label={`Select ${emp.full_name}`}
+  1245→                        />
+  1246→                      </TableCell>
+  1247→                      <TableCell className="px-3 py-3">
+  1248→                        <div className="flex items-center gap-2.5">
+  1249→                          {avatar(emp, 'size-8', 'text-[11px]')}
+  1250→                          <div className="min-w-0">
+  1251→                            <p className="truncate text-sm font-medium">{emp.full_name}</p>
+  1252→                            {emp.nationality && (
+  1253→                              <p className="text-xs text-muted-foreground">{emp.nationality}</p>
+  1254→                            )}
+  1255→                          </div>
+  1256→                        </div>
+  1257→                      </TableCell>
+  1258→                      <TableCell className="px-3 py-3 font-mono text-[13px]">{emp.employee_code}</TableCell>
+  1259→                      <TableCell className="px-3 py-3">
+  1260→                        {emp.position ?? <span className="text-muted-foreground/50">—</span>}
+  1261→                      </TableCell>
+  1262→                      <TableCell className="px-3 py-3">
+  1263→                        <SiteBadge name={emp.site_name} />
+  1264→                      </TableCell>
+  1265→                      <TableCell className="px-3 py-3">
+  1266→                        <RatingStars rating={emp.rating} />
+  1267→                      </TableCell>
+  1268→                      <TableCell className="px-3 py-3">
+  1269→                        <div className="flex justify-end gap-1">
+  1270→                          <Button
+  1271→                            variant="ghost"
+  1272→                            size="icon"
+  1273→                            onClick={() => openMove(emp)}
+  1274→                            title="Move resident"
+  1275→                            aria-label={`Move ${emp.full_name} to another camp`}
+  1276→                            className="size-8 text-muted-foreground hover:bg-brand/10 hover:text-brand"
+  1277→                          >
+  1278→                            <ArrowLeftRight size={14} />
+  1279→                          </Button>
+  1280→                          <Button
+  1281→                            variant="ghost"
+  1282→                            size="icon"
+  1283→                            onClick={() => setRemoveTarget({ ids: [emp.id], label: emp.full_name })}
+  1284→                            title="Remove from camp"
+  1285→                            aria-label={`Remove ${emp.full_name} from ${camp.name}`}
+  1286→                            className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
+  1287→                          >
+  1288→                            <UserMinus size={15} />
+  1289→                          </Button>
+  1290→                        </div>
+  1291→                      </TableCell>
+  1292→                    </motion.tr>
+  1293→                  ))}
+  1294→                </TableBody>
+  1295→              </Table>
+  1296→            </div>
+  1297→
+  1298→            {/* ---- Mobile cards ---- */}
+  1299→            <div className="space-y-3 p-4 md:hidden">
+  1300→              {residents.map((emp, i) => (
+  1301→                <motion.div
+  1302→                  key={emp.id}
+  1303→                  initial={{ opacity: 0, y: 8 }}
+  1304→                  animate={{ opacity: 1, y: 0 }}
+  1305→                  transition={{ delay: Math.min(i * 0.04, 0.3), duration: 0.28, ease: EASE }}
+  1306→                  className={cn(
+  1307→                    'rounded-xl border bg-background/40 p-4',
+  1308→                    selected.has(emp.id) && 'border-brand/40 bg-brand/5',
+  1309→                  )}
+  1310→                >
+  1311→                  <div className="flex items-start gap-3">
+  1312→                    <Checkbox
+  1313→                      checked={selected.has(emp.id)}
+  1314→                      onCheckedChange={() => toggleOne(emp.id)}
+  1315→                      aria-label={`Select ${emp.full_name}`}
+  1316→                      className="mt-1.5"
+  1317→                    />
+  1318→                    {avatar(emp, 'size-9', 'text-xs')}
+  1319→                    <div className="min-w-0 flex-1">
+  1320→                      <p className="truncate text-sm font-medium">{emp.full_name}</p>
+  1321→                      <p className="font-mono text-[11px] text-muted-foreground">
+  1322→                        {emp.employee_code}
+  1323→                        {emp.nationality ? ` · ${emp.nationality}` : ''}
+  1324→                      </p>
+  1325→                    </div>
+  1326→                  </div>
+  1327→                  <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t pt-3">
+  1328→                    <span className="text-xs text-muted-foreground">
+  1329→                      {emp.position ?? 'No position'}
+  1330→                    </span>
+  1331→                    <SiteBadge name={emp.site_name} />
+  1332→                    <RatingStars rating={emp.rating} />
+  1333→                  </div>
+  1334→                  <div className="mt-3 flex gap-2">
+  1335→                    <Button
+  1336→                      variant="outline"
+  1337→                      size="sm"
+  1338→                      className="h-8 flex-1 gap-1.5 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+  1339→                      onClick={() => openMove(emp)}
+  1340→                    >
+  1341→                      <ArrowLeftRight size={13} /> Move
+  1342→                    </Button>
+  1343→                    <Button
+  1344→                      variant="outline"
+  1345→                      size="sm"
+  1346→                      className="h-8 flex-1 gap-1.5 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-500"
+  1347→                      onClick={() => setRemoveTarget({ ids: [emp.id], label: emp.full_name })}
+  1348→                    >
+  1349→                      <UserMinus size={13} /> Remove
+  1350→                    </Button>
+  1351→                  </div>
+  1352→                </motion.div>
+  1353→              ))}
+  1354→            </div>
+  1355→          </>
+  1356→        )}
+  1357→      </div>
+  1358→
+  1359→      {/* ---- Move single resident dialog ---- */}
+  1360→      <MoveResidentDialog
+  1361→        open={!!moveEmp}
+  1362→        onOpenChange={(o) => {
+  1363→          if (!o) setMoveEmp(null);
+  1364→        }}
+  1365→        title="Move Resident"
+  1366→        description={
+  1367→          moveEmp
+  1368→            ? `Move ${moveEmp.full_name} out of "${camp.name}". Transfers are instant — an employee stays in at most one camp.`
+  1369→            : ''
+  1370→        }
+  1371→        destinations={destinations}
+  1372→        allowNoCamp
+  1373→        busy={moving}
+  1374→        target={moveTarget}
+  1375→        onTargetChange={setMoveTarget}
+  1376→        onConfirm={(campId) => {
+  1377→          if (moveEmp) void handleMove(moveEmp, campId);
+  1378→        }}
+  1379→      />
+  1380→
+  1381→      {/* ---- Bulk move dialog ---- */}
+  1382→      <MoveResidentDialog
+  1383→        open={bulkMoveOpen}
+  1384→        onOpenChange={setBulkMoveOpen}
+  1385→        title={`Move ${selected.size} ${selected.size === 1 ? 'Resident' : 'Residents'}`}
+  1386→        description={`Move ${selected.size} selected resident${selected.size === 1 ? '' : 's'} from "${camp.name}" to another active camp.`}
+  1387→        destinations={destinations}
+  1388→        allowNoCamp={false}
+  1389→        busy={bulkMoving}
+  1390→        target={bulkTarget}
+  1391→        onTargetChange={setBulkTarget}
+  1392→        onConfirm={(campId) => {
+  1393→          if (campId) void handleBulkMove(campId);
+  1394→        }}
+  1395→      />
+  1396→
+  1397→      {/* ---- Remove resident(s) confirmation ---- */}
+  1398→      <AlertDialog
+  1399→        open={!!removeTarget}
+  1400→        onOpenChange={(o) => {
+  1401→          if (!o) setRemoveTarget(null);
+  1402→        }}
+  1403→      >
+  1404→        <AlertDialogContent>
+  1405→          <AlertDialogHeader>
+  1406→            <AlertDialogTitle className="flex items-center gap-2">
+  1407→              <TriangleAlert className="size-5 text-amber-500" />
+  1408→              Remove{' '}
+  1409→              {removeTarget
+  1410→                ? removeTarget.ids.length === 1
+  1411→                  ? 'Resident'
+  1412→                  : `${removeTarget.ids.length} Residents`
+  1413→                : 'Residents'}
+  1414→            </AlertDialogTitle>
+  1415→            <AlertDialogDescription>
+  1416→              Remove {removeTarget?.label} from{' '}
+  1417→              <span className="font-medium text-foreground">{camp.name}</span>? They will be left
+  1418→              without a camp and will <span className="font-medium">not</span> be deleted from the
+  1419→              database.
+  1420→            </AlertDialogDescription>
+  1421→          </AlertDialogHeader>
+  1422→          <AlertDialogFooter>
+  1423→            <AlertDialogCancel disabled={removing}>Cancel</AlertDialogCancel>
+  1424→            <Button
+  1425→              onClick={handleRemove}
+  1426→              disabled={removing}
+  1427→              className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90"
+  1428→            >
+  1429→              {removing ? <Loader2 size={16} className="animate-spin" /> : <UserMinus size={16} />}
+  1430→              Remove
+  1431→            </Button>
+  1432→          </AlertDialogFooter>
+  1433→        </AlertDialogContent>
+  1434→      </AlertDialog>
+  1435→    </div>
+  1436→  );
+  1437→}
+  1438→

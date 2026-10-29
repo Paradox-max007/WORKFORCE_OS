@@ -1,0 +1,973 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Employee Details (dedicated page)
+     5→// ----------------------------------------------------------------------------
+     6→// Replaces the old employee details modal with a full page: profile header,
+     7→// Personal / Professional / Documents / Record sections, a monthly Track Record
+     8→// timesheet calendar, and a WhatsApp share flow that exports the track record
+     9→// (lifetime or chosen months) as a multi-page A4 PDF via html2canvas-pro.
+    10→// ============================================================================
+    11→
+    12→import { AnimatePresence, motion } from 'framer-motion';
+    13→import {
+    14→  ArrowLeft, Briefcase, CalendarCheck, Clock3, Crown, FileDown, FileText,
+    15→  Loader2, MessageCircle, Pencil, Tent, UserRound, X,
+    16→} from 'lucide-react';
+    17→import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+    18→import { toast } from 'sonner';
+    19→import {
+    20→  AnimatedCounter, EmptyState, EmployeeStatusBadge, RatingStars, SectionTitle,
+    21→  SiteBadge, SkeletonRows,
+    22→} from '@/components/shared/primitives';
+    23→import { Button } from '@/components/ui/button';
+    24→import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    25→import { Input } from '@/components/ui/input';
+    26→import { Label } from '@/components/ui/label';
+    27→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    28→import { Skeleton } from '@/components/ui/skeleton';
+    29→import { Switch } from '@/components/ui/switch';
+    30→import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    31→import { dataApi } from '@/lib/data';
+    32→import { fmtDate, fmtDateTime, initials } from '@/lib/format';
+    33→import { downloadEmployeeCv } from '@/lib/pdf';
+    34→import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
+    35→import { cn } from '@/lib/utils';
+    36→import type { Attendance, DocumentStatus, EmployeeStatus, EmployeeVM } from '@/lib/types';
+    37→import { useAppStore } from '@/store/app-store';
+    38→import { useRealtimeVersion } from '@/store/realtime';
+    39→
+    40→// ---------------------------------------------------------------------------
+    41→// Month / range helpers (same patterns as the attendance module)
+    42→// ---------------------------------------------------------------------------
+    43→const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+    44→  'July', 'August', 'September', 'October', 'November', 'December'];
+    45→const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    46→const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    47→const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+    48→
+    49→const pad = (n: number): string => String(n).padStart(2, '0');
+    50→const ymd = (y: number, m: number, d: number): string => `${y}-${pad(m)}-${pad(d)}`;
+    51→const todayYMD = (): string => {
+    52→  const t = new Date();
+    53→  return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
+    54→};
+    55→const isFriday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 5;
+    56→const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
+    57→
+    58→interface MonthPoint { y: number; m: number }
+    59→const monthKeyOf = (p: MonthPoint): string => `${p.y}-${pad(p.m)}`;
+    60→const monthIndexOf = (p: MonthPoint): number => p.y * 12 + (p.m - 1);
+    61→const monthFromIndex = (i: number): MonthPoint => ({ y: Math.floor(i / 12), m: (i % 12) + 1 });
+    62→const monthOf = (iso: string): MonthPoint => {
+    63→  const d = iso.length === 10 ? new Date(`${iso}T00:00:00`) : new Date(iso);
+    64→  return { y: d.getFullYear(), m: d.getMonth() + 1 };
+    65→};
+    66→const currentMonthPoint = (): MonthPoint => {
+    67→  const t = new Date();
+    68→  return { y: t.getFullYear(), m: t.getMonth() + 1 };
+    69→};
+    70→const monthLabel = (p: MonthPoint): string => `${MONTH_NAMES[p.m - 1]} ${p.y}`;
+    71→const selectableYears = (): number[] => {
+    72→  const y = currentMonthPoint().y;
+    73→  return [y - 2, y - 1, y];
+    74→};
+    75→const fmtHours = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+    76→
+    77→const STATUS_LABEL: Record<EmployeeStatus, string> = {
+    78→  active: 'Active',
+    79→  pending_deletion: 'Pending Deletion',
+    80→  deleted: 'Deleted',
+    81→};
+    82→
+    83→/** "1, 2, 3, 5" → [1, 2, 3, 5] (validated, deduped, sorted) */
+    84→const parseMonthsInput = (raw: string): number[] => {
+    85→  const tokens = raw.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    86→  const nums = tokens.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
+    87→  return [...new Set(nums)].sort((a, b) => a - b);
+    88→};
+    89→
+    90→const invalidMonthTokens = (raw: string): string[] => {
+    91→  const tokens = raw.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+    92→  return tokens.filter((t) => {
+    93→    const n = Number(t);
+    94→    return !Number.isInteger(n) || n < 1 || n > 12;
+    95→  });
+    96→};
+    97→
+    98→const totalsFor = (records: Attendance[]): { hours: number; absents: number } => {
+    99→  let hours = 0;
+   100→  let absents = 0;
+   101→  records.forEach((r) => {
+   102→    if (r.status === 'present' && r.hours != null) hours += r.hours;
+   103→    else if (r.status === 'absent') absents += 1;
+   104→  });
+   105→  return { hours: Math.round(hours * 100) / 100, absents };
+   106→};
+   107→
+   108→const describeMonths = (points: MonthPoint[]): string => {
+   109→  if (points.length === 0) return '';
+   110→  if (points.length === 1) return monthLabel(points[0]);
+   111→  const sorted = [...points].sort((a, b) => monthIndexOf(a) - monthIndexOf(b));
+   112→  if (sorted.every((p) => p.y === sorted[0].y)) {
+   113→    return `${sorted.map((p) => MONTH_SHORT[p.m - 1]).join(', ')} ${sorted[0].y}`;
+   114→  }
+   115→  return `${monthLabel(sorted[0])} – ${monthLabel(sorted[sorted.length - 1])}`;
+   116→};
+   117→
+   118→/** Lifetime range: first working month = join month, or the earliest month that
+   119→ *  has marked attendance (whichever is earlier — probed with a bounded look-back
+   120→ *  that never precedes the employee record). Last working month = the current
+   121→ *  month, or the updated_at month for deleted / pending-deletion employees. */
+   122→async function computeLifetimeRange(emp: EmployeeVM): Promise<{ first: MonthPoint; last: MonthPoint }> {
+   123→  const current = currentMonthPoint();
+   124→  let last = current;
+   125→  if ((emp.status === 'deleted' || emp.status === 'pending_deletion') && emp.updated_at) {
+   126→    const lu = monthOf(emp.updated_at);
+   127→    if (monthIndexOf(lu) < monthIndexOf(current)) last = lu;
+   128→  }
+   129→  const created = monthOf(emp.created_at);
+   130→  let first = emp.join_date ? monthOf(emp.join_date) : created;
+   131→  const floor = Math.max(monthIndexOf(created), monthIndexOf(first) - 6);
+   132→  for (let i = monthIndexOf(first) - 1; i >= floor; i--) {
+   133→    try {
+   134→      const rows = await dataApi.getMonthAttendance(monthKeyOf(monthFromIndex(i)));
+   135→      const hasMarks = rows.some((r) => r.employee_id === emp.id && r.status !== 'not_marked');
+   136→      if (!hasMarks) break;
+   137→      first = monthFromIndex(i);
+   138→    } catch {
+   139→      break;
+   140→    }
+   141→  }
+   142→  if (monthIndexOf(first) > monthIndexOf(last)) first = last;
+   143→  return { first, last };
+   144→}
+   145→
+   146→const enumerateMonths = (first: MonthPoint, last: MonthPoint): MonthPoint[] => {
+   147→  const out: MonthPoint[] = [];
+   148→  for (let i = monthIndexOf(first); i <= monthIndexOf(last); i++) out.push(monthFromIndex(i));
+   149→  return out;
+   150→};
+   151→
+   152→// ---------------------------------------------------------------------------
+   153→// Shared display pieces
+   154→// ---------------------------------------------------------------------------
+   155→function InfoRow({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
+   156→  const text = typeof value === 'string' ? value : undefined;
+   157→  return (
+   158→    <div className="min-w-0">
+   159→      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+   160→      <p className={cn('mt-0.5 truncate text-sm font-medium', mono && 'font-mono text-xs')} title={text}>
+   161→        {value ?? '—'}
+   162→      </p>
+   163→    </div>
+   164→  );
+   165→}
+   166→
+   167→function DocStatusPill({ status }: { status: DocumentStatus | null }) {
+   168→  if (!status) return <span className="text-sm font-medium text-muted-foreground">—</span>;
+   169→  const map: Record<DocumentStatus, string> = {
+   170→    Valid: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-500',
+   171→    Expired: 'border-rose-500/25 bg-rose-500/10 text-rose-500',
+   172→    'N/A': 'border-zinc-500/25 bg-zinc-500/10 text-zinc-400',
+   173→  };
+   174→  return (
+   175→    <span className={cn('inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium', map[status])}>
+   176→      {status}
+   177→    </span>
+   178→  );
+   179→}
+   180→
+   181→function InfoCard({ index, icon, title, sub, children }: {
+   182→  index: number; icon: ReactNode; title: string; sub?: string; children: ReactNode;
+   183→}) {
+   184→  return (
+   185→    <motion.section
+   186→      initial={{ opacity: 0, y: 12 }}
+   187→      animate={{ opacity: 1, y: 0 }}
+   188→      transition={{ duration: 0.35, delay: 0.08 + index * 0.06, ease: EASE }}
+   189→      className="card-glow rounded-xl border bg-card p-5"
+   190→    >
+   191→      <SectionTitle icon={icon} title={title} sub={sub} />
+   192→      <div className="mt-4 grid gap-x-4 gap-y-4 sm:grid-cols-2">{children}</div>
+   193→    </motion.section>
+   194→  );
+   195→}
+   196→
+   197→/**
+   198→ * Calendar-style month timesheet. Two variants:
+   199→ *  - themed (default): app tokens, used on the Track Record page section.
+   200→ *  - print: explicit white/black classes so the captured PDF looks the same in
+   201→ *    light & dark themes (html2canvas-pro captures the real computed colors).
+   202→ */
+   203→function MonthGrid({ year, month, records, print = false }: {
+   204→  year: number; month: number; records: Attendance[]; print?: boolean;
+   205→}) {
+   206→  const today = todayYMD();
+   207→  const lead = new Date(year, month - 1, 1).getDay();
+   208→  const days = daysInMonth(year, month);
+   209→  const byDate = useMemo(() => {
+   210→    const m = new Map<string, Attendance>();
+   211→    records.forEach((r) => m.set(r.date, r));
+   212→    return m;
+   213→  }, [records]);
+   214→
+   215→  return (
+   216→    <div className={cn('grid grid-cols-7', print ? 'gap-1' : 'gap-1.5')}>
+   217→      {WEEKDAYS.map((w) => (
+   218→        <div
+   219→          key={w}
+   220→          className={cn(
+   221→            'pb-1 text-center text-[11px] font-semibold uppercase tracking-wide',
+   222→            print
+   223→              ? (w === 'Fri' ? 'text-rose-600' : 'text-zinc-500')
+   224→              : (w === 'Fri' ? 'text-rose-500' : 'text-muted-foreground'),
+   225→          )}
+   226→        >
+   227→          {w}
+   228→        </div>
+   229→      ))}
+   230→      {Array.from({ length: lead }).map((_, i) => <div key={`lead-${i}`} />)}
+   231→      {Array.from({ length: days }).map((_, idx) => {
+   232→        const d = idx + 1;
+   233→        const date = ymd(year, month, d);
+   234→        const rec = byDate.get(date);
+   235→        const future = date > today;
+   236→        const fri = isFriday(date);
+   237→        const absent = rec?.status === 'absent';
+   238→        const hasHours = rec?.status === 'present' && rec.hours != null;
+   239→        return (
+   240→          <div
+   241→            key={d}
+   242→            role="img"
+   243→            aria-label={`${date}${fri ? ', Friday' : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : ', not marked'}`}
+   244→            className={cn(
+   245→              'relative flex min-h-16 flex-col items-center justify-center rounded-lg border text-sm',
+   246→              print ? 'border-zinc-300 bg-white text-zinc-900' : 'border-border/60 bg-background/60',
+   247→              fri && (print ? 'border-rose-200 bg-rose-50' : 'border-rose-500/20 bg-rose-500/[0.04]'),
+   248→              future && 'opacity-40',
+   249→              date === today && (print ? 'ring-2 ring-zinc-500' : 'ring-2 ring-brand/50'),
+   250→            )}
+   251→          >
+   252→            <span className={cn('absolute left-1.5 top-1 text-[10px]', print ? 'text-zinc-500' : 'text-muted-foreground')}>
+   253→              {d}
+   254→            </span>
+   255→            {absent ? (
+   256→              <span className={cn('text-lg font-bold', print ? 'text-rose-600' : 'text-rose-500')}>A</span>
+   257→            ) : hasHours ? (
+   258→              <span className={cn('text-base font-semibold tabular-nums', print ? 'text-emerald-700' : 'text-emerald-500')}>
+   259→                {rec?.hours}h
+   260→              </span>
+   261→            ) : (
+   262→              <span className={cn('text-xs', print ? 'text-zinc-400' : 'text-muted-foreground/50')}>—</span>
+   263→            )}
+   264→          </div>
+   265→        );
+   266→      })}
+   267→    </div>
+   268→  );
+   269→}
+   270→
+   271→// ---------------------------------------------------------------------------
+   272→// Print preview blocks (explicit light colors — captured by html2canvas-pro)
+   273→// ---------------------------------------------------------------------------
+   274→function PrintHeaderBlock({ emp, points }: { emp: EmployeeVM; points: MonthPoint[] }) {
+   275→  return (
+   276→    <header className="rounded-lg border-2 border-zinc-300 bg-white p-4">
+   277→      <div className="flex items-center gap-3">
+   278→        <div className="h-10 w-1.5 shrink-0 rounded-full bg-violet-600" aria-hidden="true" />
+   279→        <div className="min-w-0">
+   280→          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">
+   281→            Pulse Workforce OS — Employee Track Record
+   282→          </p>
+   283→          <h2 className="truncate text-xl font-bold leading-tight text-zinc-900">{emp.full_name}</h2>
+   284→          <p className="truncate text-xs font-medium text-zinc-600">
+   285→            <span className="font-mono">{emp.employee_code}</span>
+   286→            {' · '}{emp.position ?? 'Team Member'}{' · '}{emp.company_name ?? '—'}
+   287→          </p>
+   288→        </div>
+   289→      </div>
+   290→      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 border-t border-zinc-200 pt-2 text-[11px] leading-relaxed text-zinc-800 sm:grid-cols-3">
+   291→        <p><span className="font-semibold text-zinc-500">Site:</span> {emp.site_name ?? 'No Site Assigned'}</p>
+   292→        <p><span className="font-semibold text-zinc-500">Camp:</span> {emp.camp_name ?? '—'}</p>
+   293→        <p><span className="font-semibold text-zinc-500">Nationality:</span> {emp.nationality ?? '—'}</p>
+   294→        <p><span className="font-semibold text-zinc-500">Rating:</span> {emp.rating.toFixed(1)} / 5.0</p>
+   295→        <p><span className="font-semibold text-zinc-500">Status:</span> {STATUS_LABEL[emp.status]}</p>
+   296→        <p><span className="font-semibold text-zinc-500">Generated:</span> {fmtDate(todayYMD())}</p>
+   297→      </div>
+   298→      {points.length > 0 && (
+   299→        <p className="mt-2 border-t border-zinc-200 pt-2 text-[11px] text-zinc-700">
+   300→          <span className="font-semibold text-zinc-500">Period:</span> {describeMonths(points)}
+   301→          {' — '}{points.length} month{points.length !== 1 ? 's' : ''}
+   302→        </p>
+   303→      )}
+   304→    </header>
+   305→  );
+   306→}
+   307→
+   308→function PrintMonthCard({ emp, preview }: { emp: EmployeeVM; preview: MonthPreview }) {
+   309→  const totals = totalsFor(preview.records);
+   310→  return (
+   311→    <section className="break-inside-avoid rounded-lg border-2 border-zinc-300 bg-white p-4">
+   312→      <div className="flex flex-wrap items-baseline justify-between gap-x-3 border-b border-zinc-300 pb-2">
+   313→        <h3 className="text-sm font-bold tracking-wide text-zinc-900">
+   314→          {MONTH_NAMES[preview.point.m - 1].toUpperCase()} {preview.point.y}
+   315→          {' — '}{(emp.site_name ?? 'No Site Assigned').toUpperCase()}
+   316→        </h3>
+   317→        <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+   318→          {emp.full_name} · {emp.employee_code}
+   319→        </span>
+   320→      </div>
+   321→      <div className="mt-3">
+   322→        <MonthGrid year={preview.point.y} month={preview.point.m} records={preview.records} print />
+   323→      </div>
+   324→      <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-zinc-200 pt-3">
+   325→        <span className="rounded-md border-2 border-emerald-700 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-900">
+   326→          TOTAL HOURS: {fmtHours(totals.hours)}
+   327→        </span>
+   328→        <span className="rounded-md border-2 border-rose-700 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-900">
+   329→          TOTAL ABSENT: {totals.absents}
+   330→        </span>
+   331→      </div>
+   332→    </section>
+   333→  );
+   334→}
+   335→
+   336→// ---------------------------------------------------------------------------
+   337→// Share via WhatsApp dialog (options → preview → PDF export)
+   338→// ---------------------------------------------------------------------------
+   339→interface MonthPreview { point: MonthPoint; records: Attendance[] }
+   340→
+   341→function ShareDialogContent({ emp, onPreviewChange }: {
+   342→  emp: EmployeeVM;
+   343→  onPreviewChange: (hasPreview: boolean) => void;
+   344→}) {
+   345→  const [includeTrackRecord, setIncludeTrackRecord] = useState(true);
+   346→  const [shareMode, setShareMode] = useState<'lifetime' | 'specific'>('lifetime');
+   347→  const [specificYear, setSpecificYear] = useState(currentMonthPoint().y);
+   348→  const [monthsInput, setMonthsInput] = useState('');
+   349→  const [lifetimeRange, setLifetimeRange] = useState<{ first: MonthPoint; last: MonthPoint } | null>(null);
+   350→  const [previewMonths, setPreviewMonths] = useState<MonthPreview[] | null>(null);
+   351→  const [previewBusy, setPreviewBusy] = useState(false);
+   352→  const [simpleBusy, setSimpleBusy] = useState(false);
+   353→  const [pdfBusy, setPdfBusy] = useState(false);
+   354→  const [waBusy, setWaBusy] = useState(false);
+   355→  const previewRef = useRef<HTMLDivElement>(null);
+   356→  const employeeId = emp.id;
+   357→
+   358→  const parsedMonths = useMemo(() => parseMonthsInput(monthsInput), [monthsInput]);
+   359→  const invalidTokens = useMemo(() => invalidMonthTokens(monthsInput), [monthsInput]);
+   360→  const lifetimeCount = useMemo(() => (
+   361→    lifetimeRange ? monthIndexOf(lifetimeRange.last) - monthIndexOf(lifetimeRange.first) + 1 : 0
+   362→  ), [lifetimeRange]);
+   363→
+   364→  // Live "first working month → last working month" helper text.
+   365→  useEffect(() => {
+   366→    if (!includeTrackRecord || shareMode !== 'lifetime') return;
+   367→    let cancelled = false;
+   368→    (async () => {
+   369→      const range = await computeLifetimeRange(emp);
+   370→      if (!cancelled) setLifetimeRange(range);
+   371→    })();
+   372→    return () => { cancelled = true; };
+   373→    // Deps are stable on purpose: the emp object identity changes on every realtime
+   374→    // refetch, but only the employee id matters here (join_date/updated_at are fixed
+   375→    // within a dialog session).
+   376→  }, [employeeId, includeTrackRecord, shareMode]);
+   377→
+   378→  const buildPreview = async () => {
+   379→    let points: MonthPoint[];
+   380→    if (shareMode === 'specific') {
+   381→      if (parsedMonths.length === 0) {
+   382→        toast.error('No months selected', { description: 'Enter at least one month number (1–12), e.g. 1, 2, 3.' });
+   383→        return;
+   384→      }
+   385→      points = parsedMonths.map((m) => ({ y: specificYear, m }));
+   386→    } else {
+   387→      const range = lifetimeRange ?? await computeLifetimeRange(emp);
+   388→      points = enumerateMonths(range.first, range.last);
+   389→    }
+   390→    setPreviewBusy(true);
+   391→    try {
+   392→      const results = await Promise.all(
+   393→        points.map((p) => dataApi.getMonthAttendance(monthKeyOf(p)).catch(() => [] as Attendance[])),
+   394→      );
+   395→      const previews: MonthPreview[] = points.map((p, i) => ({
+   396→        point: p,
+   397→        records: results[i].filter((r) => r.employee_id === employeeId),
+   398→      }));
+   399→      setPreviewMonths(previews);
+   400→      onPreviewChange(true);
+   401→      toast.success(`Preview ready — ${previews.length} month${previews.length !== 1 ? 's' : ''}`);
+   402→    } catch (err) {
+   403→      toast.error(err instanceof Error ? err.message : 'Failed to build the preview');
+   404→    } finally {
+   405→      setPreviewBusy(false);
+   406→    }
+   407→  };
+   408→
+   409→  /** Old simple flow: CV PDF + wa.me, no track record. */
+   410→  const simpleShare = () => {
+   411→    setSimpleBusy(true);
+   412→    try {
+   413→      downloadEmployeeCv(emp);
+   414→      window.open(`https://wa.me/?text=${encodeURIComponent('Employee details attached')}`, '_blank');
+   415→      toast.success('CV downloaded — WhatsApp opened');
+   416→    } finally {
+   417→      setSimpleBusy(false);
+   418→    }
+   419→  };
+   420→
+   421→  const exportPreview = async (): Promise<boolean> => {
+   422→    const el = previewRef.current;
+   423→    if (!el) {
+   424→      toast.error('The preview is not ready yet');
+   425→      return false;
+   426→    }
+   427→    try {
+   428→      await exportTrackRecordPdf(el, trackRecordFilename(emp));
+   429→      return true;
+   430→    } catch (err) {
+   431→      toast.error(err instanceof Error ? err.message : 'PDF export failed');
+   432→      return false;
+   433→    }
+   434→  };
+   435→
+   436→  const downloadPreview = async () => {
+   437→    setPdfBusy(true);
+   438→    const ok = await exportPreview();
+   439→    if (ok) toast.success('Track record PDF downloaded');
+   440→    setPdfBusy(false);
+   441→  };
+   442→
+   443→  const sharePreview = async () => {
+   444→    setWaBusy(true);
+   445→    const summary = previewMonths ? describeMonths(previewMonths.map((p) => p.point)) : '';
+   446→    const waUrl = `https://wa.me/?text=${encodeURIComponent(`Track record for ${emp.full_name} (${emp.employee_code}) — ${summary}. PDF attached.`)}`;
+   447→    // opened synchronously inside the click so popup blockers allow it
+   448→    const win = window.open('', '_blank');
+   449→    const ok = await exportPreview();
+   450→    if (ok) {
+   451→      if (win) win.location.href = waUrl;
+   452→      else window.open(waUrl, '_blank');
+   453→      toast.success('Track record PDF downloaded — WhatsApp opened');
+   454→    } else if (win) {
+   455→      win.close();
+   456→    }
+   457→    setWaBusy(false);
+   458→  };
+   459→
+   460→  return (
+   461→    <>
+   462→      <DialogHeader>
+   463→        <DialogTitle className="flex items-center gap-2">
+   464→          <MessageCircle size={16} className="text-emerald-500" aria-hidden="true" />
+   465→          {previewMonths ? 'Track Record Preview' : 'Share via WhatsApp'}
+   466→        </DialogTitle>
+   467→        <DialogDescription>
+   468→          {previewMonths
+   469→            ? `${emp.full_name} — ${previewMonths.length} month${previewMonths.length !== 1 ? 's' : ''} (${describeMonths(previewMonths.map((p) => p.point))}). The PDF contains exactly what you see below.`
+   470→            : `Send ${emp.full_name}'s details — with or without a monthly track record PDF.`}
+   471→        </DialogDescription>
+   472→      </DialogHeader>
+   473→
+   474→      {!previewMonths && (
+   475→        <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/30 p-3">
+   476→          <div>
+   477→            <Label htmlFor="include-track-record" className="text-sm">Include track record</Label>
+   478→            <p className="text-xs text-muted-foreground">Attach the monthly timesheet PDF to the share.</p>
+   479→          </div>
+   480→          <Switch
+   481→            id="include-track-record"
+   482→            checked={includeTrackRecord}
+   483→            onCheckedChange={setIncludeTrackRecord}
+   484→            aria-label="Include track record in the shared PDF"
+   485→          />
+   486→        </div>
+   487→      )}
+   488→
+   489→      <AnimatePresence mode="wait" initial={false}>
+   490→        {previewMonths ? (
+   491→          <motion.div
+   492→            key="preview"
+   493→            initial={{ opacity: 0, y: 10 }}
+   494→            animate={{ opacity: 1, y: 0 }}
+   495→            exit={{ opacity: 0, y: -8 }}
+   496→            transition={{ duration: 0.25, ease: EASE }}
+   497→            className="space-y-4"
+   498→          >
+   499→            <div className="max-h-[60vh] overflow-y-auto rounded-lg border bg-muted/40 p-3">
+   500→              <div ref={previewRef} className="space-y-4 bg-white p-3 text-zinc-900 sm:p-5">
+   501→                <PrintHeaderBlock emp={emp} points={previewMonths.map((p) => p.point)} />
+   502→                {previewMonths.map((pv) => (
+   503→                  <PrintMonthCard key={monthKeyOf(pv.point)} emp={emp} preview={pv} />
+   504→                ))}
+   505→              </div>
+   506→            </div>
+   507→            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+   508→              <Button
+   509→                variant="ghost"
+   510→                onClick={() => { setPreviewMonths(null); onPreviewChange(false); }}
+   511→                disabled={pdfBusy || waBusy}
+   512→              >
+   513→                <ArrowLeft size={14} /> Back
+   514→              </Button>
+   515→              <Button variant="outline" onClick={downloadPreview} disabled={pdfBusy || waBusy}>
+   516→                {pdfBusy ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />} Download PDF
+   517→              </Button>
+   518→              <Button className="brand-gradient font-semibold text-white" onClick={sharePreview} disabled={pdfBusy || waBusy}>
+   519→                {waBusy ? <Loader2 size={14} className="animate-spin" /> : <MessageCircle size={14} />} Share via WhatsApp
+   520→              </Button>
+   521→            </div>
+   522→          </motion.div>
+   523→        ) : !includeTrackRecord ? (
+   524→          <motion.div
+   525→            key="cv-only"
+   526→            initial={{ opacity: 0, y: 10 }}
+   527→            animate={{ opacity: 1, y: 0 }}
+   528→            exit={{ opacity: 0, y: -8 }}
+   529→            transition={{ duration: 0.25, ease: EASE }}
+   530→            className="space-y-4"
+   531→          >
+   532→            <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+   533→              Simple flow: shares the employee CV PDF only — no track record months are attached.
+   534→            </p>
+   535→            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+   536→              <Button
+   537→                variant="outline"
+   538→                onClick={() => { downloadEmployeeCv(emp); toast.success('CV PDF downloaded'); }}
+   539→                disabled={simpleBusy}
+   540→              >
+   541→                <FileDown size={14} /> Download CV
+   542→              </Button>
+   543→              <Button className="brand-gradient font-semibold text-white" onClick={simpleShare} disabled={simpleBusy}>
+   544→                {simpleBusy ? <Loader2 size={14} className="animate-spin" /> : <MessageCircle size={14} />} Share via WhatsApp
+   545→              </Button>
+   546→            </div>
+   547→          </motion.div>
+   548→        ) : (
+   549→          <motion.div
+   550→            key="options"
+   551→            initial={{ opacity: 0, y: 10 }}
+   552→            animate={{ opacity: 1, y: 0 }}
+   553→            exit={{ opacity: 0, y: -8 }}
+   554→            transition={{ duration: 0.25, ease: EASE }}
+   555→            className="space-y-4"
+   556→          >
+   557→            <Tabs value={shareMode} onValueChange={(v) => setShareMode(v as 'lifetime' | 'specific')}>
+   558→              <TabsList className="grid w-full grid-cols-2">
+   559→                <TabsTrigger value="lifetime">Lifetime</TabsTrigger>
+   560→                <TabsTrigger value="specific">Specific months</TabsTrigger>
+   561→              </TabsList>
+   562→            </Tabs>
+   563→
+   564→            {shareMode === 'lifetime' ? (
+   565→              <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+   566→                {lifetimeRange ? (
+   567→                  <p className="text-muted-foreground">
+   568→                    From <span className="font-semibold text-foreground">{monthLabel(lifetimeRange.first)}</span> to{' '}
+   569→                    <span className="font-semibold text-foreground">{monthLabel(lifetimeRange.last)}</span> —{' '}
+   570→                    <span className="font-semibold text-brand">{lifetimeCount} month{lifetimeCount !== 1 ? 's' : ''}</span>{' '}
+   571→                    will be included (first working month → last working month).
+   572→                  </p>
+   573→                ) : (
+   574→                  <p className="flex items-center gap-2 text-muted-foreground">
+   575→                    <Loader2 size={13} className="animate-spin" aria-hidden="true" /> Computing the first working month…
+   576→                  </p>
+   577→                )}
+   578→              </div>
+   579→            ) : (
+   580→              <div className="space-y-3">
+   581→                <div className="grid grid-cols-[104px_1fr] gap-3">
+   582→                  <div className="space-y-1.5">
+   583→                    <Label htmlFor="share-year">Year</Label>
+   584→                    <Select value={String(specificYear)} onValueChange={(v) => setSpecificYear(Number(v))}>
+   585→                      <SelectTrigger id="share-year" className="bg-card" aria-label="Year for the selected months">
+   586→                        <SelectValue />
+   587→                      </SelectTrigger>
+   588→                      <SelectContent>
+   589→                        {selectableYears().map((y) => (
+   590→                          <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+   591→                        ))}
+   592→                      </SelectContent>
+   593→                    </Select>
+   594→                  </div>
+   595→                  <div className="space-y-1.5">
+   596→                    <Label htmlFor="share-months">Months</Label>
+   597→                    <Input
+   598→                      id="share-months"
+   599→                      placeholder="e.g. 1, 2, 3, 5"
+   600→                      value={monthsInput}
+   601→                      onChange={(e) => setMonthsInput(e.target.value)}
+   602→                      aria-label="Month numbers to include, comma separated"
+   603→                    />
+   604→                  </div>
+   605→                </div>
+   606→                {invalidTokens.length > 0 && (
+   607→                  <p className="text-xs text-amber-600 dark:text-amber-400">
+   608→                    Ignoring: {invalidTokens.join(', ')} — only month numbers 1–12 are kept.
+   609→                  </p>
+   610→                )}
+   611→                {parsedMonths.length > 0 ? (
+   612→                  <div className="flex flex-wrap gap-1.5">
+   613→                    {parsedMonths.map((m) => (
+   614→                      <span
+   615→                        key={m}
+   616→                        className="inline-flex items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2.5 py-1 text-xs font-medium text-brand"
+   617→                      >
+   618→                        {MONTH_SHORT[m - 1]} {specificYear}
+   619→                        <button
+   620→                          type="button"
+   621→                          aria-label={`Remove ${MONTH_SHORT[m - 1]} ${specificYear}`}
+   622→                          className="rounded-full p-0.5 transition-colors hover:bg-brand/20"
+   623→                          onClick={() => setMonthsInput(parsedMonths.filter((x) => x !== m).join(', '))}
+   624→                        >
+   625→                          <X size={11} />
+   626→                        </button>
+   627→                      </span>
+   628→                    ))}
+   629→                  </div>
+   630→                ) : (
+   631→                  <p className="text-xs text-muted-foreground">
+   632→                    Type month numbers separated by commas — each becomes one timesheet page.
+   633→                  </p>
+   634→                )}
+   635→              </div>
+   636→            )}
+   637→
+   638→            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+   639→              <Button
+   640→                variant="outline"
+   641→                onClick={() => { downloadEmployeeCv(emp); toast.success('CV PDF downloaded'); }}
+   642→                disabled={previewBusy}
+   643→              >
+   644→                <FileDown size={14} /> Download CV
+   645→              </Button>
+   646→              <Button className="brand-gradient font-semibold text-white" onClick={buildPreview} disabled={previewBusy}>
+   647→                {previewBusy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Preview PDF
+   648→              </Button>
+   649→            </div>
+   650→          </motion.div>
+   651→        )}
+   652→      </AnimatePresence>
+   653→    </>
+   654→  );
+   655→}
+   656→
+   657→// ---------------------------------------------------------------------------
+   658→// Page
+   659→// ---------------------------------------------------------------------------
+   660→export function EmployeeDetailsPage() {
+   661→  const realtimeVersion = useRealtimeVersion(['employee', 'attendance', 'site', 'camp']);
+   662→  const selectedEmployeeId = useAppStore((s) => s.selectedEmployeeId);
+   663→  const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
+   664→  const navigateToEmployeesWithEdit = useAppStore((s) => s.navigateToEmployeesWithEdit);
+   665→
+   666→  const [emp, setEmp] = useState<EmployeeVM | null>(null);
+   667→  const [loading, setLoading] = useState(true);
+   668→
+   669→  const initialPoint = currentMonthPoint();
+   670→  const [trYear, setTrYear] = useState(initialPoint.y);
+   671→  const [trMonth, setTrMonth] = useState(initialPoint.m);
+   672→  const [trLoading, setTrLoading] = useState(true);
+   673→  const [trRecords, setTrRecords] = useState<Attendance[] | null>(null);
+   674→
+   675→  const [shareOpen, setShareOpen] = useState(false);
+   676→  const [sharePreviewActive, setSharePreviewActive] = useState(false);
+   677→
+   678→  const trMonthKey = `${trYear}-${pad(trMonth)}`;
+   679→
+   680→  // ---- resolve the employee ---------------------------------------------------
+   681→  useEffect(() => {
+   682→    let cancelled = false;
+   683→    (async () => {
+   684→      try {
+   685→        const emps = await dataApi.listEmployees();
+   686→        if (cancelled) return;
+   687→        setEmp(emps.find((e) => e.id === selectedEmployeeId) ?? null);
+   688→      } catch (err) {
+   689→        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load employee');
+   690→      } finally {
+   691→        if (!cancelled) setLoading(false);
+   692→      }
+   693→    })();
+   694→    return () => { cancelled = true; };
+   695→  }, [selectedEmployeeId, realtimeVersion]);
+   696→
+   697→  // ---- track record month ------------------------------------------------------
+   698→  useEffect(() => {
+   699→    const employeeId = selectedEmployeeId;
+   700→    if (!employeeId) return;
+   701→    let cancelled = false;
+   702→    dataApi.getMonthAttendance(trMonthKey)
+   703→      .then((rows) => {
+   704→        if (cancelled) return;
+   705→        setTrRecords(rows.filter((r) => r.employee_id === employeeId));
+   706→        setTrLoading(false);
+   707→      })
+   708→      .catch(() => {
+   709→        if (cancelled) return;
+   710→        setTrRecords([]);
+   711→        setTrLoading(false);
+   712→      });
+   713→    return () => { cancelled = true; };
+   714→  }, [selectedEmployeeId, trMonthKey, realtimeVersion]);
+   715→
+   716→  const trTotals = useMemo(() => totalsFor(trRecords ?? []), [trRecords]);
+   717→
+   718→  // ---- loading ------------------------------------------------------------------
+   719→  if (loading) {
+   720→    return (
+   721→      <div className="mx-auto max-w-6xl">
+   722→        <Skeleton className="mb-4 h-9 w-44 rounded-lg" />
+   723→        <Skeleton className="mb-4 h-44 rounded-xl" />
+   724→        <SkeletonRows rows={4} />
+   725→      </div>
+   726→    );
+   727→  }
+   728→
+   729→  // ---- not found ------------------------------------------------------------------
+   730→  if (!emp) {
+   731→    return (
+   732→      <motion.div
+   733→        initial={{ opacity: 0, y: 12 }}
+   734→        animate={{ opacity: 1, y: 0 }}
+   735→        transition={{ duration: 0.35, ease: EASE }}
+   736→        className="mx-auto max-w-6xl"
+   737→      >
+   738→        <EmptyState
+   739→          icon={<UserRound size={22} />}
+   740→          title="Employee not found"
+   741→          description="This employee may have been removed, or the link is out of date."
+   742→          action={
+   743→            <Button variant="outline" onClick={() => navigateToEmployees()} aria-label="Back to employees list">
+   744→              <ArrowLeft size={14} className="mr-1" /> Back to Employees
+   745→            </Button>
+   746→          }
+   747→        />
+   748→      </motion.div>
+   749→    );
+   750→  }
+   751→
+   752→  return (
+   753→    <motion.div
+   754→      initial={{ opacity: 0, y: 16 }}
+   755→      animate={{ opacity: 1, y: 0 }}
+   756→      transition={{ duration: 0.4, ease: EASE }}
+   757→      className="mx-auto max-w-6xl space-y-4"
+   758→    >
+   759→      {/* Back */}
+   760→      <Button variant="outline" size="sm" onClick={() => navigateToEmployees()} aria-label="Back to employees list">
+   761→        <ArrowLeft size={15} /> Employees
+   762→      </Button>
+   763→
+   764→      {/* ============================ Profile header ============================ */}
+   765→      <section className="card-glow rounded-xl border bg-card p-5 md:p-6">
+   766→        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+   767→          <div className="flex flex-col items-center gap-4 text-center sm:flex-row sm:items-start sm:text-left">
+   768→            <div className="flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-brand/15 text-xl font-bold text-brand ring-1 ring-brand/20 md:size-24">
+   769→              {emp.photo ? (
+   770→                <img src={emp.photo} alt={`${emp.full_name}'s photo`} className="size-full object-cover" />
+   771→              ) : initials(emp.full_name)}
+   772→            </div>
+   773→            <div className="min-w-0">
+   774→              <h1 className="flex flex-wrap items-center justify-center gap-2 text-xl font-semibold tracking-tight sm:justify-start md:text-2xl">
+   775→                {emp.full_name}
+   776→                {emp.is_team_leader && (
+   777→                  <span
+   778→                    title="Team Leader"
+   779→                    className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400"
+   780→                  >
+   781→                    <Crown size={11} className="fill-amber-400 text-amber-400" /> Team Leader
+   782→                  </span>
+   783→                )}
+   784→              </h1>
+   785→              <div className="mt-1.5 flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+   786→                <span className="font-mono text-xs text-muted-foreground">{emp.employee_code}</span>
+   787→                <EmployeeStatusBadge status={emp.status} />
+   788→              </div>
+   789→              <p className="mt-1.5 text-sm text-muted-foreground">
+   790→                {[emp.position ?? 'Team Member', emp.company_name, emp.nationality].filter(Boolean).join(' · ')}
+   791→              </p>
+   792→              <div className="mt-2 flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+   793→                <SiteBadge name={emp.site_name} />
+   794→                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+   795→                  <Tent size={11} className="inline" aria-hidden="true" /> {emp.camp_name ?? 'No camp'}
+   796→                </span>
+   797→              </div>
+   798→              <div className="mt-2 flex justify-center sm:justify-start">
+   799→                <RatingStars rating={emp.rating} size={15} />
+   800→              </div>
+   801→            </div>
+   802→          </div>
+   803→          <div className="flex flex-wrap items-center justify-center gap-2 lg:flex-col lg:items-stretch xl:flex-row xl:items-center">
+   804→            <Button
+   805→              variant="outline"
+   806→              size="sm"
+   807→              onClick={() => navigateToEmployeesWithEdit(emp.id)}
+   808→              aria-label={`Edit ${emp.full_name}`}
+   809→            >
+   810→              <Pencil size={14} /> Edit
+   811→            </Button>
+   812→            <Button
+   813→              variant="outline"
+   814→              size="sm"
+   815→              onClick={() => { downloadEmployeeCv(emp); toast.success('CV PDF downloaded'); }}
+   816→              aria-label={`Download ${emp.full_name}'s CV`}
+   817→            >
+   818→              <FileDown size={14} /> Download CV
+   819→            </Button>
+   820→            <Button
+   821→              size="sm"
+   822→              className="brand-gradient font-semibold text-white"
+   823→              onClick={() => { setSharePreviewActive(false); setShareOpen(true); }}
+   824→              aria-label={`Share ${emp.full_name}'s details via WhatsApp`}
+   825→            >
+   826→              <MessageCircle size={14} /> Share via WhatsApp
+   827→            </Button>
+   828→          </div>
+   829→        </div>
+   830→      </section>
+   831→
+   832→      {/* ============================ Detail sections ============================ */}
+   833→      <div className="grid gap-4 lg:grid-cols-2">
+   834→        <InfoCard index={0} icon={<UserRound size={16} />} title="Personal Information" sub="Contact & background">
+   835→          <InfoRow label="Nationality" value={emp.nationality ?? '—'} />
+   836→          <InfoRow label="Date of Birth" value={fmtDate(emp.date_of_birth)} />
+   837→          <InfoRow label="Phone" value={emp.phone ?? '—'} />
+   838→          <InfoRow label="Email" value={emp.email ?? '—'} />
+   839→          <InfoRow label="Emergency Contact" value={emp.emergency_contact ?? '—'} />
+   840→          <div className="sm:col-span-2">
+   841→            <InfoRow label="Address" value={emp.address ?? '—'} />
+   842→          </div>
+   843→        </InfoCard>
+   844→
+   845→        <InfoCard index={1} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
+   846→          <InfoRow label="Position" value={emp.position ?? '—'} />
+   847→          <InfoRow label="Join Date" value={fmtDate(emp.join_date)} />
+   848→          <InfoRow label="Company" value={emp.company_name ?? '—'} />
+   849→          <InfoRow label="Site" value={<SiteBadge name={emp.site_name} />} />
+   850→          <InfoRow
+   851→            label="Camp"
+   852→            value={emp.camp_name
+   853→              ? <span className="inline-flex items-center gap-1 text-sm font-medium text-amber-600 dark:text-amber-400"><Tent size={13} className="inline" aria-hidden="true" />{emp.camp_name}</span>
+   854→              : '—'}
+   855→          />
+   856→          <InfoRow
+   857→            label="Team Leader"
+   858→            value={emp.is_team_leader
+   859→              ? (
+   860→                <span className="inline-flex items-center gap-1 text-sm font-medium text-amber-600 dark:text-amber-400">
+   861→                  <Crown size={13} className="inline fill-amber-400 text-amber-400" aria-hidden="true" />
+   862→                  Yes — of {emp.leader_site_name ?? 'a site'}
+   863→                </span>
+   864→                )
+   865→              : 'No'}
+   866→          />
+   867→        </InfoCard>
+   868→
+   869→        <InfoCard index={2} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">
+   870→          <InfoRow label="Passport Number" value={emp.passport_number ?? '—'} mono />
+   871→          <InfoRow label="Passport Status" value={<DocStatusPill status={emp.passport_status} />} />
+   872→          <InfoRow label="ID Number" value={emp.id_number ?? '—'} mono />
+   873→          <InfoRow label="ID Status" value={<DocStatusPill status={emp.id_status} />} />
+   874→        </InfoCard>
+   875→
+   876→        <InfoCard index={3} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
+   877→          <InfoRow label="Employee Code" value={emp.employee_code} mono />
+   878→          <InfoRow label="Performance Rating" value={<RatingStars rating={emp.rating} size={13} />} />
+   879→          <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
+   880→          <InfoRow label="Last Updated" value={fmtDateTime(emp.updated_at)} />
+   881→        </InfoCard>
+   882→      </div>
+   883→
+   884→      {/* ============================ Track record ============================ */}
+   885→      <section className="card-glow rounded-xl border bg-card p-5 md:p-6">
+   886→        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+   887→          <SectionTitle
+   888→            icon={<CalendarCheck size={16} />}
+   889→            title="Track Record"
+   890→            sub="Monthly timesheet — hours worked per day"
+   891→          />
+   892→          <div className="flex items-center gap-2">
+   893→            {trLoading && <Loader2 size={14} className="animate-spin text-brand" aria-label="Loading attendance" />}
+   894→            <Select
+   895→              value={MONTH_NAMES[trMonth - 1]}
+   896→              onValueChange={(m) => { setTrLoading(true); setTrMonth(MONTH_NAMES.indexOf(m) + 1); }}
+   897→            >
+   898→              <SelectTrigger className="h-9 w-32 bg-card" aria-label="Track record month">
+   899→                <SelectValue />
+   900→              </SelectTrigger>
+   901→              <SelectContent>
+   902→                {MONTH_NAMES.map((m) => (
+   903→                  <SelectItem key={m} value={m}>{m}</SelectItem>
+   904→                ))}
+   905→              </SelectContent>
+   906→            </Select>
+   907→            <Select
+   908→              value={String(trYear)}
+   909→              onValueChange={(y) => { setTrLoading(true); setTrYear(Number(y)); }}
+   910→            >
+   911→              <SelectTrigger className="h-9 w-20 bg-card" aria-label="Track record year">
+   912→                <SelectValue />
+   913→              </SelectTrigger>
+   914→              <SelectContent>
+   915→                {selectableYears().map((y) => (
+   916→                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+   917→                ))}
+   918→              </SelectContent>
+   919→            </Select>
+   920→          </div>
+   921→        </div>
+   922→
+   923→        <div className="mt-4">
+   924→          {trLoading ? (
+   925→            <div className="grid grid-cols-7 gap-1.5" aria-label="Loading timesheet">
+   926→              {Array.from({ length: 35 }).map((_, i) => (
+   927→                <Skeleton key={i} className="min-h-16 rounded-lg" />
+   928→              ))}
+   929→            </div>
+   930→          ) : (
+   931→            <AnimatePresence mode="wait">
+   932→              <motion.div
+   933→                key={trMonthKey}
+   934→                initial={{ opacity: 0, y: 10 }}
+   935→                animate={{ opacity: 1, y: 0 }}
+   936→                exit={{ opacity: 0, y: -8 }}
+   937→                transition={{ duration: 0.25, ease: EASE }}
+   938→              >
+   939→                <MonthGrid year={trYear} month={trMonth} records={trRecords ?? []} />
+   940→                <div className="mt-4 flex flex-wrap items-center gap-3 border-t pt-4">
+   941→                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-4 py-1.5 text-sm font-semibold text-emerald-500">
+   942→                    Total Hours: <AnimatedCounter value={trTotals.hours} decimals={Number.isInteger(trTotals.hours) ? 0 : 1} />
+   943→                  </span>
+   944→                  <span
+   945→                    className={cn(
+   946→                      'inline-flex items-center gap-1.5 rounded-full border px-4 py-1.5 text-sm font-semibold',
+   947→                      trTotals.absents > 0
+   948→                        ? 'border-rose-500/25 bg-rose-500/10 text-rose-500'
+   949→                        : 'border-border bg-muted text-muted-foreground',
+   950→                    )}
+   951→                  >
+   952→                    Total Absent: <AnimatedCounter value={trTotals.absents} />
+   953→                  </span>
+   954→                  <span className="ml-auto hidden text-[11px] text-muted-foreground sm:block">
+   955→                    A = Absent · — = Not marked
+   956→                  </span>
+   957→                </div>
+   958→              </motion.div>
+   959→            </AnimatePresence>
+   960→          )}
+   961→        </div>
+   962→      </section>
+   963→
+   964→      {/* ============================ Share dialog ============================ */}
+   965→      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+   966→        <DialogContent className={cn('sm:max-w-lg', sharePreviewActive && 'sm:max-w-3xl')}>
+   967→          <ShareDialogContent emp={emp} onPreviewChange={setSharePreviewActive} />
+   968→        </DialogContent>
+   969→      </Dialog>
+   970→    </motion.div>
+   971→  );
+   972→}
+   973→

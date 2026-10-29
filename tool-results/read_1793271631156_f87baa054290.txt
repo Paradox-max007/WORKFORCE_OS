@@ -1,0 +1,1267 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Admin Management (accounts, roles & menu permissions)
+     5→// ----------------------------------------------------------------------------
+     6→// Super-admin-only module. Two grouped sections (Super Admins / Admins) with
+     7→// independent search, create/edit dialogs, per-menu permission switches and
+     8→// a guarded delete flow. Everything re-fetches in realtime whenever the
+     9→// `profiles` or `menu_permission` tables change anywhere.
+    10→// ============================================================================
+    11→
+    12→import { motion } from 'framer-motion';
+    13→import {
+    14→  Ban, Bell, Building2, Calendar, CalendarCheck, Crown, Eye, EyeOff, FileText,
+    15→  KeyRound, LayoutDashboard, Loader2, Lock, Mail, Pencil, Plus, Search, Shield,
+    16→  Shirt, Tent, Trash2, User, Users, X,
+    17→} from 'lucide-react';
+    18→import type { LucideIcon } from 'lucide-react';
+    19→import { useEffect, useMemo, useState } from 'react';
+    20→import { toast } from 'sonner';
+    21→import { EmptyState, PageHeader, SkeletonRows } from '@/components/shared/primitives';
+    22→import {
+    23→  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+    24→  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    25→} from '@/components/ui/alert-dialog';
+    26→import { Badge } from '@/components/ui/badge';
+    27→import { Button } from '@/components/ui/button';
+    28→import {
+    29→  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+    30→} from '@/components/ui/dialog';
+    31→import { Input } from '@/components/ui/input';
+    32→import { Label } from '@/components/ui/label';
+    33→import {
+    34→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    35→} from '@/components/ui/select';
+    36→import { Separator } from '@/components/ui/separator';
+    37→import { Switch } from '@/components/ui/switch';
+    38→import {
+    39→  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+    40→} from '@/components/ui/table';
+    41→import { dataApi } from '@/lib/data';
+    42→import { fmtDate, initials } from '@/lib/format';
+    43→import { MENU_KEYS, type MenuKey, type MenuPermissionMap, type Profile, type Role } from '@/lib/types';
+    44→import { cn } from '@/lib/utils';
+    45→import { useAuthStore } from '@/store/auth-store';
+    46→import { useRealtimeVersion } from '@/store/realtime';
+    47→
+    48→// ---------------------------------------------------------------------------
+    49→// Constants & helpers
+    50→// ---------------------------------------------------------------------------
+    51→
+    52→/** Signature PULSE easing — soft expo-out. */
+    53→const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+    54→const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    55→
+    56→const EMPTY_PERMS: MenuPermissionMap = {
+    57→  employees: false,
+    58→  sites: false,
+    59→  camps: false,
+    60→  attendance: false,
+    61→  leave_requests: false,
+    62→  cancellation_requests: false,
+    63→  notifications: false,
+    64→};
+    65→
+    66→/** Friendly metadata for the permission keys defined in MENU_KEYS. */
+    67→const MENU_META: Record<MenuKey, { label: string; hint: string; icon: LucideIcon }> = {
+    68→  employees: { label: 'Employees', hint: 'Directory, records & ratings', icon: Users },
+    69→  sites: { label: 'Sites', hint: 'Work sites & client projects', icon: Building2 },
+    70→  camps: { label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent },
+    71→  attendance: { label: 'Attendance', hint: 'Excel-style hours marking', icon: CalendarCheck },
+    72→  leave_requests: { label: 'Leave Requests', hint: 'Leave applications & review', icon: FileText },
+    73→  cancellation_requests: { label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban },
+    74→  notifications: { label: 'Notifications', hint: 'Alerts & announcements', icon: Bell },
+    75→};
+    76→
+    77→/** Menus every admin can always reach (mirrors the sidebar visibility rules). */
+    78→const ALWAYS_ON_MENUS: { label: string; hint: string; icon: LucideIcon }[] = [
+    79→  { label: 'Dashboard', hint: 'Operations overview & stats', icon: LayoutDashboard },
+    80→  { label: 'Uniform Registry', hint: 'Uniform tokens & renewals', icon: Shirt },
+    81→];
+    82→
+    83→/** Create or edit target for the account dialog. */
+    84→type AccountTarget =
+    85→  | { mode: 'create'; role: 'admin' | 'super_admin' }
+    86→  | { mode: 'edit'; profile: Profile };
+    87→
+    88→const matchesSearch = (profile: Profile, query: string): boolean => {
+    89→  const q = query.trim().toLowerCase();
+    90→  if (!q) return true;
+    91→  return profile.name.toLowerCase().includes(q) || profile.email.toLowerCase().includes(q);
+    92→};
+    93→
+    94→// ---------------------------------------------------------------------------
+    95→// Main page
+    96→// ---------------------------------------------------------------------------
+    97→export function AdminPage() {
+    98→  const user = useAuthStore((s) => s.user);
+    99→  const isSuperAdmin = user?.role === 'super_admin';
+   100→  const version = useRealtimeVersion(['profiles', 'menu_permission']);
+   101→
+   102→  const [profiles, setProfiles] = useState<Profile[] | null>(null);
+   103→  const [permCache, setPermCache] = useState<Record<string, MenuPermissionMap>>({});
+   104→  const [superSearch, setSuperSearch] = useState('');
+   105→  const [adminSearch, setAdminSearch] = useState('');
+   106→
+   107→  // Dialog state
+   108→  const [accountTarget, setAccountTarget] = useState<AccountTarget | null>(null);
+   109→  const [permTarget, setPermTarget] = useState<Profile | null>(null);
+   110→  const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
+   111→  const [deleting, setDeleting] = useState(false);
+   112→
+   113→  // ---- data loading (re-fetches whenever profiles / permissions change) ----
+   114→  useEffect(() => {
+   115→    if (!isSuperAdmin) return;
+   116→    let cancelled = false;
+   117→    (async () => {
+   118→      try {
+   119→        const list = await dataApi.listProfiles();
+   120→        if (cancelled) return;
+   121→        setProfiles(list);
+   122→        // Permission summaries for the "Access" column of regular admins
+   123→        const maps = await Promise.all(
+   124→          list
+   125→            .filter((p) => p.role === 'admin')
+   126→            .map(async (p): Promise<[string, MenuPermissionMap]> => {
+   127→              try {
+   128→                return [p.id, await dataApi.getMenuPermissions(p.id)];
+   129→              } catch {
+   130→                return [p.id, { ...EMPTY_PERMS }];
+   131→              }
+   132→            }),
+   133→        );
+   134→        if (!cancelled) setPermCache(Object.fromEntries(maps));
+   135→      } catch {
+   136→        if (!cancelled) setProfiles([]);
+   137→      }
+   138→    })();
+   139→    return () => { cancelled = true; };
+   140→  }, [version, isSuperAdmin]);
+   141→
+   142→  // ---- derived values --------------------------------------------------------
+   143→  const allSuper = useMemo(() => (profiles ?? []).filter((p) => p.role === 'super_admin'), [profiles]);
+   144→  const allAdmins = useMemo(() => (profiles ?? []).filter((p) => p.role === 'admin'), [profiles]);
+   145→  const superAdmins = useMemo(() => allSuper.filter((p) => matchesSearch(p, superSearch)), [allSuper, superSearch]);
+   146→  const regularAdmins = useMemo(() => allAdmins.filter((p) => matchesSearch(p, adminSearch)), [allAdmins, adminSearch]);
+   147→  const superCount = allSuper.length;
+   148→  const loading = profiles === null;
+   149→
+   150→  // ---- delete flow (client-side guard: never remove the last super admin) ----
+   151→  const requestDelete = (p: Profile) => {
+   152→    if (p.role === 'super_admin' && superCount <= 1) {
+   153→      toast.error('Cannot delete the last super admin', {
+   154→        description: 'There must be at least one super admin. Promote another account first.',
+   155→      });
+   156→      return;
+   157→    }
+   158→    setDeleteTarget(p);
+   159→  };
+   160→
+   161→  const handleDelete = async () => {
+   162→    if (!deleteTarget) return;
+   163→    setDeleting(true);
+   164→    try {
+   165→      await dataApi.deleteProfile(deleteTarget.id);
+   166→      toast.success('Account deleted', {
+   167→        description: `${deleteTarget.name} (${deleteTarget.email}) no longer has access to the system.`,
+   168→      });
+   169→      setDeleteTarget(null);
+   170→    } catch (err) {
+   171→      toast.error(err instanceof Error ? err.message : 'Failed to delete the account');
+   172→    } finally {
+   173→      setDeleting(false);
+   174→    }
+   175→  };
+   176→
+   177→  // Keep the "Access" column in sync when toggles fire in the permissions dialog
+   178→  const handlePermChanged = (profileId: string, key: MenuKey, allowed: boolean) => {
+   179→    setPermCache((prev) => ({
+   180→      ...prev,
+   181→      [profileId]: { ...(prev[profileId] ?? EMPTY_PERMS), [key]: allowed },
+   182→    }));
+   183→  };
+   184→
+   185→  // ---- super-admin-only guard -------------------------------------------------
+   186→  if (!isSuperAdmin) {
+   187→    return (
+   188→      <div className="mx-auto flex min-h-[60vh] w-full max-w-7xl flex-col items-center justify-center">
+   189→        <div className="w-full max-w-lg">
+   190→          <EmptyState
+   191→            icon={<Shield size={22} />}
+   192→            title="Super admin access only"
+   193→            description="Only super admins can create and manage admin accounts and menu permissions. Contact a super admin if you believe you should have access."
+   194→          />
+   195→        </div>
+   196→      </div>
+   197→    );
+   198→  }
+   199→
+   200→  const TH = 'px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground';
+   201→
+   202→  return (
+   203→    <div className="mx-auto max-w-7xl space-y-6">
+   204→      <PageHeader
+   205→        title="Admin Management"
+   206→        description="Create and manage admin accounts, control roles, and grant menu access."
+   207→        actions={
+   208→          <>
+   209→            <Button
+   210→              variant="outline"
+   211→              onClick={() => setAccountTarget({ mode: 'create', role: 'super_admin' })}
+   212→              className="h-10 gap-1.5 border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-400"
+   213→            >
+   214→              <Crown size={16} aria-hidden /> Create Super Admin
+   215→            </Button>
+   216→            <Button
+   217→              onClick={() => setAccountTarget({ mode: 'create', role: 'admin' })}
+   218→              className="h-10 brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   219→            >
+   220→              <Plus size={16} aria-hidden /> Create Admin
+   221→            </Button>
+   222→          </>
+   223→        }
+   224→      />
+   225→
+   226→      {/* ================= Super Admins ================= */}
+   227→      <motion.div
+   228→        initial={{ opacity: 0, y: 14 }}
+   229→        animate={{ opacity: 1, y: 0 }}
+   230→        transition={{ duration: 0.35, delay: 0.05, ease: EASE }}
+   231→      >
+   232→        <section className="card-glow overflow-hidden rounded-xl border bg-card" aria-labelledby="super-admins-title">
+   233→          <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
+   234→            <div className="flex items-center gap-2.5">
+   235→              <div className="rounded-lg bg-amber-500/10 p-1.5 text-amber-500">
+   236→                <Crown size={16} aria-hidden />
+   237→              </div>
+   238→              <div>
+   239→                <h3 id="super-admins-title" className="flex items-center gap-2 text-sm font-semibold">
+   240→                  Super Admins
+   241→                  <Badge
+   242→                    variant="outline"
+   243→                    className="rounded-full border-amber-500/25 bg-amber-500/10 px-2 text-[10px] font-semibold text-amber-600 dark:text-amber-400"
+   244→                  >
+   245→                    {superAdmins.length}
+   246→                  </Badge>
+   247→                </h3>
+   248→                <p className="text-xs text-muted-foreground">Full access to every module</p>
+   249→              </div>
+   250→            </div>
+   251→            <SearchBox
+   252→              value={superSearch}
+   253→              onChange={setSuperSearch}
+   254→              placeholder="Search super admins…"
+   255→              label="Search super admins by name or email"
+   256→            />
+   257→          </div>
+   258→
+   259→          {loading ? (
+   260→            <div className="p-4">
+   261→              <SkeletonRows rows={3} />
+   262→            </div>
+   263→          ) : superAdmins.length === 0 ? (
+   264→            <div className="p-4">
+   265→              <EmptyState
+   266→                icon={<Crown size={22} />}
+   267→                title={superSearch ? 'No super admins match your search' : 'No super admins found'}
+   268→                description={superSearch
+   269→                  ? 'Try a different name or email address.'
+   270→                  : 'Create a super admin to share full system access.'}
+   271→              />
+   272→            </div>
+   273→          ) : (
+   274→            <>
+   275→              {/* Desktop table */}
+   276→              <div className="hidden overflow-x-auto p-2 md:block">
+   277→                <Table>
+   278→                  <TableHeader>
+   279→                    <TableRow>
+   280→                      <TableHead className={TH}>Member</TableHead>
+   281→                      <TableHead className={TH}>Role</TableHead>
+   282→                      <TableHead className={TH}>Created</TableHead>
+   283→                      <TableHead className={cn(TH, 'text-right')}>Actions</TableHead>
+   284→                    </TableRow>
+   285→                  </TableHeader>
+   286→                  <TableBody>
+   287→                    {superAdmins.map((p, i) => (
+   288→                      <motion.tr
+   289→                        key={p.id}
+   290→                        initial={{ opacity: 0, y: 10 }}
+   291→                        animate={{ opacity: 1, y: 0 }}
+   292→                        transition={{ delay: Math.min(i, 10) * 0.04, duration: 0.3, ease: EASE }}
+   293→                        className="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/30"
+   294→                      >
+   295→                        <TableCell className="px-3 py-3">
+   296→                          <div className="flex items-center gap-3">
+   297→                            <ProfileAvatar profile={p} />
+   298→                            <div className="min-w-0">
+   299→                              <p className="flex items-center gap-1.5 text-sm font-medium">
+   300→                                <span className="truncate">{p.name}</span>
+   301→                                {p.id === user?.id && <YouBadge />}
+   302→                              </p>
+   303→                              <p className="flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+   304→                                <Mail size={11} className="shrink-0" aria-hidden /> {p.email}
+   305→                              </p>
+   306→                            </div>
+   307→                          </div>
+   308→                        </TableCell>
+   309→                        <TableCell className="px-3 py-3">
+   310→                          <RoleBadge role={p.role} />
+   311→                        </TableCell>
+   312→                        <TableCell className="whitespace-nowrap px-3 py-3">
+   313→                          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+   314→                            <Calendar size={13} className="text-muted-foreground/60" aria-hidden />
+   315→                            {fmtDate(p.created_at)}
+   316→                          </span>
+   317→                        </TableCell>
+   318→                        <TableCell className="px-3 py-3">
+   319→                          <div className="flex justify-end">
+   320→                            <RowActions
+   321→                              profile={p}
+   322→                              canDelete={superCount > 1}
+   323→                              onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
+   324→                              onDelete={() => requestDelete(p)}
+   325→                            />
+   326→                          </div>
+   327→                        </TableCell>
+   328→                      </motion.tr>
+   329→                    ))}
+   330→                  </TableBody>
+   331→                </Table>
+   332→              </div>
+   333→
+   334→              {/* Mobile cards */}
+   335→              <div className="space-y-3 p-4 md:hidden">
+   336→                {superAdmins.map((p, i) => (
+   337→                  <motion.div
+   338→                    key={p.id}
+   339→                    initial={{ opacity: 0, y: 12 }}
+   340→                    animate={{ opacity: 1, y: 0 }}
+   341→                    whileHover={{ y: -3 }}
+   342→                    transition={{ delay: Math.min(i, 10) * 0.04, duration: 0.3, ease: EASE }}
+   343→                    className="rounded-xl border bg-background/40 p-4"
+   344→                  >
+   345→                    <div className="flex items-start justify-between gap-3">
+   346→                      <div className="flex min-w-0 items-center gap-3">
+   347→                        <ProfileAvatar profile={p} />
+   348→                        <div className="min-w-0">
+   349→                          <p className="flex items-center gap-1.5 text-sm font-medium">
+   350→                            <span className="truncate">{p.name}</span>
+   351→                            {p.id === user?.id && <YouBadge />}
+   352→                          </p>
+   353→                          <p className="truncate text-xs text-muted-foreground">{p.email}</p>
+   354→                        </div>
+   355→                      </div>
+   356→                      <RoleBadge role={p.role} />
+   357→                    </div>
+   358→                    <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
+   359→                      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   360→                        <Calendar size={12} aria-hidden /> Joined {fmtDate(p.created_at)}
+   361→                      </p>
+   362→                      <RowActions
+   363→                        profile={p}
+   364→                        canDelete={superCount > 1}
+   365→                        onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
+   366→                        onDelete={() => requestDelete(p)}
+   367→                      />
+   368→                    </div>
+   369→                  </motion.div>
+   370→                ))}
+   371→              </div>
+   372→            </>
+   373→          )}
+   374→        </section>
+   375→      </motion.div>
+   376→
+   377→      {/* ================= Admins ================= */}
+   378→      <motion.div
+   379→        initial={{ opacity: 0, y: 14 }}
+   380→        animate={{ opacity: 1, y: 0 }}
+   381→        transition={{ duration: 0.35, delay: 0.1, ease: EASE }}
+   382→      >
+   383→        <section className="card-glow overflow-hidden rounded-xl border bg-card" aria-labelledby="admins-title">
+   384→          <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
+   385→            <div className="flex items-center gap-2.5">
+   386→              <div className="rounded-lg bg-brand/10 p-1.5 text-brand">
+   387→                <Shield size={16} aria-hidden />
+   388→              </div>
+   389→              <div>
+   390→                <h3 id="admins-title" className="flex items-center gap-2 text-sm font-semibold">
+   391→                  Admins
+   392→                  <Badge
+   393→                    variant="outline"
+   394→                    className="rounded-full border-brand/25 bg-brand/10 px-2 text-[10px] font-semibold text-brand"
+   395→                  >
+   396→                    {regularAdmins.length}
+   397→                  </Badge>
+   398→                </h3>
+   399→                <p className="text-xs text-muted-foreground">Scoped access — grant menus via Permissions</p>
+   400→              </div>
+   401→            </div>
+   402→            <SearchBox
+   403→              value={adminSearch}
+   404→              onChange={setAdminSearch}
+   405→              placeholder="Search admins…"
+   406→              label="Search admins by name or email"
+   407→            />
+   408→          </div>
+   409→
+   410→          {loading ? (
+   411→            <div className="p-4">
+   412→              <SkeletonRows rows={4} />
+   413→            </div>
+   414→          ) : regularAdmins.length === 0 ? (
+   415→            <div className="p-4">
+   416→              <EmptyState
+   417→                icon={<Shield size={22} />}
+   418→                title={adminSearch ? 'No admins match your search' : 'No admins yet'}
+   419→                description={adminSearch
+   420→                  ? 'Try a different name or email address.'
+   421→                  : 'Create an admin to delegate day-to-day operations — they start with Dashboard and Uniform Registry, and you can grant more modules via Permissions.'}
+   422→                action={!adminSearch ? (
+   423→                  <Button
+   424→                    onClick={() => setAccountTarget({ mode: 'create', role: 'admin' })}
+   425→                    className="brand-gradient font-semibold text-white"
+   426→                  >
+   427→                    <Plus size={16} aria-hidden /> Create Admin
+   428→                  </Button>
+   429→                ) : undefined}
+   430→              />
+   431→            </div>
+   432→          ) : (
+   433→            <>
+   434→              {/* Desktop table */}
+   435→              <div className="hidden overflow-x-auto p-2 md:block">
+   436→                <Table>
+   437→                  <TableHeader>
+   438→                    <TableRow>
+   439→                      <TableHead className={TH}>Member</TableHead>
+   440→                      <TableHead className={TH}>Role</TableHead>
+   441→                      <TableHead className={TH}>Access</TableHead>
+   442→                      <TableHead className={TH}>Created</TableHead>
+   443→                      <TableHead className={cn(TH, 'text-right')}>Actions</TableHead>
+   444→                    </TableRow>
+   445→                  </TableHeader>
+   446→                  <TableBody>
+   447→                    {regularAdmins.map((p, i) => (
+   448→                      <motion.tr
+   449→                        key={p.id}
+   450→                        initial={{ opacity: 0, y: 10 }}
+   451→                        animate={{ opacity: 1, y: 0 }}
+   452→                        transition={{ delay: Math.min(i, 10) * 0.04, duration: 0.3, ease: EASE }}
+   453→                        className="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/30"
+   454→                      >
+   455→                        <TableCell className="px-3 py-3">
+   456→                          <div className="flex items-center gap-3">
+   457→                            <ProfileAvatar profile={p} />
+   458→                            <div className="min-w-0">
+   459→                              <p className="flex items-center gap-1.5 text-sm font-medium">
+   460→                                <span className="truncate">{p.name}</span>
+   461→                                {p.id === user?.id && <YouBadge />}
+   462→                              </p>
+   463→                              <p className="flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+   464→                                <Mail size={11} className="shrink-0" aria-hidden /> {p.email}
+   465→                              </p>
+   466→                            </div>
+   467→                          </div>
+   468→                        </TableCell>
+   469→                        <TableCell className="px-3 py-3">
+   470→                          <RoleBadge role={p.role} />
+   471→                        </TableCell>
+   472→                        <TableCell className="px-3 py-3">
+   473→                          <AccessChips map={permCache[p.id]} />
+   474→                        </TableCell>
+   475→                        <TableCell className="whitespace-nowrap px-3 py-3">
+   476→                          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+   477→                            <Calendar size={13} className="text-muted-foreground/60" aria-hidden />
+   478→                            {fmtDate(p.created_at)}
+   479→                          </span>
+   480→                        </TableCell>
+   481→                        <TableCell className="px-3 py-3">
+   482→                          <div className="flex justify-end">
+   483→                            <RowActions
+   484→                              profile={p}
+   485→                              canDelete
+   486→                              onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
+   487→                              onPermissions={() => setPermTarget(p)}
+   488→                              onDelete={() => requestDelete(p)}
+   489→                            />
+   490→                          </div>
+   491→                        </TableCell>
+   492→                      </motion.tr>
+   493→                    ))}
+   494→                  </TableBody>
+   495→                </Table>
+   496→              </div>
+   497→
+   498→              {/* Mobile cards */}
+   499→              <div className="space-y-3 p-4 md:hidden">
+   500→                {regularAdmins.map((p, i) => {
+   501→                  const grantedLabels = MENU_KEYS
+   502→                    .filter((k) => permCache[p.id]?.[k] === true)
+   503→                    .map((k) => MENU_META[k].label);
+   504→                  return (
+   505→                    <motion.div
+   506→                      key={p.id}
+   507→                      initial={{ opacity: 0, y: 12 }}
+   508→                      animate={{ opacity: 1, y: 0 }}
+   509→                      whileHover={{ y: -3 }}
+   510→                      transition={{ delay: Math.min(i, 10) * 0.04, duration: 0.3, ease: EASE }}
+   511→                      className="rounded-xl border bg-background/40 p-4"
+   512→                    >
+   513→                      <div className="flex items-start justify-between gap-3">
+   514→                        <div className="flex min-w-0 items-center gap-3">
+   515→                          <ProfileAvatar profile={p} />
+   516→                          <div className="min-w-0">
+   517→                            <p className="flex items-center gap-1.5 text-sm font-medium">
+   518→                              <span className="truncate">{p.name}</span>
+   519→                              {p.id === user?.id && <YouBadge />}
+   520→                            </p>
+   521→                            <p className="truncate text-xs text-muted-foreground">{p.email}</p>
+   522→                          </div>
+   523→                        </div>
+   524→                        <RoleBadge role={p.role} />
+   525→                      </div>
+   526→                      <p className="mt-2.5 text-xs text-muted-foreground">
+   527→                        Access — Dashboard &amp; Uniform Registry
+   528→                        {grantedLabels.length > 0 ? ` plus ${grantedLabels.join(', ')}` : ' only'}
+   529→                      </p>
+   530→                      <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
+   531→                        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   532→                          <Calendar size={12} aria-hidden /> Joined {fmtDate(p.created_at)}
+   533→                        </p>
+   534→                        <RowActions
+   535→                          profile={p}
+   536→                          canDelete
+   537→                          onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
+   538→                          onPermissions={() => setPermTarget(p)}
+   539→                          onDelete={() => requestDelete(p)}
+   540→                        />
+   541→                      </div>
+   542→                    </motion.div>
+   543→                  );
+   544→                })}
+   545→              </div>
+   546→            </>
+   547→          )}
+   548→        </section>
+   549→      </motion.div>
+   550→
+   551→      {/* ---- Create / Edit dialog ---- */}
+   552→      <AccountDialog
+   553→        target={accountTarget}
+   554→        superCount={superCount}
+   555→        onClose={() => setAccountTarget(null)}
+   556→      />
+   557→
+   558→      {/* ---- Permissions dialog ---- */}
+   559→      <PermissionsDialog
+   560→        profile={permTarget}
+   561→        onClose={() => setPermTarget(null)}
+   562→        onChanged={handlePermChanged}
+   563→      />
+   564→
+   565→      {/* ---- Delete confirmation ---- */}
+   566→      <AlertDialog
+   567→        open={!!deleteTarget}
+   568→        onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}
+   569→      >
+   570→        <AlertDialogContent>
+   571→          <AlertDialogHeader>
+   572→            <AlertDialogTitle className="flex items-center gap-2">
+   573→              <span className="rounded-lg bg-rose-500/10 p-1.5 text-rose-500">
+   574→                <Trash2 size={15} aria-hidden />
+   575→              </span>
+   576→              Delete {deleteTarget?.role === 'super_admin' ? 'super admin' : 'admin'} account?
+   577→            </AlertDialogTitle>
+   578→            <AlertDialogDescription>
+   579→              This permanently removes{' '}
+   580→              <span className="font-medium text-foreground">{deleteTarget?.name}</span>{' '}
+   581→              ({deleteTarget?.email}). Their sign-in access and menu permissions are erased —
+   582→              this action cannot be undone.
+   583→            </AlertDialogDescription>
+   584→          </AlertDialogHeader>
+   585→          <AlertDialogFooter>
+   586→            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+   587→            <Button
+   588→              onClick={handleDelete}
+   589→              disabled={deleting}
+   590→              className="bg-rose-600 font-semibold text-white shadow-lg shadow-rose-500/20 hover:bg-rose-600/90"
+   591→            >
+   592→              {deleting ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Trash2 size={15} aria-hidden />}
+   593→              {deleting ? 'Deleting…' : 'Delete Account'}
+   594→            </Button>
+   595→          </AlertDialogFooter>
+   596→        </AlertDialogContent>
+   597→      </AlertDialog>
+   598→    </div>
+   599→  );
+   600→}
+   601→
+   602→// ---------------------------------------------------------------------------
+   603→// Small building blocks
+   604→// ---------------------------------------------------------------------------
+   605→
+   606→/** Crown badge for super admins, brand shield badge for admins. */
+   607→function RoleBadge({ role }: { role: Role }) {
+   608→  if (role === 'super_admin') {
+   609→    return (
+   610→      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+   611→        <Crown size={11} aria-hidden /> Super Admin
+   612→      </span>
+   613→    );
+   614→  }
+   615→  if (role === 'admin') {
+   616→    return (
+   617→      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2.5 py-0.5 text-[11px] font-medium text-brand">
+   618→        <Shield size={11} aria-hidden /> Admin
+   619→      </span>
+   620→    );
+   621→  }
+   622→  return (
+   623→    <span className="inline-flex shrink-0 items-center rounded-full border bg-muted px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+   624→      Awaiting approval
+   625→    </span>
+   626→  );
+   627→}
+   628→
+   629→/** Avatar initials on the brand gradient (gold gradient for super admins). */
+   630→function ProfileAvatar({ profile }: { profile: Profile }) {
+   631→  const isSuper = profile.role === 'super_admin';
+   632→  return (
+   633→    <span
+   634→      aria-hidden
+   635→      className={cn(
+   636→        'flex size-9 shrink-0 items-center justify-center rounded-full text-xs font-bold',
+   637→        isSuper
+   638→          ? 'bg-gradient-to-br from-amber-500 to-orange-600 text-white'
+   639→          : 'brand-gradient text-brand-foreground',
+   640→      )}
+   641→    >
+   642→      {initials(profile.name)}
+   643→    </span>
+   644→  );
+   645→}
+   646→
+   647→/** Tiny chip marking the signed-in account. */
+   648→function YouBadge() {
+   649→  return (
+   650→    <Badge
+   651→      variant="outline"
+   652→      className="rounded-full border-brand/25 bg-brand/10 px-1.5 text-[9px] font-bold uppercase tracking-wider text-brand"
+   653→    >
+   654→      You
+   655→    </Badge>
+   656→  );
+   657→}
+   658→
+   659→/** Section search box (name / email). */
+   660→function SearchBox({
+   661→  value, onChange, placeholder, label,
+   662→}: {
+   663→  value: string;
+   664→  onChange: (v: string) => void;
+   665→  placeholder: string;
+   666→  label: string;
+   667→}) {
+   668→  return (
+   669→    <div className="relative w-full sm:w-64">
+   670→      <Search
+   671→        size={15}
+   672→        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+   673→        aria-hidden
+   674→      />
+   675→      <Input
+   676→        value={value}
+   677→        onChange={(e) => onChange(e.target.value)}
+   678→        placeholder={placeholder}
+   679→        aria-label={label}
+   680→        className="h-9 bg-card pl-9 pr-9"
+   681→      />
+   682→      {value && (
+   683→        <button
+   684→          type="button"
+   685→          onClick={() => onChange('')}
+   686→          aria-label="Clear search"
+   687→          className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-1 text-muted-foreground transition-colors hover:text-foreground"
+   688→        >
+   689→          <X size={13} aria-hidden />
+   690→        </button>
+   691→      )}
+   692→    </div>
+   693→  );
+   694→}
+   695→
+   696→/** Summary of what an admin can reach (base menus + granted keys). */
+   697→function AccessChips({ map }: { map: MenuPermissionMap | undefined }) {
+   698→  const granted = MENU_KEYS.filter((k) => map?.[k] === true);
+   699→  return (
+   700→    <div
+   701→      className="flex max-w-[260px] flex-wrap items-center gap-1"
+   702→      title="Dashboard and Uniform Registry are always available"
+   703→    >
+   704→      <span className="rounded-full border bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+   705→        Dashboard
+   706→      </span>
+   707→      <span className="rounded-full border bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+   708→        Uniform Registry
+   709→      </span>
+   710→      {granted.map((k) => (
+   711→        <span
+   712→          key={k}
+   713→          className="rounded-full border border-brand/25 bg-brand/10 px-1.5 py-px text-[10px] font-medium text-brand"
+   714→        >
+   715→          {MENU_META[k].label}
+   716→        </span>
+   717→      ))}
+   718→    </div>
+   719→  );
+   720→}
+   721→
+   722→/** Row action icon buttons (permissions for admins, edit, guarded delete). */
+   723→function RowActions({
+   724→  profile, canDelete, onEdit, onPermissions, onDelete,
+   725→}: {
+   726→  profile: Profile;
+   727→  canDelete: boolean;
+   728→  onEdit: () => void;
+   729→  onPermissions?: () => void;
+   730→  onDelete: () => void;
+   731→}) {
+   732→  return (
+   733→    <div className="flex items-center gap-1">
+   734→      {onPermissions && (
+   735→        <Button
+   736→          variant="ghost"
+   737→          size="icon"
+   738→          onClick={onPermissions}
+   739→          title="Manage permissions"
+   740→          aria-label={`Manage permissions — ${profile.name}`}
+   741→          className="size-9 text-muted-foreground hover:bg-brand/10 hover:text-brand"
+   742→        >
+   743→          <KeyRound size={15} aria-hidden />
+   744→        </Button>
+   745→      )}
+   746→      <Button
+   747→        variant="ghost"
+   748→        size="icon"
+   749→        onClick={onEdit}
+   750→        title="Edit account"
+   751→        aria-label={`Edit account — ${profile.name}`}
+   752→        className="size-9 text-muted-foreground hover:bg-brand/10 hover:text-brand"
+   753→      >
+   754→        <Pencil size={15} aria-hidden />
+   755→      </Button>
+   756→      <Button
+   757→        variant="ghost"
+   758→        size="icon"
+   759→        onClick={onDelete}
+   760→        disabled={!canDelete}
+   761→        title={canDelete ? 'Delete account' : 'The last super admin cannot be deleted'}
+   762→        aria-label={`Delete account — ${profile.name}`}
+   763→        className="size-9 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
+   764→      >
+   765→        <Trash2 size={15} aria-hidden />
+   766→      </Button>
+   767→    </div>
+   768→  );
+   769→}
+   770→
+   771→// ---------------------------------------------------------------------------
+   772→// Create / Edit account dialog
+   773→// ---------------------------------------------------------------------------
+   774→function AccountDialog({
+   775→  target, superCount, onClose,
+   776→}: {
+   777→  target: AccountTarget | null;
+   778→  superCount: number;
+   779→  onClose: () => void;
+   780→}) {
+   781→  const open = target !== null;
+   782→  const editing = target?.mode === 'edit' ? target.profile : null;
+   783→
+   784→  const [name, setName] = useState('');
+   785→  const [email, setEmail] = useState('');
+   786→  const [password, setPassword] = useState('');
+   787→  const [role, setRole] = useState<'admin' | 'super_admin'>('admin');
+   788→  const [showPw, setShowPw] = useState(false);
+   789→  const [errors, setErrors] = useState<{ name?: string; email?: string; password?: string }>({});
+   790→  const [submitting, setSubmitting] = useState(false);
+   791→
+   792→  // The last super admin cannot be demoted (client-side guard; the server also enforces it)
+   793→  const isLastSuper = editing !== null && editing.role === 'super_admin' && superCount <= 1;
+   794→
+   795→  // Reset the form every time the dialog opens for a target
+   796→  useEffect(() => {
+   797→    if (!target) return;
+   798→    const editProfile = target.mode === 'edit' ? target.profile : null;
+   799→    setName(editProfile?.name ?? '');
+   800→    setEmail(editProfile?.email ?? '');
+   801→    setPassword('');
+   802→    setRole(
+   803→      target.mode === 'edit'
+   804→        ? (target.profile.role === 'super_admin' ? 'super_admin' : 'admin')
+   805→        : target.role,
+   806→    );
+   807→    setShowPw(false);
+   808→    setErrors({});
+   809→    setSubmitting(false);
+   810→  }, [target]);
+   811→
+   812→  const handleSubmit = async () => {
+   813→    if (!target) return;
+   814→    const errs: typeof errors = {};
+   815→    const trimmedName = name.trim();
+   816→    const trimmedEmail = email.trim().toLowerCase();
+   817→    if (!trimmedName) errs.name = 'Name is required';
+   818→    if (!trimmedEmail) errs.email = 'Email is required';
+   819→    else if (!EMAIL_RE.test(trimmedEmail)) errs.email = 'Enter a valid email address';
+   820→    if (target.mode === 'create' && !password) errs.password = 'Password is required';
+   821→    else if (password && password.length < 6) errs.password = 'Password must be at least 6 characters';
+   822→    setErrors(errs);
+   823→    if (errs.name || errs.email || errs.password) return;
+   824→
+   825→    // Client-side guard: cannot demote the last super admin
+   826→    if (editing && editing.role === 'super_admin' && role !== 'super_admin' && superCount <= 1) {
+   827→      toast.error('Cannot demote the last super admin', {
+   828→        description: 'There must be at least one super admin. Promote another account first.',
+   829→      });
+   830→      return;
+   831→    }
+   832→
+   833→    setSubmitting(true);
+   834→    try {
+   835→      if (target.mode === 'create') {
+   836→        const created = await dataApi.createProfile(trimmedEmail, trimmedName, password, role);
+   837→        toast.success(role === 'super_admin' ? 'Super admin created' : 'Admin created', {
+   838→          description:
+   839→            role === 'super_admin'
+   840→              ? `${created.name} (${created.email}) now has full access to everything.`
+   841→              : `${created.name} (${created.email}) starts with Dashboard + Uniform Registry — grant more via Permissions.`,
+   842→        });
+   843→      } else if (editing) {
+   844→        const updated = await dataApi.updateProfile(editing.id, {
+   845→          name: trimmedName,
+   846→          email: trimmedEmail,
+   847→          role,
+   848→          ...(password ? { password } : {}),
+   849→        });
+   850→        toast.success('Account updated', {
+   851→          description: `${updated.name} (${updated.email}) was saved successfully.`,
+   852→        });
+   853→      }
+   854→      onClose();
+   855→    } catch (err) {
+   856→      toast.error(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
+   857→    } finally {
+   858→      setSubmitting(false);
+   859→    }
+   860→  };
+   861→
+   862→  return (
+   863→    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+   864→      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+   865→        <DialogHeader>
+   866→          <DialogTitle className="flex items-center gap-2">
+   867→            <span
+   868→              className={cn(
+   869→                'rounded-lg p-1.5',
+   870→                editing
+   871→                  ? 'bg-brand/10 text-brand'
+   872→                  : role === 'super_admin'
+   873→                    ? 'bg-amber-500/10 text-amber-500'
+   874→                    : 'bg-brand/10 text-brand',
+   875→              )}
+   876→            >
+   877→              {editing ? <Pencil size={14} aria-hidden /> : role === 'super_admin' ? <Crown size={14} aria-hidden /> : <Plus size={14} aria-hidden />}
+   878→            </span>
+   879→            {editing ? 'Edit Account' : role === 'super_admin' ? 'Create Super Admin' : 'Create Admin'}
+   880→          </DialogTitle>
+   881→          <DialogDescription>
+   882→            {editing
+   883→              ? 'Update the account details — leave the password blank to keep the current one.'
+   884→              : role === 'super_admin'
+   885→                ? 'Super admin — full access to everything, including Admin Management.'
+   886→                : 'Admin — Dashboard + Uniform Registry by default; grant more via Permissions.'}
+   887→          </DialogDescription>
+   888→        </DialogHeader>
+   889→
+   890→        <motion.div
+   891→          initial={{ opacity: 0, y: 12 }}
+   892→          animate={{ opacity: 1, y: 0 }}
+   893→          transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+   894→          className="space-y-4"
+   895→        >
+   896→          {/* Role */}
+   897→          <div className="space-y-2">
+   898→            <Label htmlFor="acct-role">
+   899→              Role <span className="text-rose-500">*</span>
+   900→            </Label>
+   901→            <Select value={role} onValueChange={(v) => setRole(v as 'admin' | 'super_admin')}>
+   902→              <SelectTrigger id="acct-role" className="h-11 w-full" aria-label="Role">
+   903→                <SelectValue placeholder="Select a role" />
+   904→              </SelectTrigger>
+   905→              <SelectContent>
+   906→                <SelectItem value="admin" disabled={isLastSuper}>
+   907→                  <Shield className="size-3.5 text-brand" aria-hidden /> Admin
+   908→                  <span className="text-xs text-muted-foreground">· Dashboard + Uniform Registry</span>
+   909→                </SelectItem>
+   910→                <SelectItem value="super_admin">
+   911→                  <Crown className="size-3.5 text-amber-500" aria-hidden /> Super Admin
+   912→                  <span className="text-xs text-muted-foreground">· Full access</span>
+   913→                </SelectItem>
+   914→              </SelectContent>
+   915→            </Select>
+   916→            {isLastSuper && (
+   917→              <p className="text-xs text-amber-600 dark:text-amber-400">
+   918→                This is the last super admin — the role cannot be lowered.
+   919→              </p>
+   920→            )}
+   921→            {role === 'super_admin' ? (
+   922→              <motion.div
+   923→                key="super-info"
+   924→                initial={{ opacity: 0, y: -4 }}
+   925→                animate={{ opacity: 1, y: 0 }}
+   926→                transition={{ duration: 0.25, ease: EASE }}
+   927→                className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3.5 py-3"
+   928→              >
+   929→                <Crown size={15} className="mt-0.5 shrink-0 text-amber-500" aria-hidden />
+   930→                <div>
+   931→                  <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
+   932→                    Super admin — full access to everything
+   933→                  </p>
+   934→                  <p className="mt-0.5 text-xs text-muted-foreground">
+   935→                    They can manage every module, create and delete admins, and promote other super admins.
+   936→                  </p>
+   937→                </div>
+   938→              </motion.div>
+   939→            ) : (
+   940→              <motion.div
+   941→                key="admin-info"
+   942→                initial={{ opacity: 0, y: -4 }}
+   943→                animate={{ opacity: 1, y: 0 }}
+   944→                transition={{ duration: 0.25, ease: EASE }}
+   945→                className="flex items-start gap-2 rounded-lg border border-brand/25 bg-brand/10 px-3.5 py-3"
+   946→              >
+   947→                <Shield size={15} className="mt-0.5 shrink-0 text-brand" aria-hidden />
+   948→                <div>
+   949→                  <p className="text-sm font-medium text-brand">
+   950→                    Admin — Dashboard + Uniform Registry by default
+   951→                  </p>
+   952→                  <p className="mt-0.5 text-xs text-muted-foreground">
+   953→                    Grant more modules via Permissions after creating the account.
+   954→                  </p>
+   955→                </div>
+   956→              </motion.div>
+   957→            )}
+   958→          </div>
+   959→
+   960→          {/* Name */}
+   961→          <div className="space-y-2">
+   962→            <Label htmlFor="acct-name">
+   963→              Name <span className="text-rose-500">*</span>
+   964→            </Label>
+   965→            <div className="relative">
+   966→              <User
+   967→                size={15}
+   968→                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+   969→                aria-hidden
+   970→              />
+   971→              <Input
+   972→                id="acct-name"
+   973→                value={name}
+   974→                onChange={(e) => {
+   975→                  setName(e.target.value);
+   976→                  if (errors.name) setErrors((er) => ({ ...er, name: undefined }));
+   977→                }}
+   978→                placeholder="Full name"
+   979→                autoComplete="name"
+   980→                aria-invalid={!!errors.name}
+   981→                className="h-11 pl-9"
+   982→              />
+   983→            </div>
+   984→            {errors.name && <p className="text-xs text-rose-500">{errors.name}</p>}
+   985→          </div>
+   986→
+   987→          {/* Email */}
+   988→          <div className="space-y-2">
+   989→            <Label htmlFor="acct-email">
+   990→              Email <span className="text-rose-500">*</span>
+   991→            </Label>
+   992→            <div className="relative">
+   993→              <Mail
+   994→                size={15}
+   995→                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+   996→                aria-hidden
+   997→              />
+   998→              <Input
+   999→                id="acct-email"
+  1000→                type="email"
+  1001→                value={email}
+  1002→                onChange={(e) => {
+  1003→                  setEmail(e.target.value);
+  1004→                  if (errors.email) setErrors((er) => ({ ...er, email: undefined }));
+  1005→                }}
+  1006→                placeholder="admin@example.com"
+  1007→                autoComplete="email"
+  1008→                aria-invalid={!!errors.email}
+  1009→                className="h-11 pl-9"
+  1010→              />
+  1011→            </div>
+  1012→            {errors.email && <p className="text-xs text-rose-500">{errors.email}</p>}
+  1013→          </div>
+  1014→
+  1015→          {/* Password (optional on edit — blank keeps the current one) */}
+  1016→          <div className="space-y-2">
+  1017→            <Label htmlFor="acct-password">
+  1018→              Password
+  1019→              {!editing && <span className="text-rose-500">*</span>}
+  1020→              {editing && <span className="ml-1 font-normal text-muted-foreground">(optional)</span>}
+  1021→            </Label>
+  1022→            <div className="relative">
+  1023→              <Lock
+  1024→                size={15}
+  1025→                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+  1026→                aria-hidden
+  1027→              />
+  1028→              <Input
+  1029→                id="acct-password"
+  1030→                type={showPw ? 'text' : 'password'}
+  1031→                value={password}
+  1032→                onChange={(e) => {
+  1033→                  setPassword(e.target.value);
+  1034→                  if (errors.password) setErrors((er) => ({ ...er, password: undefined }));
+  1035→                }}
+  1036→                placeholder={editing ? 'Leave blank to keep the current password' : 'Minimum 6 characters'}
+  1037→                autoComplete="new-password"
+  1038→                aria-invalid={!!errors.password}
+  1039→                className="h-11 pl-9 pr-10"
+  1040→              />
+  1041→              <button
+  1042→                type="button"
+  1043→                onClick={() => setShowPw((s) => !s)}
+  1044→                aria-label={showPw ? 'Hide password' : 'Show password'}
+  1045→                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-1 text-muted-foreground transition-colors hover:text-foreground"
+  1046→              >
+  1047→                {showPw ? <EyeOff size={15} aria-hidden /> : <Eye size={15} aria-hidden />}
+  1048→              </button>
+  1049→            </div>
+  1050→            {errors.password
+  1051→              ? <p className="text-xs text-rose-500">{errors.password}</p>
+  1052→              : <p className="text-xs text-muted-foreground">Minimum 6 characters.</p>}
+  1053→          </div>
+  1054→        </motion.div>
+  1055→
+  1056→        <DialogFooter>
+  1057→          <Button variant="outline" onClick={onClose} disabled={submitting}>
+  1058→            Cancel
+  1059→          </Button>
+  1060→          <Button
+  1061→            onClick={handleSubmit}
+  1062→            disabled={submitting}
+  1063→            className={cn(
+  1064→              'font-semibold text-white shadow-lg transition-transform active:scale-[0.98]',
+  1065→              role === 'super_admin' && !editing
+  1066→                ? 'bg-gradient-to-r from-amber-500 to-orange-500 shadow-amber-500/25 hover:opacity-90'
+  1067→                : 'brand-gradient shadow-[var(--glow)] hover:opacity-90',
+  1068→            )}
+  1069→          >
+  1070→            {submitting
+  1071→              ? <Loader2 size={16} className="animate-spin" aria-hidden />
+  1072→              : editing
+  1073→                ? <Pencil size={15} aria-hidden />
+  1074→                : role === 'super_admin'
+  1075→                  ? <Crown size={15} aria-hidden />
+  1076→                  : <Plus size={15} aria-hidden />}
+  1077→            {editing ? 'Save Changes' : role === 'super_admin' ? 'Create Super Admin' : 'Create Admin'}
+  1078→          </Button>
+  1079→        </DialogFooter>
+  1080→      </DialogContent>
+  1081→    </Dialog>
+  1082→  );
+  1083→}
+  1084→
+  1085→// ---------------------------------------------------------------------------
+  1086→// Permissions dialog (admin role only — Dashboard & Uniform Registry are always on)
+  1087→// ---------------------------------------------------------------------------
+  1088→function PermissionsDialog({
+  1089→  profile, onClose, onChanged,
+  1090→}: {
+  1091→  profile: Profile | null;
+  1092→  onClose: () => void;
+  1093→  onChanged: (profileId: string, key: MenuKey, allowed: boolean) => void;
+  1094→}) {
+  1095→  const open = profile !== null;
+  1096→  const [perms, setPerms] = useState<MenuPermissionMap | null>(null);
+  1097→  const [savingKey, setSavingKey] = useState<MenuKey | null>(null);
+  1098→
+  1099→  // Load the initial permission state each time the dialog opens
+  1100→  useEffect(() => {
+  1101→    if (!profile) {
+  1102→      setPerms(null);
+  1103→      return;
+  1104→    }
+  1105→    let cancelled = false;
+  1106→    setPerms(null);
+  1107→    setSavingKey(null);
+  1108→    (async () => {
+  1109→      const map = await dataApi.getMenuPermissions(profile.id);
+  1110→      if (!cancelled) setPerms(map);
+  1111→    })().catch(() => {
+  1112→      if (!cancelled) {
+  1113→        setPerms({ ...EMPTY_PERMS });
+  1114→        toast.error('Failed to load permissions', { description: 'Please close the dialog and try again.' });
+  1115→      }
+  1116→    });
+  1117→    return () => { cancelled = true; };
+  1118→  }, [profile]);
+  1119→
+  1120→  // Toggle a single menu — optimistic, instantly saved, reverted on failure
+  1121→  const toggle = async (key: MenuKey, allowed: boolean) => {
+  1122→    if (!profile || !perms) return;
+  1123→    const meta = MENU_META[key];
+  1124→    const previous = perms[key];
+  1125→    setSavingKey(key);
+  1126→    setPerms({ ...perms, [key]: allowed });
+  1127→    try {
+  1128→      await dataApi.setMenuPermission(profile.id, key, allowed);
+  1129→      toast.success(
+  1130→        allowed ? `Access granted for ${meta.label}` : `Access revoked for ${meta.label}`,
+  1131→        { description: `${profile.name} · ${meta.label}` },
+  1132→      );
+  1133→      onChanged(profile.id, key, allowed);
+  1134→    } catch (err) {
+  1135→      setPerms((p) => (p ? { ...p, [key]: previous } : p));
+  1136→      toast.error(err instanceof Error ? err.message : `Failed to update access for ${meta.label}`);
+  1137→    } finally {
+  1138→      setSavingKey(null);
+  1139→    }
+  1140→  };
+  1141→
+  1142→  return (
+  1143→    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+  1144→      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+  1145→        <DialogHeader>
+  1146→          <DialogTitle className="flex items-center gap-2">
+  1147→            <span className="rounded-lg bg-brand/10 p-1.5 text-brand">
+  1148→              <KeyRound size={14} aria-hidden />
+  1149→            </span>
+  1150→            Manage Permissions
+  1151→          </DialogTitle>
+  1152→          <DialogDescription>
+  1153→            Choose the sidebar menus{' '}
+  1154→            <span className="font-medium text-foreground">{profile?.name}</span> can reach.
+  1155→            Every change saves instantly.
+  1156→          </DialogDescription>
+  1157→        </DialogHeader>
+  1158→
+  1159→        {perms === null ? (
+  1160→          <div className="space-y-2 py-2">
+  1161→            {Array.from({ length: 8 }).map((_, i) => (
+  1162→              <div key={i} className="shimmer h-11 rounded-lg border" />
+  1163→            ))}
+  1164→          </div>
+  1165→        ) : (
+  1166→          <motion.div
+  1167→            initial={{ opacity: 0, y: 12 }}
+  1168→            animate={{ opacity: 1, y: 0 }}
+  1169→            transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+  1170→            className="space-y-1.5 py-1"
+  1171→          >
+  1172→            {/* Always available */}
+  1173→            <p className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+  1174→              Always available
+  1175→            </p>
+  1176→            {ALWAYS_ON_MENUS.map((item) => (
+  1177→              <div
+  1178→                key={item.label}
+  1179→                className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-3 py-2.5"
+  1180→              >
+  1181→                <div className="flex min-w-0 items-center gap-3">
+  1182→                  <span className="shrink-0 rounded-md bg-muted p-1.5 text-muted-foreground">
+  1183→                    <item.icon size={15} aria-hidden />
+  1184→                  </span>
+  1185→                  <div className="min-w-0">
+  1186→                    <p className="truncate text-sm font-medium">{item.label}</p>
+  1187→                    <p className="truncate text-[11px] text-muted-foreground">{item.hint}</p>
+  1188→                  </div>
+  1189→                </div>
+  1190→                <div className="flex shrink-0 items-center gap-2">
+  1191→                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+  1192→                    Always on
+  1193→                  </span>
+  1194→                  <Switch
+  1195→                    checked
+  1196→                    disabled
+  1197→                    aria-label={`${item.label} is always available`}
+  1198→                    className="data-[state=checked]:bg-brand [&_[data-slot=switch-thumb]]:bg-white!"
+  1199→                  />
+  1200→                </div>
+  1201→              </div>
+  1202→            ))}
+  1203→
+  1204→            <Separator className="my-3" />
+  1205→
+  1206→            {/* Configurable access */}
+  1207→            <p className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+  1208→              Configurable access
+  1209→            </p>
+  1210→            {MENU_KEYS.map((key, i) => {
+  1211→              const item = MENU_META[key];
+  1212→              const allowed = perms[key] === true;
+  1213→              return (
+  1214→                <motion.div
+  1215→                  key={key}
+  1216→                  initial={{ opacity: 0, y: 8 }}
+  1217→                  animate={{ opacity: 1, y: 0 }}
+  1218→                  transition={{ delay: 0.15 + i * 0.04, duration: 0.25, ease: EASE }}
+  1219→                  className={cn(
+  1220→                    'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 transition-colors',
+  1221→                    allowed ? 'border-brand/25 bg-brand/5' : 'bg-muted/30',
+  1222→                  )}
+  1223→                >
+  1224→                  <div className="flex min-w-0 items-center gap-3">
+  1225→                    <span
+  1226→                      className={cn(
+  1227→                        'shrink-0 rounded-md p-1.5 transition-colors',
+  1228→                        allowed ? 'bg-brand/10 text-brand' : 'bg-muted text-muted-foreground',
+  1229→                      )}
+  1230→                    >
+  1231→                      <item.icon size={15} aria-hidden />
+  1232→                    </span>
+  1233→                    <div className="min-w-0">
+  1234→                      <p className="truncate text-sm font-medium">{item.label}</p>
+  1235→                      <p className="truncate text-[11px] text-muted-foreground">
+  1236→                        {allowed ? 'Access granted' : item.hint}
+  1237→                      </p>
+  1238→                    </div>
+  1239→                  </div>
+  1240→                  <div className="flex shrink-0 items-center gap-2">
+  1241→                    {savingKey === key && (
+  1242→                      <Loader2 size={13} className="animate-spin text-muted-foreground" aria-hidden />
+  1243→                    )}
+  1244→                    <Switch
+  1245→                      checked={allowed}
+  1246→                      disabled={savingKey === key}
+  1247→                      onCheckedChange={(v) => { void toggle(key, v === true); }}
+  1248→                      aria-label={`${allowed ? 'Revoke' : 'Grant'} ${item.label} access`}
+  1249→                      className="data-[state=checked]:bg-brand [&_[data-slot=switch-thumb]]:bg-white!"
+  1250→                    />
+  1251→                  </div>
+  1252→                </motion.div>
+  1253→              );
+  1254→            })}
+  1255→          </motion.div>
+  1256→        )}
+  1257→
+  1258→        <DialogFooter>
+  1259→          <Button variant="outline" onClick={onClose}>
+  1260→            Done
+  1261→          </Button>
+  1262→        </DialogFooter>
+  1263→      </DialogContent>
+  1264→    </Dialog>
+  1265→  );
+  1266→}
+  1267→

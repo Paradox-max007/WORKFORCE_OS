@@ -1,21 +1,26 @@
 'use client';
 
 // ============================================================================
-// PULSE Workforce OS — Attendance (Excel-style marking sheet)
+// PULSE Workforce OS — Attendance (Excel-style marking sheet, displayed SITEWISE)
 // ----------------------------------------------------------------------------
+// • The sheet is grouped per WORK SITE (attendance is marked sitewise) and each
+//   section's crew is ALPHABETICAL. An "Unassigned / Idle" section (super
+//   admins only) lists employees without a site.
 // • Every cell is an always-editable input: type custom hours (e.g. 8, 10.5)
 //   or "A" for absent, or clear it to unmark the day.
-// • Rows are ALPHABETICAL by employee name; the site filter narrows the sheet
-//   to only that site's crew (still alphabetical).
+// • Each row shows the employee's TRADE (position) next to their ID.
 // • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
+// • Normal admins only see — and can only mark — the sites assigned to them
+//   by a super admin (Admin Management → Site Access).
 // • Calendar view: per-employee month calendar with the same editing model.
 // ============================================================================
 
 import { motion } from 'framer-motion';
 import {
-  CalendarCheck, ChevronLeft, ChevronRight, Loader2, Search, Tent,
+  Building2, CalendarCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
+  Tent, UserX,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
 import { EmptyState, SectionTitle, SkeletonRows } from '@/components/shared/primitives';
@@ -29,6 +34,7 @@ import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { Attendance, EmployeeVM, SiteWithCount } from '@/lib/types';
+import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -56,10 +62,23 @@ function parseCell(raw: string): { kind: 'absent' | 'hours' | 'clear' | 'invalid
 }
 
 // ---------------------------------------------------------------------------
+// One site section type (header band + that site's crew table)
+// ---------------------------------------------------------------------------
+interface SiteSection {
+  key: string;
+  title: string;
+  client: string | null;
+  emps: EmployeeVM[];
+  isIdle?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export function AttendancePage() {
-  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp']);
+  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site']);
+  const user = useAuthStore((s) => s.user);
+  const isSuperAdmin = user?.role === 'super_admin';
 
   const now = new Date();
   const [monthKey, setMonthKey] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
@@ -68,6 +87,7 @@ export function AttendancePage() {
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [records, setRecords] = useState<Attendance[] | null>(null);
+  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(isSuperAdmin ? null : new Set());
 
   // filters
   const [search, setSearch] = useState('');
@@ -105,6 +125,17 @@ export function AttendancePage() {
     return () => { cancelled = true; };
   }, [realtimeVersion]);
 
+  // admins: which sites they may mark (null = unrestricted super admin)
+  useEffect(() => {
+    if (isSuperAdmin) { setAssignedSiteIds(null); return; }
+    if (!user) return;
+    let cancelled = false;
+    dataApi.getSiteAssignments(user.id)
+      .then((ids) => { if (!cancelled) setAssignedSiteIds(new Set(ids)); })
+      .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
+    return () => { cancelled = true; };
+  }, [user, isSuperAdmin, realtimeVersion]);
+
   useEffect(() => {
     let cancelled = false;
     dataApi.getMonthAttendance(monthKey)
@@ -118,17 +149,63 @@ export function AttendancePage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  // ---- alphabetical crew (site filter narrows) --------------------------------
-  const crew = useMemo(() => {
+  // ---- scoped crew (admins → their assigned sites only; super admins → all) ---
+  const scoped = useMemo(() => {
     const list = (employees ?? []).filter((e) => e.status !== 'deleted');
-    const filtered = siteFilter === 'all' ? list : list.filter((e) => e.current_site_id === siteFilter);
+    if (assignedSiteIds === null) return list;
+    return list.filter((e) => e.current_site_id !== null && assignedSiteIds.has(e.current_site_id));
+  }, [employees, assignedSiteIds]);
+
+  // ---- sitewise sections (alphabetical inside each section) -------------------
+  const sections = useMemo<SiteSection[]>(() => {
     const q = debouncedSearch.toLowerCase().trim();
-    const searched = q
-      ? filtered.filter((e) =>
-          `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q))
-      : filtered;
-    return [...searched].sort((a, b) => a.full_name.localeCompare(b.full_name));
-  }, [employees, siteFilter, debouncedSearch]);
+    const matches = (e: EmployeeVM) =>
+      !q || `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q);
+    const byName = (a: EmployeeVM, b: EmployeeVM) => a.full_name.localeCompare(b.full_name);
+
+    const siteList = (sites ?? []).filter((s) => s.is_active);
+    const result: SiteSection[] = siteList
+      .filter((s) => siteFilter === 'all' || s.id === siteFilter)
+      .map((s) => ({
+        key: s.id,
+        title: s.name,
+        client: s.client_name,
+        emps: scoped
+          .filter((e) => e.current_site_id === s.id && matches(e))
+          .sort(byName),
+      }))
+      .filter((sec) => sec.emps.length > 0);
+
+    // idle employees — super admins only (admins can never mark them)
+    if (isSuperAdmin && (siteFilter === 'all' || siteFilter === 'idle')) {
+      const idle = scoped
+        .filter((e) => !e.current_site_id && matches(e))
+        .sort(byName);
+      if (idle.length > 0) {
+        result.push({
+          key: '__idle__',
+          title: 'Unassigned / Idle — no site',
+          client: null,
+          emps: idle,
+          isIdle: true,
+        });
+      }
+    }
+    return result;
+  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin]);
+
+  // flat crew for the calendar view combobox
+  const crew = useMemo(
+    () => sections.flatMap((s) => s.emps),
+    [sections],
+  );
+
+  // sites selectable in the filter (admins: only their assigned sites)
+  const selectableSites = useMemo(() => {
+    const active = (sites ?? []).filter((s) => s.is_active);
+    if (assignedSiteIds === null) return active;
+    return active.filter((s) => assignedSiteIds.has(s.id));
+  }, [sites, assignedSiteIds]);
 
   // ---- record lookups ---------------------------------------------------------
   const recordMap = useMemo(() => {
@@ -220,8 +297,7 @@ export function AttendancePage() {
     setMonthKey(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
   };
 
-  const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
-  const loading = !employees || !records || !sites;
+  const loading = !employees || !records || !sites || (!isSuperAdmin && assignedSiteIds === null);
   const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
 
   const dayColumns = useMemo(() => {
@@ -231,6 +307,190 @@ export function AttendancePage() {
     return cols;
   }, [days, isCurrentMonth, isFutureMonth, now]);
 
+  // ---- one editable day cell (plain render fn — keeps input focus stable) ----
+  const renderDayCell = (emp: EmployeeVM, date: string) => {
+    const key = `${emp.id}|${date}`;
+    const value = cellText(emp.id, date);
+    const busy = savingKeys.has(key);
+    const fri = isFriday(date);
+    const isA = value.trim().toLowerCase() === 'a';
+    return (
+      <td
+        key={key}
+        className={cn(
+          'p-0 text-center',
+          fri && 'bg-rose-500/[0.04]',
+          !fri && date > new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10) && 'bg-emerald-500/[0.04]',
+        )}
+      >
+        <div className="relative">
+          <input
+            value={value}
+            disabled={busy}
+            onChange={(e) => setCell(emp.id, date, e.target.value)}
+            onBlur={() => commitCell(emp.id, date)}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            aria-label={`${emp.full_name} — ${date}`}
+            className={cn(
+              'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
+              'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
+              isA && 'bg-rose-500/10 font-bold text-rose-500',
+              value !== '' && !isA && 'text-foreground',
+              busy && 'opacity-50',
+            )}
+          />
+          {busy && (
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <Loader2 size={10} className="animate-spin text-brand" />
+            </span>
+          )}
+        </div>
+      </td>
+    );
+  };
+
+  // ---- a full site section (table with that site's crew) ---------------------------
+  const renderSheetSection = (section: SiteSection, index: number) => {
+    const totalHours = section.emps.reduce((sum, emp) => sum + rowTotals(emp.id).hours, 0);
+    return (
+      <motion.section
+        initial={{ opacity: 0, y: 14 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, delay: Math.min(index * 0.05, 0.3), ease: EASE }}
+        className="space-y-2"
+      >
+        {/* section band */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border bg-card px-4 py-2.5">
+          <span
+            className={cn(
+              'flex size-8 shrink-0 items-center justify-center rounded-lg',
+              section.isIdle ? 'bg-amber-500/10 text-amber-500' : 'bg-brand/10 text-brand',
+            )}
+          >
+            {section.isIdle ? <UserX size={16} /> : <Building2 size={16} />}
+          </span>
+          <div className="min-w-0">
+            <h3 className="truncate text-sm font-semibold">{section.title}</h3>
+            {section.client && (
+              <p className="truncate text-[11px] text-muted-foreground">Client: {section.client}</p>
+            )}
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <span
+              className={cn(
+                'rounded-full px-2.5 py-0.5 text-[11px] font-semibold tabular-nums',
+                section.isIdle
+                  ? 'border border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                  : 'border border-brand/25 bg-brand/10 text-brand',
+              )}
+            >
+              {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''}
+            </span>
+            {section.emps.length > 0 && (
+              <span className="hidden rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500 sm:inline-flex">
+                Site total: {Math.round(totalHours * 100) / 100}h
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* crew table */}
+        <div className="card-glow overflow-hidden rounded-xl border bg-card">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-max border-collapse text-sm">
+              <thead>
+                <tr className="border-b bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <th className="sticky left-0 z-20 min-w-[240px] bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
+                  {dayColumns.map((d) => {
+                    const date = ymd(year, month, d);
+                    const fri = isFriday(date);
+                    return (
+                      <th
+                        key={d}
+                        className={cn(
+                          'w-10 min-w-10 px-1 py-2.5 text-center font-medium',
+                          fri && 'bg-rose-500/[0.07] text-rose-500',
+                        )}
+                        title={`${MONTH_NAMES[month - 1]} ${d}${fri ? ' (Friday)' : ''}`}
+                      >
+                        <div>{d}</div>
+                        <div className="text-[9px] font-normal normal-case opacity-70">
+                          {WEEKDAYS[new Date(`${date}T00:00:00`).getDay()]}
+                        </div>
+                      </th>
+                    );
+                  })}
+                  <th className="sticky right-[92px] z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
+                  <th className="sticky right-0 z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
+                </tr>
+              </thead>
+              <tbody>
+                {section.emps.map((emp, i) => {
+                  const totals = rowTotals(emp.id);
+                  return (
+                    <motion.tr
+                      key={emp.id}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: Math.min(i * 0.02, 0.25), ease: EASE }}
+                      className="border-b border-border/40 transition-colors last:border-0 hover:bg-brand/[0.02]"
+                    >
+                      <td className="sticky left-0 z-10 bg-card px-4 py-2">
+                        <div className="flex items-center gap-2.5">
+                          <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+                            {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-[13px] font-medium">{emp.full_name}</p>
+                            <p className="flex items-center gap-1.5 truncate text-[10px] text-muted-foreground">
+                              <span className="font-mono">{emp.employee_code}</span>
+                              {emp.position && (
+                                <span className="truncate rounded-full border border-border bg-muted/60 px-1.5 py-px font-medium text-foreground/70">{emp.position}</span>
+                              )}
+                              {emp.camp_name && (
+                                <span className="inline-flex shrink-0 items-center gap-0.5 text-amber-600 dark:text-amber-400" title={`Camp: ${emp.camp_name}${emp.camp_block ? ' · Block ' + emp.camp_block : ''}${emp.camp_room ? ' · Room ' + emp.camp_room : ''}`}>
+                                  <Tent size={9} className="inline" />
+                                  {emp.camp_name}
+                                </span>
+                              )}
+                            </p>
+                          </div>
+                        </div>
+                      </td>
+                      {dayColumns.map((d) => (
+                        renderDayCell(emp, ymd(year, month, d))
+                      ))}
+                      {/* Total hours */}
+                      <td className="sticky right-[92px] z-10 bg-card px-2 text-center">
+                        <span className="inline-flex min-w-12 rounded-lg bg-emerald-500/10 px-1.5 py-1 text-[12px] font-bold tabular-nums text-emerald-500">
+                          {totals.hours}
+                        </span>
+                      </td>
+                      {/* Absences */}
+                      <td className="sticky right-0 z-10 bg-card px-2 text-center">
+                        <span
+                          className={cn(
+                            'inline-flex min-w-8 rounded-lg px-1.5 py-1 text-[12px] font-bold tabular-nums',
+                            totals.absents > 0 ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground',
+                          )}
+                        >
+                          {totals.absents}
+                        </span>
+                      </td>
+                    </motion.tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
+            {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every cell is editable: click a cell and type hours (e.g. 8, 10.5) or A, then press Enter or click away
+          </p>
+        </div>
+      </motion.section>
+    );
+  };
+
   return (
     <div className="mx-auto max-w-[1600px]">
       {/* header */}
@@ -238,7 +498,7 @@ export function AttendancePage() {
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ease: EASE }}>
           <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Attendance</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent
+            Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent
           </p>
         </motion.div>
         <div className="flex flex-wrap items-center gap-2">
@@ -279,6 +539,17 @@ export function AttendancePage() {
         </div>
       </div>
 
+      {/* admin scope hint */}
+      {!isSuperAdmin && assignedSiteIds !== null && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-brand/25 bg-brand/[0.06] px-3.5 py-2.5 text-xs text-muted-foreground">
+          <Shield size={14} className="shrink-0 text-brand" />
+          <span>
+            You can only view and mark <span className="font-medium text-foreground">{assignedSiteIds.size} assigned site{assignedSiteIds.size !== 1 ? 's' : ''}</span> —
+            ask a super admin to assign more via Admin Management → Site Access.
+          </span>
+        </div>
+      )}
+
       {/* toolbar */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {view === 'sheet' && (
@@ -296,11 +567,14 @@ export function AttendancePage() {
               <SelectTrigger className="h-10 w-56 bg-card"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Sites</SelectItem>
-                {activeSites.map((s) => (
+                {selectableSites.map((s) => (
                   <SelectItem key={s.id} value={s.id}>
                     {s.name} ({s.employee_count})
                   </SelectItem>
                 ))}
+                {isSuperAdmin && (
+                  <SelectItem value="idle">Unassigned / Idle only</SelectItem>
+                )}
               </SelectContent>
             </Select>
           </>
@@ -322,150 +596,32 @@ export function AttendancePage() {
         </div>
       </div>
 
-      {/* ============================ SHEET VIEW ============================ */}
+      {/* ============================ SHEET VIEW (site sections) ============================ */}
       {view === 'sheet' && (
         loading ? (
           <SkeletonRows rows={8} />
-        ) : crew.length === 0 ? (
+        ) : !isSuperAdmin && assignedSiteIds !== null && assignedSiteIds.size === 0 ? (
+          <EmptyState
+            icon={<Shield size={22} />}
+            title="No sites assigned to you yet"
+            description="A super admin needs to assign you at least one site (Admin Management → Site Access) before you can mark attendance."
+          />
+        ) : sections.length === 0 ? (
           <EmptyState
             icon={<CalendarCheck size={22} />}
-            title={debouncedSearch || siteFilter !== 'all' ? 'No employees match your filters' : 'No employees yet'}
+            title={debouncedSearch || siteFilter !== 'all' ? 'No employees match your filters' : 'No site employees to mark'}
             description={debouncedSearch || siteFilter !== 'all'
               ? 'Try adjusting the search or site filter.'
-              : 'Add employees first to start marking attendance.'}
+              : 'Employees are grouped by their work site — assign employees to a site to start marking their attendance.'}
           />
         ) : (
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.35, ease: EASE }}
-            className="card-glow overflow-hidden rounded-xl border bg-card"
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-max border-collapse text-sm">
-                <thead>
-                  <tr className="border-b bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                    <th className="sticky left-0 z-20 min-w-[220px] bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
-                    {dayColumns.map((d) => {
-                      const date = ymd(year, month, d);
-                      const fri = isFriday(date);
-                      return (
-                        <th
-                          key={d}
-                          className={cn(
-                            'w-10 min-w-10 px-1 py-2.5 text-center font-medium',
-                            fri && 'bg-rose-500/[0.07] text-rose-500',
-                          )}
-                          title={`${MONTH_NAMES[month - 1]} ${d}${fri ? ' (Friday)' : ''}`}
-                        >
-                          <div>{d}</div>
-                          <div className="text-[9px] font-normal normal-case opacity-70">
-                            {WEEKDAYS[new Date(`${date}T00:00:00`).getDay()]}
-                          </div>
-                        </th>
-                      );
-                    })}
-                    <th className="sticky right-[92px] z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
-                    <th className="sticky right-0 z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {crew.map((emp, i) => {
-                    const totals = rowTotals(emp.id);
-                    return (
-                      <motion.tr
-                        key={emp.id}
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: Math.min(i * 0.02, 0.3), ease: EASE }}
-                        className="border-b border-border/40 transition-colors last:border-0 hover:bg-brand/[0.02]"
-                      >
-                        <td className="sticky left-0 z-10 bg-card px-4 py-2">
-                          <div className="flex items-center gap-2.5">
-                            <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
-                              {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
-                            </span>
-                            <div className="min-w-0">
-                              <p className="truncate text-[13px] font-medium">{emp.full_name}</p>
-                              <p className="flex items-center gap-1 truncate text-[10px] text-muted-foreground">
-                                <span className="font-mono">{emp.employee_code}</span>
-                                {emp.camp_name && (
-                                  <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400"><Tent size={9} className="inline" />{emp.camp_name}</span>
-                                )}
-                              </p>
-                            </div>
-                          </div>
-                        </td>
-                        {dayColumns.map((d) => {
-                          const date = ymd(year, month, d);
-                          const key = `${emp.id}|${date}`;
-                          const value = cellText(emp.id, date);
-                          const busy = savingKeys.has(key);
-                          const fri = isFriday(date);
-                          const withinLast7 = date > new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-                          const isA = value.trim().toLowerCase() === 'a';
-                          return (
-                            <td
-                              key={d}
-                              className={cn(
-                                'p-0 text-center',
-                                fri && 'bg-rose-500/[0.04]',
-                                withinLast7 && !fri && 'bg-emerald-500/[0.04]',
-                              )}
-                            >
-                              <div className="relative">
-                                <input
-                                  value={value}
-                                  disabled={busy}
-                                  onChange={(e) => setCell(emp.id, date, e.target.value)}
-                                  onBlur={() => commitCell(emp.id, date)}
-                                  onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-                                  aria-label={`${emp.full_name} — ${date}`}
-                                  className={cn(
-                                    'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
-                                    'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
-                                    isA && 'bg-rose-500/10 font-bold text-rose-500',
-                                    value !== '' && !isA && 'text-foreground',
-                                    busy && 'opacity-50',
-                                  )}
-                                />
-                                {busy && (
-                                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                                    <Loader2 size={10} className="animate-spin text-brand" />
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                          );
-                        })}
-                        {/* Total hours */}
-                        <td className="sticky right-[92px] z-10 bg-card px-2 text-center">
-                          <span className="inline-flex min-w-12 rounded-lg bg-emerald-500/10 px-1.5 py-1 text-[12px] font-bold tabular-nums text-emerald-500">
-                            {totals.hours}
-                          </span>
-                        </td>
-                        {/* Absences */}
-                        <td className="sticky right-0 z-10 bg-card px-2 text-center">
-                          <span
-                            className={cn(
-                              'inline-flex min-w-8 rounded-lg px-1.5 py-1 text-[12px] font-bold tabular-nums',
-                              totals.absents > 0 ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground',
-                            )}
-                          >
-                            {totals.absents}
-                          </span>
-                        </td>
-                      </motion.tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
-              {crew.length} employee{crew.length !== 1 ? 's' : ''} · alphabetical
-              {siteFilter !== 'all' && ' (filtered by site)'} · every cell is editable — click a cell and type hours (e.g. 8, 10.5) or A, then press Enter or click away
-            </p>
-          </motion.div>
+          <div className="space-y-6">
+            {sections.map((section, i) => (
+              <Fragment key={section.key}>
+                {renderSheetSection(section, i)}
+              </Fragment>
+            ))}
+          </div>
         )
       )}
 
@@ -491,7 +647,7 @@ export function AttendancePage() {
           >
             <SectionTitle
               title={`${calendarEmployee.full_name} — ${MONTH_NAMES[month - 1]} ${year}`}
-              sub={`${calendarEmployee.employee_code}${calendarEmployee.site_name ? ' · ' + calendarEmployee.site_name : ' · Idle'}`}
+              sub={`${calendarEmployee.employee_code} · ${calendarEmployee.position ?? 'No trade'}${calendarEmployee.site_name ? ' · ' + calendarEmployee.site_name : ' · Idle'}`}
             />
             <div className="mt-4 grid grid-cols-7 gap-1.5">
               {WEEKDAYS.map((w) => (

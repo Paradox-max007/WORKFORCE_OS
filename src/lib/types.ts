@@ -66,6 +66,10 @@ export interface Employee {
   id_status: DocumentStatus | null;
   current_site_id: string | null;
   camp_id: string | null;
+  /** Block number within the assigned camp */
+  camp_block: string | null;
+  /** Room number within the assigned camp */
+  camp_room: string | null;
   rating: number;
   status: EmployeeStatus;
   photo: string | null;
@@ -239,6 +243,8 @@ export interface EmployeeInput {
   id_status: DocumentStatus | null;
   current_site_id: string | null;
   camp_id: string | null;
+  camp_block: string | null;
+  camp_room: string | null;
   photo: string | null;
   is_team_leader: boolean;
   team_leader_site_id: string | null;
@@ -284,6 +290,7 @@ export interface UniformEntryUpdate {
 export type RealtimeTable =
   | 'profiles'
   | 'menu_permission'
+  | 'admin_site'
   | 'site'
   | 'camp'
   | 'employee'

@@ -40,7 +40,7 @@ import {
 } from '@/components/ui/table';
 import { dataApi } from '@/lib/data';
 import { fmtDate, initials } from '@/lib/format';
-import { MENU_KEYS, type MenuKey, type MenuPermissionMap, type Profile, type Role } from '@/lib/types';
+import { MENU_KEYS, type MenuKey, type MenuPermissionMap, type Profile, type Role, type SiteWithCount } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -68,7 +68,7 @@ const MENU_META: Record<MenuKey, { label: string; hint: string; icon: LucideIcon
   employees: { label: 'Employees', hint: 'Directory, records & ratings', icon: Users },
   sites: { label: 'Sites', hint: 'Work sites & client projects', icon: Building2 },
   camps: { label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent },
-  attendance: { label: 'Attendance', hint: 'Excel-style hours marking', icon: CalendarCheck },
+  attendance: { label: 'Attendance', hint: 'Sitewise hours marking — assigned sites only', icon: CalendarCheck },
   leave_requests: { label: 'Leave Requests', hint: 'Leave applications & review', icon: FileText },
   cancellation_requests: { label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban },
   notifications: { label: 'Notifications', hint: 'Alerts & announcements', icon: Bell },
@@ -97,16 +97,19 @@ const matchesSearch = (profile: Profile, query: string): boolean => {
 export function AdminPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
-  const version = useRealtimeVersion(['profiles', 'menu_permission']);
+  const version = useRealtimeVersion(['profiles', 'menu_permission', 'admin_site', 'site']);
 
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [permCache, setPermCache] = useState<Record<string, MenuPermissionMap>>({});
+  const [sitesCache, setSitesCache] = useState<Record<string, string[]>>({});
+  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [superSearch, setSuperSearch] = useState('');
   const [adminSearch, setAdminSearch] = useState('');
 
   // Dialog state
   const [accountTarget, setAccountTarget] = useState<AccountTarget | null>(null);
   const [permTarget, setPermTarget] = useState<Profile | null>(null);
+  const [sitesTarget, setSitesTarget] = useState<Profile | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -116,22 +119,39 @@ export function AdminPage() {
     let cancelled = false;
     (async () => {
       try {
-        const list = await dataApi.listProfiles();
+        const [list, siteList] = await Promise.all([dataApi.listProfiles(), dataApi.listSites()]);
         if (cancelled) return;
         setProfiles(list);
-        // Permission summaries for the "Access" column of regular admins
-        const maps = await Promise.all(
-          list
-            .filter((p) => p.role === 'admin')
-            .map(async (p): Promise<[string, MenuPermissionMap]> => {
-              try {
-                return [p.id, await dataApi.getMenuPermissions(p.id)];
-              } catch {
-                return [p.id, { ...EMPTY_PERMS }];
-              }
-            }),
-        );
-        if (!cancelled) setPermCache(Object.fromEntries(maps));
+        setSites(siteList);
+        // Permission summaries + site assignments for the admin rows
+        const [maps, siteSets] = await Promise.all([
+          Promise.all(
+            list
+              .filter((p) => p.role === 'admin')
+              .map(async (p): Promise<[string, MenuPermissionMap]> => {
+                try {
+                  return [p.id, await dataApi.getMenuPermissions(p.id)];
+                } catch {
+                  return [p.id, { ...EMPTY_PERMS }];
+                }
+              }),
+          ),
+          Promise.all(
+            list
+              .filter((p) => p.role === 'admin')
+              .map(async (p): Promise<[string, string[]]> => {
+                try {
+                  return [p.id, await dataApi.getSiteAssignments(p.id)];
+                } catch {
+                  return [p.id, [] as string[]];
+                }
+              }),
+          ),
+        ]);
+        if (!cancelled) {
+          setPermCache(Object.fromEntries(maps));
+          setSitesCache(Object.fromEntries(siteSets));
+        }
       } catch {
         if (!cancelled) setProfiles([]);
       }
@@ -180,6 +200,11 @@ export function AdminPage() {
       ...prev,
       [profileId]: { ...(prev[profileId] ?? EMPTY_PERMS), [key]: allowed },
     }));
+  };
+
+  // Keep the "Sites" column in sync when toggles fire in the site-access dialog
+  const handleSitesChanged = (profileId: string, siteIds: string[]) => {
+    setSitesCache((prev) => ({ ...prev, [profileId]: siteIds }));
   };
 
   // ---- super-admin-only guard -------------------------------------------------
@@ -439,6 +464,7 @@ export function AdminPage() {
                       <TableHead className={TH}>Member</TableHead>
                       <TableHead className={TH}>Role</TableHead>
                       <TableHead className={TH}>Access</TableHead>
+                      <TableHead className={TH}>Assigned Sites</TableHead>
                       <TableHead className={TH}>Created</TableHead>
                       <TableHead className={cn(TH, 'text-right')}>Actions</TableHead>
                     </TableRow>
@@ -472,6 +498,9 @@ export function AdminPage() {
                         <TableCell className="px-3 py-3">
                           <AccessChips map={permCache[p.id]} />
                         </TableCell>
+                        <TableCell className="px-3 py-3">
+                          <SiteChips siteIds={sitesCache[p.id] ?? []} sites={sites} />
+                        </TableCell>
                         <TableCell className="whitespace-nowrap px-3 py-3">
                           <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
                             <Calendar size={13} className="text-muted-foreground/60" aria-hidden />
@@ -485,6 +514,7 @@ export function AdminPage() {
                               canDelete
                               onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
                               onPermissions={() => setPermTarget(p)}
+                              onSites={() => setSitesTarget(p)}
                               onDelete={() => requestDelete(p)}
                             />
                           </div>
@@ -527,6 +557,10 @@ export function AdminPage() {
                         Access — Dashboard &amp; Uniform Registry
                         {grantedLabels.length > 0 ? ` plus ${grantedLabels.join(', ')}` : ' only'}
                       </p>
+                      <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <Building2 size={12} className="shrink-0 text-brand" aria-hidden /> Sites:
+                        <SiteChips siteIds={sitesCache[p.id] ?? []} sites={sites} inline />
+                      </p>
                       <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
                         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                           <Calendar size={12} aria-hidden /> Joined {fmtDate(p.created_at)}
@@ -536,6 +570,7 @@ export function AdminPage() {
                           canDelete
                           onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
                           onPermissions={() => setPermTarget(p)}
+                          onSites={() => setSitesTarget(p)}
                           onDelete={() => requestDelete(p)}
                         />
                       </div>
@@ -560,6 +595,14 @@ export function AdminPage() {
         profile={permTarget}
         onClose={() => setPermTarget(null)}
         onChanged={handlePermChanged}
+      />
+
+      {/* ---- Site access dialog ---- */}
+      <SiteAccessDialog
+        profile={sitesTarget}
+        sites={sites}
+        onClose={() => setSitesTarget(null)}
+        onChanged={handleSitesChanged}
       />
 
       {/* ---- Delete confirmation ---- */}
@@ -719,14 +762,45 @@ function AccessChips({ map }: { map: MenuPermissionMap | undefined }) {
   );
 }
 
-/** Row action icon buttons (permissions for admins, edit, guarded delete). */
+/** Summary of the sites an admin is assigned to (attendance scoping). */
+function SiteChips({
+  siteIds, sites, inline = false,
+}: {
+  siteIds: string[];
+  sites: SiteWithCount[] | null;
+  inline?: boolean;
+}) {
+  const names = (sites ?? []).filter((s) => siteIds.includes(s.id)).map((s) => s.name);
+  return (
+    <span
+      className={cn('flex items-center gap-1', inline ? 'flex-wrap' : 'max-w-[220px] flex-wrap')}
+      title="Admins can only mark attendance for their assigned sites"
+    >
+      {names.length === 0 ? (
+        <span className={cn('rounded-full border px-1.5 py-px text-[10px] font-medium', inline ? 'text-amber-600 dark:text-amber-400 border-amber-500/25 bg-amber-500/10' : 'text-muted-foreground bg-muted')}>
+          None
+        </span>
+      ) : names.map((n) => (
+        <span
+          key={n}
+          className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-px text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+        >
+          {n}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Row action icon buttons (permissions + site access for admins, edit, guarded delete). */
 function RowActions({
-  profile, canDelete, onEdit, onPermissions, onDelete,
+  profile, canDelete, onEdit, onPermissions, onSites, onDelete,
 }: {
   profile: Profile;
   canDelete: boolean;
   onEdit: () => void;
   onPermissions?: () => void;
+  onSites?: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -741,6 +815,18 @@ function RowActions({
           className="size-9 text-muted-foreground hover:bg-brand/10 hover:text-brand"
         >
           <KeyRound size={15} aria-hidden />
+        </Button>
+      )}
+      {onSites && (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onSites}
+          title="Assign sites (attendance scoping)"
+          aria-label={`Assign sites — ${profile.name}`}
+          className="size-9 text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-500"
+        >
+          <Building2 size={15} aria-hidden />
         </Button>
       )}
       <Button
@@ -1252,6 +1338,165 @@ function PermissionsDialog({
                 </motion.div>
               );
             })}
+          </motion.div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Done
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Site access dialog — assign the sites a normal admin can mark attendance for
+// ---------------------------------------------------------------------------
+function SiteAccessDialog({
+  profile, sites, onClose, onChanged,
+}: {
+  profile: Profile | null;
+  sites: SiteWithCount[] | null;
+  onClose: () => void;
+  onChanged: (profileId: string, siteIds: string[]) => void;
+}) {
+  const open = profile !== null;
+  const [assigned, setAssigned] = useState<Set<string> | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  // Load the initial assignments each time the dialog opens
+  useEffect(() => {
+    if (!profile) {
+      setAssigned(null);
+      return;
+    }
+    let cancelled = false;
+    setAssigned(null);
+    setSavingId(null);
+    (async () => {
+      const ids = await dataApi.getSiteAssignments(profile.id);
+      if (!cancelled) setAssigned(new Set(ids));
+    })().catch(() => {
+      if (!cancelled) {
+        setAssigned(new Set());
+        toast.error('Failed to load site assignments', { description: 'Please close the dialog and try again.' });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [profile]);
+
+  // Toggle one site — optimistic, instantly saved, reverted on failure
+  const toggle = async (siteId: string, siteName: string, allowed: boolean) => {
+    if (!profile || !assigned) return;
+    const previous = new Set(assigned);
+    setSavingId(siteId);
+    const next = new Set(assigned);
+    if (allowed) next.add(siteId);
+    else next.delete(siteId);
+    setAssigned(next);
+    try {
+      await dataApi.setSiteAssignment(profile.id, siteId, allowed);
+      toast.success(
+        allowed ? `${siteName} assigned to ${profile.name}` : `${siteName} removed from ${profile.name}`,
+        { description: allowed ? 'They can now mark attendance for this site.' : 'They can no longer mark this site.' },
+      );
+      onChanged(profile.id, [...next]);
+    } catch (err) {
+      setAssigned(previous);
+      toast.error(err instanceof Error ? err.message : 'Failed to update the site assignment');
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const activeSites = (sites ?? []).filter((s) => s.is_active);
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <span className="rounded-lg bg-emerald-500/10 p-1.5 text-emerald-500">
+              <Building2 size={14} aria-hidden />
+            </span>
+            Assign Sites
+          </DialogTitle>
+          <DialogDescription>
+            Choose the work sites{' '}
+            <span className="font-medium text-foreground">{profile?.name}</span> can mark
+            attendance for. Every change saves instantly.
+          </DialogDescription>
+        </DialogHeader>
+
+        {assigned === null || sites === null ? (
+          <div className="space-y-2 py-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="shimmer h-11 rounded-lg border" />
+            ))}
+          </div>
+        ) : activeSites.length === 0 ? (
+          <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+            No active sites exist yet — create a site first (Sites page) to assign it here.
+          </p>
+        ) : (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+            className="space-y-1.5 py-1"
+          >
+            <p className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Sites this admin can mark
+            </p>
+            {activeSites.map((s, i) => {
+              const allowed = assigned.has(s.id);
+              return (
+                <motion.div
+                  key={s.id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.15 + i * 0.04, duration: 0.25, ease: EASE }}
+                  className={cn(
+                    'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 transition-colors',
+                    allowed ? 'border-emerald-500/25 bg-emerald-500/5' : 'bg-muted/30',
+                  )}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span
+                      className={cn(
+                        'flex size-9 shrink-0 items-center justify-center rounded-md text-xs font-bold tabular-nums',
+                        allowed ? 'bg-emerald-500/10 text-emerald-500' : 'bg-muted text-muted-foreground',
+                      )}
+                    >
+                      {s.employee_count}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{s.name}</p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {allowed ? 'Can mark attendance' : `${s.employee_count} employee${s.employee_count === 1 ? '' : 's'} · not assigned`}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {savingId === s.id && (
+                      <Loader2 size={13} className="animate-spin text-muted-foreground" aria-hidden />
+                    )}
+                    <Switch
+                      checked={allowed}
+                      disabled={savingId === s.id}
+                      onCheckedChange={(v) => { void toggle(s.id, s.name, v === true); }}
+                      aria-label={`${allowed ? 'Remove' : 'Assign'} ${s.name}`}
+                      className="data-[state=checked]:bg-emerald-500 [&_[data-slot=switch-thumb]]:bg-white!"
+                    />
+                  </div>
+                </motion.div>
+              );
+            })}
+            <p className="px-1 pt-1 text-[11px] text-muted-foreground">
+              Idle employees (no site) can only be marked by super admins.
+            </p>
           </motion.div>
         )}
 

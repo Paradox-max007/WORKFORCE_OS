@@ -1,0 +1,876 @@
+     1→// ============================================================================
+     2→// PULSE Workforce OS — Demo data API (business logic mirrors supabase/schema.sql)
+     3→// ============================================================================
+     4→
+     5→import {
+     6→  type Attendance,
+     7→  type Camp,
+     8→  type CampWithCount,
+     9→  type CancellationRequestVM,
+    10→  type Employee,
+    11→  type EmployeeInput,
+    12→  type EmployeeVM,
+    13→  type FineVM,
+    14→  type LeaveRequestInput,
+    15→  type LeaveRequestVM,
+    16→  type MonthlySummaryRow,
+    17→  type Notification,
+    18→  type Profile,
+    19→  type Site,
+    20→  type SiteWithCount,
+    21→  type UniformEntry,
+    22→  type UniformEntryInput,
+    23→  type UniformEntryUpdate,
+    24→  type WarningVM,
+    25→  type MenuPermissionMap,
+    26→} from '@/lib/types';
+    27→import {
+    28→  addDaysStr,
+    29→  db,
+    30→  fromYMD,
+    31→  getDemoSessionId,
+    32→  isFridayStr,
+    33→  nowISO,
+    34→  saveAndEmit,
+    35→  setDemoSessionId,
+    36→  subscribeDemo,
+    37→  toYMD,
+    38→  uid,
+    39→} from './demo-store';
+    40→
+    41→type VM = Record<string, unknown>;
+    42→
+    43→const clampRating = (v: number): number => Math.round(Math.max(0, Math.min(5, v)) * 10) / 10;
+    44→
+    45→const stripPassword = (p: (typeof db.profiles)[number]): Profile => {
+    46→  const { password: _pw, ...rest } = p;
+    47→  return rest;
+    48→};
+    49→
+    50→const currentProfile = (): Profile | null => {
+    51→  const id = getDemoSessionId();
+    52→  if (!id) return null;
+    53→  const p = db.profiles.find((x) => x.id === id);
+    54→  return p ? stripPassword(p) : null;
+    55→};
+    56→
+    57→const notifySuperAdmins = (title: string, message: string, type: Notification['type']): void => {
+    58→  db.profiles
+    59→    .filter((p) => p.role === 'super_admin')
+    60→    .forEach((p) => {
+    61→      db.notifications.push({
+    62→        id: uid(), profile_id: p.id, title, message, type, read: false, is_hidden: false, created_at: nowISO(),
+    63→      });
+    64→    });
+    65→};
+    66→
+    67→const attachEmployeeVM = (e: Employee): EmployeeVM => ({
+    68→  ...e,
+    69→  site_name: e.current_site_id ? db.sites.find((s) => s.id === e.current_site_id)?.name ?? null : null,
+    70→  leader_site_name: e.team_leader_site_id ? db.sites.find((s) => s.id === e.team_leader_site_id)?.name ?? null : null,
+    71→  camp_name: e.camp_id ? db.camps.find((c) => c.id === e.camp_id)?.name ?? null : null,
+    72→});
+    73→
+    74→const profileName = (id: string | null): string | null =>
+    75→  id ? db.profiles.find((p) => p.id === id)?.name ?? null : null;
+    76→
+    77→const attachLeaveVM = (r: (typeof db.leaveRequests)[number]): LeaveRequestVM => {
+    78→  const e = db.employees.find((x) => x.id === r.employee_id);
+    79→  return {
+    80→    ...r,
+    81→    employee_name: e?.full_name ?? 'Unknown',
+    82→    employee_code: e?.employee_code ?? '—',
+    83→    employee_position: e?.position ?? null,
+    84→    employee_phone: e?.phone ?? null,
+    85→    employee_nationality: e?.nationality ?? null,
+    86→    employee_company: e?.company_name ?? null,
+    87→    created_by_name: profileName(r.created_by),
+    88→    reviewed_by_name: profileName(r.reviewed_by),
+    89→  };
+    90→};
+    91→
+    92→const attachCancelVM = (r: (typeof db.cancellationRequests)[number]): CancellationRequestVM => {
+    93→  const e = db.employees.find((x) => x.id === r.employee_id);
+    94→  return {
+    95→    ...r,
+    96→    employee_name: e?.full_name ?? 'Unknown',
+    97→    employee_code: e?.employee_code ?? '—',
+    98→    employee_position: e?.position ?? null,
+    99→    employee_status: e?.status ?? 'deleted',
+   100→    requested_by_name: profileName(r.requested_by),
+   101→    reviewed_by_name: profileName(r.reviewed_by),
+   102→  };
+   103→};
+   104→
+   105→const attachWarningVM = (w: (typeof db.warnings)[number]): WarningVM => {
+   106→  const e = db.employees.find((x) => x.id === w.employee_id);
+   107→  return {
+   108→    ...w,
+   109→    employee_name: e?.full_name ?? 'Unknown',
+   110→    employee_code: e?.employee_code ?? '—',
+   111→    issued_by_name: profileName(w.created_by) ?? 'System',
+   112→  };
+   113→};
+   114→
+   115→const attachFineVM = (f: (typeof db.fines)[number]): FineVM => {
+   116→  const e = db.employees.find((x) => x.id === f.employee_id);
+   117→  return {
+   118→    ...f,
+   119→    employee_name: e?.full_name ?? 'Unknown',
+   120→    employee_code: e?.employee_code ?? '—',
+   121→    issued_by_name: profileName(f.created_by) ?? 'System',
+   122→  };
+   123→};
+   124→
+   125→const nextEmployeeCode = (): string => {
+   126→  const year = new Date().getFullYear();
+   127→  const prefix = `PUL-${year}-`;
+   128→  const max = db.employees.reduce((m, e) => {
+   129→    if (e.employee_code.startsWith(prefix)) {
+   130→      const n = parseInt(e.employee_code.slice(prefix.length), 10);
+   131→      return Number.isNaN(n) ? m : Math.max(m, n);
+   132→    }
+   133→    return m;
+   134→  }, 0);
+   135→  return `${prefix}${String(max + 1).padStart(3, '0')}`;
+   136→};
+   137→
+   138→// ---------------------------------------------------------------------------
+   139→// API implementation
+   140→// ---------------------------------------------------------------------------
+   141→
+   142→export const demoApi = {
+   143→  mode: 'demo' as const,
+   144→
+   145→  // ---- auth ---------------------------------------------------------------
+   146→  async hasProfiles(): Promise<boolean> {
+   147→    return db.profiles.some((p) => p.role === 'super_admin');
+   148→  },
+   149→
+   150→  async signIn(email: string, password: string): Promise<Profile> {
+   151→    const p = db.profiles.find((x) => x.email.toLowerCase() === email.toLowerCase());
+   152→    if (!p || p.password !== password) throw new Error('Invalid email or password');
+   153→    setDemoSessionId(p.id);
+   154→    return stripPassword(p);
+   155→  },
+   156→
+   157→  async signUpInitial(name: string, email: string, password: string): Promise<Profile> {
+   158→    if (db.profiles.some((p) => p.role === 'super_admin')) {
+   159→      throw new Error('A super admin account already exists');
+   160→    }
+   161→    const p = {
+   162→      id: uid(), email: email.toLowerCase(), name, password,
+   163→      role: 'super_admin' as const, theme: 'dark' as const, accent: 'violet' as const,
+   164→      created_at: nowISO(),
+   165→    };
+   166→    db.profiles.push(p);
+   167→    saveAndEmit(['profiles']);
+   168→    setDemoSessionId(p.id);
+   169→    return stripPassword(p);
+   170→  },
+   171→
+   172→  async signOut(): Promise<void> {
+   173→    setDemoSessionId(null);
+   174→  },
+   175→
+   176→  async getSessionProfile(): Promise<Profile | null> {
+   177→    return currentProfile();
+   178→  },
+   179→
+   180→  // ---- profiles / admins ------------------------------------------------------
+   181→  async listProfiles(): Promise<Profile[]> {
+   182→    return db.profiles.map(stripPassword).sort((a, b) =>
+   183→      a.role === b.role ? a.name.localeCompare(b.name) : a.role === 'super_admin' ? -1 : 1,
+   184→    );
+   185→  },
+   186→
+   187→  async createProfile(email: string, name: string, password: string, role: 'admin' | 'super_admin'): Promise<Profile> {
+   188→    if (db.profiles.some((p) => p.email.toLowerCase() === email.toLowerCase())) {
+   189→      throw new Error('An account with this email already exists');
+   190→    }
+   191→    const p = {
+   192→      id: uid(), email: email.toLowerCase(), name, password, role,
+   193→      theme: 'dark' as const, accent: 'violet' as const, created_at: nowISO(),
+   194→    };
+   195→    db.profiles.push(p);
+   196→    saveAndEmit(['profiles']);
+   197→    return stripPassword(p);
+   198→  },
+   199→
+   200→  async updateProfile(id: string, input: { name?: string; email?: string; password?: string; role?: 'admin' | 'super_admin' }): Promise<Profile> {
+   201→    const p = db.profiles.find((x) => x.id === id);
+   202→    if (!p) throw new Error('Profile not found');
+   203→    if (input.name !== undefined) p.name = input.name;
+   204→    if (input.email !== undefined) p.email = input.email.toLowerCase();
+   205→    if (input.password) p.password = input.password;
+   206→    if (input.role !== undefined) {
+   207→      if (p.role === 'super_admin' && input.role !== 'super_admin') {
+   208→        const superCount = db.profiles.filter((x) => x.role === 'super_admin').length;
+   209→        if (superCount <= 1) throw new Error('Cannot demote the last super admin');
+   210→      }
+   211→      p.role = input.role;
+   212→    }
+   213→    saveAndEmit(['profiles']);
+   214→    return stripPassword(p);
+   215→  },
+   216→
+   217→  async deleteProfile(id: string): Promise<void> {
+   218→    const p = db.profiles.find((x) => x.id === id);
+   219→    if (!p) return;
+   220→    if (p.role === 'super_admin') {
+   221→      const superCount = db.profiles.filter((x) => x.role === 'super_admin').length;
+   222→      if (superCount <= 1) throw new Error('Cannot delete the last super admin');
+   223→    }
+   224→    db.profiles = db.profiles.filter((x) => x.id !== id);
+   225→    db.menuPermissions = db.menuPermissions.filter((x) => x.profile_id !== id);
+   226→    saveAndEmit(['profiles', 'menu_permission']);
+   227→  },
+   228→
+   229→  async setPreferences(theme: 'dark' | 'light', accent: 'violet' | 'emerald' | 'amber' | 'rose', name?: string): Promise<Profile> {
+   230→    const p = currentProfile();
+   231→    if (!p) throw new Error('Not signed in');
+   232→    const row = db.profiles.find((x) => x.id === p.id)!;
+   233→    row.theme = theme;
+   234→    row.accent = accent;
+   235→    if (name) row.name = name;
+   236→    saveAndEmit(['profiles']);
+   237→    return stripPassword(row);
+   238→  },
+   239→
+   240→  async getMenuPermissions(profileId: string): Promise<MenuPermissionMap> {
+   241→    const map = {
+   242→      employees: false, sites: false, camps: false, attendance: false,
+   243→      leave_requests: false, cancellation_requests: false, notifications: false,
+   244→    };
+   245→    db.menuPermissions
+   246→      .filter((x) => x.profile_id === profileId)
+   247→      .forEach((x) => { map[x.menu_key] = x.allowed; });
+   248→    return map;
+   249→  },
+   250→
+   251→  async setMenuPermission(profileId: string, menuKey: keyof MenuPermissionMap, allowed: boolean): Promise<void> {
+   252→    const existing = db.menuPermissions.find((x) => x.profile_id === profileId && x.menu_key === menuKey);
+   253→    if (existing) existing.allowed = allowed;
+   254→    else db.menuPermissions.push({ profile_id: profileId, menu_key: menuKey, allowed });
+   255→    saveAndEmit(['menu_permission']);
+   256→  },
+   257→
+   258→  // ---- sites -----------------------------------------------------------------
+   259→  async listSites(): Promise<SiteWithCount[]> {
+   260→    return db.sites.map((s) => ({
+   261→      ...s,
+   262→      employee_count: db.employees.filter((e) => e.current_site_id === s.id && e.status !== 'deleted').length,
+   263→    }));
+   264→  },
+   265→
+   266→  async createSite(name: string, clientName: string | null, projectName: string | null): Promise<Site> {
+   267→    if (db.sites.some((s) => s.name.toLowerCase() === name.toLowerCase())) {
+   268→      throw new Error('A site with this name already exists');
+   269→    }
+   270→    const site: Site = {
+   271→      id: uid(), name, client_name: clientName, project_name: projectName, is_active: true, created_at: nowISO(),
+   272→    };
+   273→    db.sites.push(site);
+   274→    saveAndEmit(['site']);
+   275→    return site;
+   276→  },
+   277→
+   278→  async updateSite(id: string, input: { name: string; client_name: string | null; project_name: string | null; is_active: boolean }): Promise<{ unassignedCount: number }> {
+   279→    if (db.sites.some((s) => s.name.toLowerCase() === input.name.toLowerCase() && s.id !== id)) {
+   280→      throw new Error('A site with this name already exists');
+   281→    }
+   282→    const site = db.sites.find((s) => s.id === id);
+   283→    if (!site) throw new Error('Site not found');
+   284→    const wasActive = site.is_active;
+   285→    Object.assign(site, {
+   286→      name: input.name, client_name: input.client_name, project_name: input.project_name, is_active: input.is_active,
+   287→    });
+   288→
+   289→    let unassignedCount = 0;
+   290→    if (wasActive && !input.is_active) {
+   291→      db.employees
+   292→        .filter((e) => e.current_site_id === id && e.status !== 'deleted')
+   293→        .forEach((e) => { e.current_site_id = null; unassignedCount += 1; });
+   294→      db.employees
+   295→        .filter((e) => e.team_leader_site_id === id)
+   296→        .forEach((e) => { e.is_team_leader = false; e.team_leader_site_id = null; });
+   297→    }
+   298→    saveAndEmit(['site', 'employee']);
+   299→    return { unassignedCount };
+   300→  },
+   301→
+   302→  async deleteSite(id: string): Promise<void> {
+   303→    db.employees.filter((e) => e.current_site_id === id).forEach((e) => { e.current_site_id = null; });
+   304→    db.employees.filter((e) => e.team_leader_site_id === id).forEach((e) => { e.is_team_leader = false; e.team_leader_site_id = null; });
+   305→    db.sites = db.sites.filter((s) => s.id !== id);
+   306→    saveAndEmit(['site', 'employee']);
+   307→  },
+   308→
+   309→  // ---- camps (accommodation) ------------------------------------------------
+   310→  async listCamps(): Promise<CampWithCount[]> {
+   311→    return db.camps.map((c) => ({
+   312→      ...c,
+   313→      employee_count: db.employees.filter((e) => e.camp_id === c.id && e.status !== 'deleted').length,
+   314→    }));
+   315→  },
+   316→
+   317→  async createCamp(name: string, location: string | null, capacity: number | null, notes: string | null): Promise<Camp> {
+   318→    if (db.camps.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+   319→      throw new Error('A camp with this name already exists');
+   320→    }
+   321→    if (capacity !== null && capacity < 0) throw new Error('Capacity cannot be negative');
+   322→    const camp: Camp = {
+   323→      id: uid(), name, location, capacity, notes, is_active: true, created_at: nowISO(),
+   324→    };
+   325→    db.camps.push(camp);
+   326→    saveAndEmit(['camp']);
+   327→    return camp;
+   328→  },
+   329→
+   330→  async updateCamp(id: string, input: { name: string; location: string | null; capacity: number | null; notes: string | null; is_active: boolean }): Promise<Camp> {
+   331→    if (db.camps.some((c) => c.name.toLowerCase() === input.name.toLowerCase() && c.id !== id)) {
+   332→      throw new Error('A camp with this name already exists');
+   333→    }
+   334→    if (input.capacity !== null && input.capacity < 0) throw new Error('Capacity cannot be negative');
+   335→    const camp = db.camps.find((c) => c.id === id);
+   336→    if (!camp) throw new Error('Camp not found');
+   337→    Object.assign(camp, {
+   338→      name: input.name, location: input.location, capacity: input.capacity,
+   339→      notes: input.notes, is_active: input.is_active,
+   340→    });
+   341→    saveAndEmit(['camp']);
+   342→    return camp;
+   343→  },
+   344→
+   345→  async deleteCamp(id: string): Promise<void> {
+   346→    db.employees.filter((e) => e.camp_id === id).forEach((e) => { e.camp_id = null; });
+   347→    db.camps = db.camps.filter((c) => c.id !== id);
+   348→    saveAndEmit(['camp', 'employee']);
+   349→  },
+   350→
+   351→  async assignEmployeeCamp(employeeId: string, campId: string | null): Promise<EmployeeVM> {
+   352→    const e = db.employees.find((x) => x.id === employeeId);
+   353→    if (!e) throw new Error('Employee not found');
+   354→    if (campId) {
+   355→      const camp = db.camps.find((c) => c.id === campId);
+   356→      if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
+   357→    }
+   358→    e.camp_id = campId;
+   359→    e.updated_at = nowISO();
+   360→    saveAndEmit(['employee', 'camp']);
+   361→    return attachEmployeeVM(e);
+   362→  },
+   363→
+   364→  // ---- employees ---------------------------------------------------------------
+   365→  async listEmployees(): Promise<EmployeeVM[]> {
+   366→    return db.employees.filter((e) => e.status !== 'deleted').map(attachEmployeeVM);
+   367→  },
+   368→
+   369→  async createEmployee(input: EmployeeInput): Promise<EmployeeVM> {
+   370→    if (input.current_site_id) {
+   371→      const site = db.sites.find((s) => s.id === input.current_site_id);
+   372→      if (!site || !site.is_active) throw new Error('The selected site does not exist or is inactive');
+   373→    }
+   374→    if (input.camp_id) {
+   375→      const camp = db.camps.find((c) => c.id === input.camp_id);
+   376→      if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
+   377→    }
+   378→    if (input.is_team_leader && input.team_leader_site_id) {
+   379→      const conflict = db.employees.find(
+   380→        (e) => e.is_team_leader && e.team_leader_site_id === input.team_leader_site_id && e.status !== 'deleted',
+   381→      );
+   382→      if (conflict) throw new Error(`Another employee (${conflict.full_name}) is already the team leader of this site`);
+   383→    }
+   384→    const e: Employee = {
+   385→      id: uid(),
+   386→      full_name: input.full_name,
+   387→      employee_code: nextEmployeeCode(),
+   388→      nationality: input.nationality || null,
+   389→      date_of_birth: input.date_of_birth || null,
+   390→      phone: input.phone || null,
+   391→      email: input.email || null,
+   392→      address: input.address || null,
+   393→      emergency_contact: input.emergency_contact || null,
+   394→      position: input.position || null,
+   395→      join_date: input.join_date || null,
+   396→      company_name: input.company_name || null,
+   397→      passport_number: input.passport_number || null,
+   398→      passport_status: input.passport_status,
+   399→      id_number: input.id_number || null,
+   400→      id_status: input.id_status,
+   401→      current_site_id: input.current_site_id || null,
+   402→      camp_id: input.camp_id || null,
+   403→      rating: 5,
+   404→      status: 'active',
+   405→      photo: input.photo || null,
+   406→      is_team_leader: input.is_team_leader,
+   407→      team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
+   408→      created_at: nowISO(),
+   409→      updated_at: nowISO(),
+   410→    };
+   411→    db.employees.push(e);
+   412→    saveAndEmit(['employee']);
+   413→    return attachEmployeeVM(e);
+   414→  },
+   415→
+   416→  async updateEmployee(id: string, input: EmployeeInput): Promise<EmployeeVM> {
+   417→    const e = db.employees.find((x) => x.id === id);
+   418→    if (!e) throw new Error('Employee not found');
+   419→    if (input.current_site_id) {
+   420→      const site = db.sites.find((s) => s.id === input.current_site_id);
+   421→      if (!site || !site.is_active) throw new Error('The selected site does not exist or is inactive');
+   422→    }
+   423→    if (input.camp_id) {
+   424→      const camp = db.camps.find((c) => c.id === input.camp_id);
+   425→      if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
+   426→    }
+   427→    if (input.is_team_leader && input.team_leader_site_id) {
+   428→      const conflict = db.employees.find(
+   429→        (x) => x.is_team_leader && x.team_leader_site_id === input.team_leader_site_id && x.status !== 'deleted' && x.id !== id,
+   430→      );
+   431→      if (conflict) throw new Error(`Another employee (${conflict.full_name}) is already the team leader of this site`);
+   432→    }
+   433→    Object.assign(e, {
+   434→      full_name: input.full_name,
+   435→      nationality: input.nationality || null,
+   436→      date_of_birth: input.date_of_birth || null,
+   437→      phone: input.phone || null,
+   438→      email: input.email || null,
+   439→      address: input.address || null,
+   440→      emergency_contact: input.emergency_contact || null,
+   441→      position: input.position || null,
+   442→      join_date: input.join_date || null,
+   443→      company_name: input.company_name || null,
+   444→      passport_number: input.passport_number || null,
+   445→      passport_status: input.passport_status,
+   446→      id_number: input.id_number || null,
+   447→      id_status: input.id_status,
+   448→      current_site_id: input.current_site_id || null,
+   449→      camp_id: input.camp_id || null,
+   450→      photo: input.photo || null,
+   451→      is_team_leader: input.is_team_leader,
+   452→      team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
+   453→      updated_at: nowISO(),
+   454→    });
+   455→    saveAndEmit(['employee']);
+   456→    return attachEmployeeVM(e);
+   457→  },
+   458→
+   459→  async deleteEmployeeCascade(id: string): Promise<void> {
+   460→    const e = db.employees.find((x) => x.id === id);
+   461→    if (!e) throw new Error('Employee not found');
+   462→    if (e.status === 'pending_deletion') throw new Error('This employee already has a pending deletion request');
+   463→
+   464→    db.attendance.filter((a) => a.employee_id === id).forEach((a) => { a.is_hidden = true; });
+   465→    db.warnings.filter((w) => w.employee_id === id).forEach((w) => { w.is_hidden = true; });
+   466→    db.fines.filter((f) => f.employee_id === id).forEach((f) => { f.is_hidden = true; });
+   467→    db.leaveRequests.filter((r) => r.employee_id === id).forEach((r) => { r.is_hidden = true; });
+   468→    db.cancellationRequests.filter((r) => r.employee_id === id).forEach((r) => { r.is_hidden = true; });
+   469→    db.uniforms.filter((u) => u.employee_id === id).forEach((u) => { u.is_deleted = true; u.is_hidden = true; });
+   470→    const nameLc = e.full_name.toLowerCase();
+   471→    const codeLc = e.employee_code.toLowerCase();
+   472→    db.notifications.filter((n) =>
+   473→      n.title.toLowerCase().includes(nameLc)
+   474→      || n.message.toLowerCase().includes(nameLc)
+   475→      || n.message.toLowerCase().includes(codeLc),
+   476→    ).forEach((n) => { n.is_hidden = true; });
+   477→
+   478→    e.status = 'deleted';
+   479→    e.current_site_id = null;
+   480→    e.is_team_leader = false;
+   481→    e.team_leader_site_id = null;
+   482→    saveAndEmit(['employee', 'attendance', 'warning', 'fine', 'leave_request', 'cancellation_request', 'uniform_registry', 'notification']);
+   483→  },
+   484→
+   485→  async requestEmployeeDeletion(id: string, reason: string | null): Promise<void> {
+   486→    const e = db.employees.find((x) => x.id === id);
+   487→    if (!e) throw new Error('Employee not found');
+   488→    if (e.status === 'deleted') throw new Error('This employee is already deleted');
+   489→    if (e.status === 'pending_deletion') throw new Error('This employee already has a pending deletion request');
+   490→
+   491→    db.cancellationRequests.push({
+   492→      id: uid(), employee_id: id, reason, status: 'pending',
+   493→      requested_by: currentProfile()?.id ?? null, reviewed_by: null, reviewed_at: null,
+   494→      is_hidden: false, created_at: nowISO(),
+   495→    });
+   496→    e.status = 'pending_deletion';
+   497→    notifySuperAdmins(
+   498→      'New Cancellation Request',
+   499→      `${e.full_name} (${e.employee_code}) is pending deletion approval${reason ? ' — ' + reason : ''}`,
+   500→      'request',
+   501→    );
+   502→    saveAndEmit(['cancellation_request', 'employee', 'notification']);
+   503→  },
+   504→
+   505→  // ---- attendance --------------------------------------------------------------
+   506→  async getMonthAttendance(month: string): Promise<Attendance[]> {
+   507→    const today = toYMD(new Date());
+   508→    const [y, m] = month.split('-').map(Number);
+   509→    const first = `${month}-01`;
+   510→    const monthEnd = toYMD(new Date(y, m, 0));
+   511→    const lastDay = today < first ? null : today < monthEnd ? today : monthEnd;
+   512→
+   513→    // auto-create missing records for non-deleted employees
+   514→    if (lastDay) {
+   515→      for (const e of db.employees) {
+   516→        if (e.status === 'deleted') continue;
+   517→        for (let d = fromYMD(first); toYMD(d) <= lastDay; d.setDate(d.getDate() + 1)) {
+   518→          const dateStr = toYMD(d);
+   519→          const exists = db.attendance.some((a) => a.employee_id === e.id && a.date === dateStr);
+   520→          if (!exists) {
+   521→            db.attendance.push({
+   522→              id: uid(), employee_id: e.id, date: dateStr,
+   523→              status: e.current_site_id ? 'present' : 'not_marked',
+   524→              hours: e.current_site_id ? 8 : null,
+   525→              is_hidden: false, created_at: nowISO(),
+   526→            });
+   527→          }
+   528→        }
+   529→      }
+   530→      saveAndEmit(['attendance']);
+   531→    }
+   532→
+   533→    return db.attendance.filter((a) => {
+   534→      if (!a.date.startsWith(month) || a.is_hidden) return false;
+   535→      const e = db.employees.find((x) => x.id === a.employee_id);
+   536→      return e ? e.status !== 'deleted' : false;
+   537→    });
+   538→  },
+   539→
+   540→  /** Excel-style marking: value is 'A' (absent), a numeric hours string ('8',
+   541→   *  '10.5') or '' / null to clear the cell. Mirrors the Postgres RPC exactly. */
+   542→  async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
+   543→    const e = db.employees.find((x) => x.id === employeeId);
+   544→    if (!e) throw new Error('Employee not found');
+   545→
+   546→    const trimmed = (value ?? '').trim();
+   547→    const prev = db.attendance.find((a) => a.employee_id === employeeId && a.date === date);
+   548→
+   549→    // cleared cell → remove the record
+   550→    if (trimmed === '') {
+   551→      if (prev) {
+   552→        db.attendance = db.attendance.filter((a) => a.id !== prev.id);
+   553→        saveAndEmit(['attendance']);
+   554→      }
+   555→      return;
+   556→    }
+   557→
+   558→    let status: Attendance['status'];
+   559→    let hours: number | null = null;
+   560→    if (trimmed.toLowerCase() === 'a' || trimmed.toLowerCase() === 'absent') {
+   561→      status = 'absent';
+   562→    } else {
+   563→      const n = Number(trimmed);
+   564→      if (Number.isNaN(n) || !Number.isFinite(n)) throw new Error(`Invalid value "${trimmed}". Enter hours (e.g. 8, 10.5) or A for absent.`);
+   565→      if (n < 0 || n > 24) throw new Error('Hours must be between 0 and 24');
+   566→      status = 'present';
+   567→      hours = Math.round(n * 100) / 100;
+   568→    }
+   569→
+   570→    const otDelta = prev
+   571→      ? Math.max(0, (hours ?? 0) - 8) - Math.max(0, (prev.hours ?? 0) - 8)
+   572→      : Math.max(0, (hours ?? 0) - 8);
+   573→
+   574→    if (prev) {
+   575→      prev.status = status;
+   576→      prev.hours = hours;
+   577→    } else {
+   578→      db.attendance.push({
+   579→        id: uid(), employee_id: employeeId, date, status, hours,
+   580→        is_hidden: false, created_at: nowISO(),
+   581→      });
+   582→    }
+   583→
+   584→    // rating: ±0.2 stars per overtime-hour delta (hours above 8/day)
+   585→    if (otDelta !== 0) {
+   586→      e.rating = clampRating(e.rating + 0.2 * otDelta);
+   587→    }
+   588→
+   589→    // auto-warning on 3+ consecutive absences (skipping Fridays)
+   590→    if (status === 'absent') {
+   591→      const absentDates: string[] = [date];
+   592→      let walk = addDaysStr(date, -1);
+   593→      const floorDate = addDaysStr(date, -7);
+   594→      while (walk >= floorDate) {
+   595→        if (isFridayStr(walk)) { walk = addDaysStr(walk, -1); continue; }
+   596→        const rec = db.attendance.find((a) => a.employee_id === employeeId && a.date === walk && !a.is_hidden);
+   597→        if (rec && rec.status === 'absent') {
+   598→          absentDates.unshift(walk);
+   599→          walk = addDaysStr(walk, -1);
+   600→        } else break;
+   601→      }
+   602→      if (absentDates.length >= 3) {
+   603→        db.warnings.push({
+   604→          id: uid(), employee_id: employeeId,
+   605→          reason: `Auto-generated: ${absentDates.length} consecutive absences detected (${absentDates.join(', ')})`,
+   606→          is_auto_generated: true, absent_dates: absentDates,
+   607→          created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
+   608→        });
+   609→        e.rating = clampRating(e.rating - 0.5);
+   610→        notifySuperAdmins(
+   611→          'Auto-Generated Warning',
+   612→          `${e.full_name} (${e.employee_code}) was absent 3+ consecutive days`,
+   613→          'warning',
+   614→        );
+   615→        saveAndEmit(['warning', 'notification', 'employee', 'attendance']);
+   616→        return;
+   617→      }
+   618→    }
+   619→    saveAndEmit(['attendance', 'employee']);
+   620→  },
+   621→
+   622→  async getMonthlyAttendanceSummary(months = 6): Promise<MonthlySummaryRow[]> {
+   623→    const rows: MonthlySummaryRow[] = [];
+   624→    const now = new Date();
+   625→    for (let back = months - 1; back >= 0; back--) {
+   626→      const d = new Date(now.getFullYear(), now.getMonth() - back, 1);
+   627→      const m = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+   628→      const counts: Record<string, number> = {};
+   629→      for (const a of db.attendance) {
+   630→        if (!a.date.startsWith(m) || a.is_hidden || a.status === 'not_marked') continue;
+   631→        const e = db.employees.find((x) => x.id === a.employee_id);
+   632→        if (!e || e.status === 'deleted') continue;
+   633→        counts[a.status] = (counts[a.status] ?? 0) + 1;
+   634→      }
+   635→      for (const [status, count] of Object.entries(counts)) {
+   636→        rows.push({ month: m, status: status as Attendance['status'], count });
+   637→      }
+   638→    }
+   639→    return rows;
+   640→  },
+   641→
+   642→  // ---- leave requests --------------------------------------------------------------
+   643→  async listLeaveRequests(): Promise<LeaveRequestVM[]> {
+   644→    return db.leaveRequests
+   645→      .filter((r) => !r.is_hidden)
+   646→      .filter((r) => { const e = db.employees.find((x) => x.id === r.employee_id); return e ? e.status !== 'deleted' : false; })
+   647→      .map(attachLeaveVM)
+   648→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   649→  },
+   650→
+   651→  async createLeaveRequest(input: LeaveRequestInput): Promise<void> {
+   652→    const e = db.employees.find((x) => x.id === input.employee_id);
+   653→    if (!e) throw new Error('Employee not found');
+   654→    db.leaveRequests.push({
+   655→      id: uid(), ...input, status: 'pending',
+   656→      created_by: currentProfile()?.id ?? null, reviewed_by: null, reviewed_at: null,
+   657→      is_hidden: false, created_at: nowISO(),
+   658→    });
+   659→    notifySuperAdmins(
+   660→      'New Leave Request',
+   661→      `${e.full_name} (${e.employee_code}) requested ${input.other_type_text || input.leave_type} leave for ${input.total_days} day(s)`,
+   662→      'request',
+   663→    );
+   664→    saveAndEmit(['leave_request', 'notification']);
+   665→  },
+   666→
+   667→  async reviewLeaveRequest(id: string, approve: boolean): Promise<void> {
+   668→    const r = db.leaveRequests.find((x) => x.id === id);
+   669→    if (!r) throw new Error('Request not found');
+   670→    if (r.status !== 'pending') throw new Error('Only pending requests can be reviewed');
+   671→    r.status = approve ? 'approved' : 'rejected';
+   672→    r.reviewed_by = currentProfile()?.id ?? null;
+   673→    r.reviewed_at = nowISO();
+   674→    if (r.created_by) {
+   675→      const label = r.other_type_text || r.leave_type;
+   676→      db.notifications.push({
+   677→        id: uid(), profile_id: r.created_by,
+   678→        title: `Leave Request ${approve ? 'Approved' : 'Rejected'}`,
+   679→        message: `The leave request (${label}, ${r.total_days} day(s)) has been ${approve ? 'approved' : 'rejected'}.`,
+   680→        type: 'request', read: false, is_hidden: false, created_at: nowISO(),
+   681→      });
+   682→    }
+   683→    saveAndEmit(['leave_request', 'notification']);
+   684→  },
+   685→
+   686→  // ---- cancellation requests ------------------------------------------------------------
+   687→  async listCancellationRequests(): Promise<CancellationRequestVM[]> {
+   688→    return db.cancellationRequests
+   689→      .filter((r) => !r.is_hidden)
+   690→      .filter((r) => { const e = db.employees.find((x) => x.id === r.employee_id); return e ? e.status !== 'deleted' : false; })
+   691→      .map(attachCancelVM)
+   692→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   693→  },
+   694→
+   695→  async createCancellationRequest(employeeId: string, reason: string | null): Promise<void> {
+   696→    await demoApi.requestEmployeeDeletion(employeeId, reason);
+   697→  },
+   698→
+   699→  async reviewCancellationRequest(id: string, approve: boolean): Promise<void> {
+   700→    const r = db.cancellationRequests.find((x) => x.id === id);
+   701→    if (!r) throw new Error('Request not found');
+   702→    if (r.status !== 'pending') throw new Error('Only pending requests can be reviewed');
+   703→    r.status = approve ? 'approved' : 'rejected';
+   704→    r.reviewed_by = currentProfile()?.id ?? null;
+   705→    r.reviewed_at = nowISO();
+   706→
+   707→    const e = db.employees.find((x) => x.id === r.employee_id);
+   708→    if (approve && e) {
+   709→      e.status = 'deleted';
+   710→      e.current_site_id = null;
+   711→      e.is_team_leader = false;
+   712→      e.team_leader_site_id = null;
+   713→      db.uniforms.filter((u) => u.employee_id === e.id).forEach((u) => { u.is_deleted = true; u.is_hidden = true; });
+   714→    } else if (!approve && e && e.status === 'pending_deletion') {
+   715→      e.status = 'active';
+   716→    }
+   717→
+   718→    if (r.requested_by && e) {
+   719→      db.notifications.push({
+   720→        id: uid(), profile_id: r.requested_by,
+   721→        title: `Cancellation Request ${approve ? 'Approved' : 'Rejected'}`,
+   722→        message: `The removal request for ${e.full_name} has been ${approve ? 'approved and the employee was removed.' : 'rejected and the employee was restored.'}`,
+   723→        type: 'request', read: false, is_hidden: false, created_at: nowISO(),
+   724→      });
+   725→    }
+   726→    saveAndEmit(['cancellation_request', 'employee', 'uniform_registry', 'notification']);
+   727→  },
+   728→
+   729→  // ---- warnings + fines ---------------------------------------------------------------
+   730→  async listWarnings(): Promise<WarningVM[]> {
+   731→    return db.warnings
+   732→      .filter((w) => !w.is_hidden)
+   733→      .filter((w) => { const e = db.employees.find((x) => x.id === w.employee_id); return e ? e.status !== 'deleted' : false; })
+   734→      .map(attachWarningVM)
+   735→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   736→  },
+   737→
+   738→  async issueWarning(employeeId: string, reason: string): Promise<void> {
+   739→    const e = db.employees.find((x) => x.id === employeeId);
+   740→    if (!e) throw new Error('Employee not found');
+   741→    db.warnings.push({
+   742→      id: uid(), employee_id: employeeId, reason,
+   743→      is_auto_generated: false, absent_dates: null,
+   744→      created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
+   745→    });
+   746→    e.rating = clampRating(e.rating - 0.5);
+   747→    notifySuperAdmins('New Warning Issued', `${e.full_name} (${e.employee_code}) received a warning: ${reason}`, 'warning');
+   748→    saveAndEmit(['warning', 'notification', 'employee']);
+   749→  },
+   750→
+   751→  async listFines(): Promise<FineVM[]> {
+   752→    return db.fines
+   753→      .filter((f) => !f.is_hidden)
+   754→      .filter((f) => { const e = db.employees.find((x) => x.id === f.employee_id); return e ? e.status !== 'deleted' : false; })
+   755→      .map(attachFineVM)
+   756→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   757→  },
+   758→
+   759→  async issueFine(employeeId: string, reason: string, amount: number): Promise<void> {
+   760→    const e = db.employees.find((x) => x.id === employeeId);
+   761→    if (!e) throw new Error('Employee not found');
+   762→    if (amount < 0) throw new Error('Fine amount cannot be negative');
+   763→    db.fines.push({
+   764→      id: uid(), employee_id: employeeId, reason, amount,
+   765→      created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
+   766→    });
+   767→    e.rating = clampRating(e.rating - 1.0);
+   768→    notifySuperAdmins('New Fine Issued', `${e.full_name} (${e.employee_code}) was fined SAR ${amount}: ${reason}`, 'fine');
+   769→    saveAndEmit(['fine', 'notification', 'employee']);
+   770→  },
+   771→
+   772→  // ---- notifications ---------------------------------------------------------------------
+   773→  async listNotifications(profileId?: string): Promise<Notification[]> {
+   774→    const pid = profileId ?? getDemoSessionId() ?? '';
+   775→    return db.notifications
+   776→      .filter((n) => n.profile_id === pid && !n.is_hidden)
+   777→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   778→  },
+   779→
+   780→  async getUnreadNotificationCount(): Promise<number> {
+   781→    const pid = getDemoSessionId() ?? '';
+   782→    return db.notifications.filter((n) => n.profile_id === pid && !n.read && !n.is_hidden).length;
+   783→  },
+   784→
+   785→  async markNotificationRead(id: string): Promise<void> {
+   786→    const n = db.notifications.find((x) => x.id === id);
+   787→    if (n) n.read = true;
+   788→    saveAndEmit(['notification']);
+   789→  },
+   790→
+   791→  async markAllNotificationsRead(): Promise<void> {
+   792→    const pid = getDemoSessionId() ?? '';
+   793→    db.notifications.filter((n) => n.profile_id === pid && !n.read).forEach((n) => { n.read = true; });
+   794→    saveAndEmit(['notification']);
+   795→  },
+   796→
+   797→  // ---- uniform registry ---------------------------------------------------------------------
+   798→  async listUniformEntries(): Promise<UniformEntry[]> {
+   799→    return db.uniforms
+   800→      .filter((u) => !u.is_deleted && !u.is_hidden)
+   801→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   802→  },
+   803→
+   804→  async listEmployeeUniforms(employeeId: string): Promise<UniformEntry[]> {
+   805→    return db.uniforms
+   806→      .filter((u) => u.employee_id === employeeId && !u.is_deleted && !u.is_hidden)
+   807→      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+   808→  },
+   809→
+   810→  async createUniformEntry(input: UniformEntryInput): Promise<UniformEntry> {
+   811→    const e = db.employees.find((x) => x.id === input.employee_id);
+   812→    if (!e) throw new Error('Employee not found');
+   813→
+   814→    const uniformId = db.counters.uniform_id + 1;
+   815→    let token = db.counters.token_number + 1;
+   816→    if (input.token_number && input.token_number > 0) token = input.token_number;
+   817→    db.counters.uniform_id = uniformId;
+   818→    db.counters.token_number = token;
+   819→
+   820→    const created = new Date(input.created_at);
+   821→    if (Number.isNaN(created.getTime())) throw new Error('Invalid created date');
+   822→    const entry: UniformEntry = {
+   823→      id: uid(), uniform_id: uniformId, token_number: token,
+   824→      employee_id: e.id, employee_name: e.full_name,
+   825→      document_type: input.document_type, document_number: input.document_number,
+   826→      items: input.items, site_name: input.site_name, team_leader_name: input.team_leader_name,
+   827→      is_renewal: input.is_renewal, previous_token_id: input.previous_token_id,
+   828→      is_deleted: false, is_hidden: false,
+   829→      created_at: created.toISOString(),
+   830→      renewal_date: new Date(created.getTime() + 182.5 * 86400000).toISOString(),
+   831→    };
+   832→    db.uniforms.push(entry);
+   833→    saveAndEmit(['uniform_registry']);
+   834→    return entry;
+   835→  },
+   836→
+   837→  async updateUniformEntry(id: string, input: UniformEntryUpdate): Promise<UniformEntry> {
+   838→    const u = db.uniforms.find((x) => x.id === id);
+   839→    if (!u || u.is_deleted || u.is_hidden) throw new Error('Entry not found');
+   840→    const created = new Date(input.created_at);
+   841→    if (Number.isNaN(created.getTime())) throw new Error('Invalid created date');
+   842→    Object.assign(u, {
+   843→      token_number: input.token_number,
+   844→      document_type: input.document_type,
+   845→      document_number: input.document_number,
+   846→      items: input.items,
+   847→      site_name: input.site_name,
+   848→      team_leader_name: input.team_leader_name,
+   849→      created_at: created.toISOString(),
+   850→      renewal_date: new Date(created.getTime() + 182.5 * 86400000).toISOString(),
+   851→    });
+   852→    saveAndEmit(['uniform_registry']);
+   853→    return u;
+   854→  },
+   855→
+   856→  async deleteUniformEntry(id: string): Promise<void> {
+   857→    const u = db.uniforms.find((x) => x.id === id);
+   858→    if (!u) return;
+   859→    u.is_deleted = true;
+   860→    saveAndEmit(['uniform_registry']);
+   861→  },
+   862→
+   863→  // ---- realtime ------------------------------------------------------------------------------
+   864→  subscribe(onChange: (tables: string[]) => void): () => void {
+   865→    return subscribeDemo(onChange);
+   866→  },
+   867→
+   868→  // demo-only helpers
+   869→  async resetDemoData(): Promise<void> {
+   870→    const { resetDemo } = await import('./demo-store');
+   871→    resetDemo();
+   872→  },
+   873→};
+   874→
+   875→export type { VM };
+   876→

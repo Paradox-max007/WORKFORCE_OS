@@ -73,14 +73,14 @@ export function EmployeeCombobox({
           <ChevronsUpDown className="ml-auto size-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+      <PopoverContent className="w-(--radix-popper-anchor-width) p-0" align="start">
         <Command>
           <CommandInput
             placeholder="Type to search…"
             value={query}
             onValueChange={setOpenQuery}
           />
-          <CommandList>
+          <CommandList className="overscroll-contain">
             <CommandEmpty>{emptyText}</CommandEmpty>
             <CommandGroup>
               {filtered.map((e) => (

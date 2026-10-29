@@ -19,17 +19,17 @@ animated product identity.
 
 | Module | Capabilities |
 |---|---|
-| **Dashboard** | Live KPI cards, 6-month attendance analytics, site-wise breakdown, idle-employee radar — all animated & realtime |
-| **Employees** | Full profiles (passport/ID, emergency contact, rating, camp), photo, site + camp assignment, team-leader flag, soft-delete with cascade hide, **CV PDF export**, **dedicated details page** (not a modal) with **Track Record viewer** & **WhatsApp share with lifetime / specific-month timesheets** |
+| **Dashboard** | Live KPI cards, 6-month attendance analytics, site-wise breakdown, idle-employee radar — all animated & realtime, with **readable chart tooltips** (light text on themed cards in both themes) |
+| **Employees** | Full profiles (passport/ID, emergency contact, rating), photo, site + camp assignment (with **block & room no.**), team-leader flag, soft-delete with cascade hide, **nationality filter** (region → country: Africans → Burundi/Kenya, Asians → India/…), **home-country address** per passport, **CV PDF export**, **dedicated details page** (not a modal) showing camp · block · room, with **Track Record viewer** & **WhatsApp share with lifetime / specific-month timesheets** |
 | **Sites** | Client/project tracking, activate/deactivate with crew impact warning, per-site crew view, add/remove crew, printable **A4 attendance sheet** (PDF / print, alphabetical, with hand-fill TOTAL PRESENT / ABSENT lines) |
-| **Camps** | **Accommodation management** — create/edit/deactivate/delete camps (location, capacity, notes), **one employee ↔ exactly one camp**, instant transfers between camps, bulk move/remove, capacity usage bars |
-| **Attendance** | **Excel-style marking sheet** — every cell is an always-editable input (custom hours e.g. `8`, `10.5` or `A` for absent), **TOTAL HOURS column** (row sum) + **ABSENT count** beside it, alphabetical rows, site filter narrows the crew, per-employee calendar view, rating engine (±0.2 / OT hour above 8h/day), **auto-warning after 3 consecutive absences** |
+| **Camps** | **Accommodation management** — create/edit/deactivate/delete camps (location, capacity, notes), **one employee ↔ exactly one camp**, **block & room numbers** per resident (required on add/move, editable inline), instant transfers between camps, bulk move/remove, capacity usage bars |
+| **Attendance** | **Excel-style marking sheet grouped SITEWISE** (one alphabetical section per work site — attendance is marked site-by-site), every cell is an always-editable input (custom hours e.g. `8`, `10.5` or `A` for absent), each row shows the employee's **trade**, **TOTAL HOURS column** (row sum) + **ABSENT count** beside it, site filter narrows the crew, per-employee calendar view, rating engine (±0.2 / OT hour above 8h/day), **auto-warning after 3 consecutive absences**, **admin gating: normal admins only see & mark their assigned sites** |
 | **Leave Requests** | 6 leave types, day math, approve/reject workflow, reviewer audit trail |
 | **Cancellation Requests** | Attendance cancellation approvals with reviewer audit trail |
 | **Warnings & Fines** | Manual + auto-generated warnings, fines with amounts, full history |
-| **Uniform Registry** | Sequential tokens & IDs, encrypted ID/passport numbers (AES-256-GCM), item checklist (uniform/shoes/helmet/bottle/safety jacket), **6-month renewal chain**, per-employee history |
+| **Uniform Registry** | Sequential tokens & IDs, encrypted ID/passport numbers (AES-256-GCM), item checklist (uniform/shoes/helmet/bottle/safety jacket) rendered **as a clean row of chips** (no stacking), searchable employee picker that **scrolls properly inside dialogs**, **6-month renewal chain**, per-employee history |
 | **Notifications** | Per-user inbox, unread badges, mark-all-read, auto-notifications on requests/warnings/fines |
-| **Admin Management** | Super-admin & admin roles, **per-menu permission toggles** (incl. Camps), create/edit/delete admins (last-super-admin protected) |
+| **Admin Management** | Super-admin & admin roles, **per-menu permission toggles** (incl. Camps), **site assignments — the super admin assigns each work site to normal admins, who can then only mark attendance for those sites**, create/edit/delete admins (last-super-admin protected) |
 | **Realtime** | **Supabase Realtime** on every table (incl. camp) — changes stream into all open tabs/devices instantly |
 
 ### What's new vs. legacy ASM
@@ -77,9 +77,11 @@ Open http://localhost:3000 — the app boots in **Demo Mode** with a full seeded
 1. Create a project at [database.new](https://database.new).
 2. Open **SQL Editor → New query**, paste the entire contents of
    [`supabase/schema.sql`](supabase/schema.sql) and **Run**.
-3. This single file creates everything: 12 tables (incl. the new `camp` accommodation table),
+3. This single file creates everything: 13 tables (incl. the new `camp` accommodation table
+   and the `admin_site` site-assignment table),
    indexes, FK relationships, RLS policies, triggers, 30+ RPC functions (the whole
-   business-logic engine — including the Excel-style `mark_attendance` hours model) and adds
+   business-logic engine — including the Excel-style `mark_attendance` hours model and
+   `assign_employee_camp` with block/room) and adds
    every table to the **Supabase Realtime publication**.
 
 > **Already ran an older version of schema.sql?** Drop the old schema first
@@ -156,13 +158,16 @@ path per feature — no feature drift between demo and production.
 ### Database highlights (`supabase/schema.sql`)
 
 - `profiles` ↔ `auth.users` with auto-provisioning trigger (first user → super admin)
-- `employee.current_site_id → site.id` — real relational integrity (legacy used a free-text
-  column)
+- `employee.current_site_id → site.id` and `employee.camp_id → camp.id` — real relational
+  integrity (legacy used free-text columns), plus `camp_block` / `camp_room` for room-level
+  tracking inside each camp
+- `admin_site` — sites assigned to normal admins (super admin assigns; attendance RPC only
+  accepts marks for assigned sites)
 - `attendance(employee_id, date)` unique constraint + rating/warning engine inside
   `mark_attendance()`
 - `uniform_registry` token sequencing + encrypted document numbers + renewal chain
 - RLS: staff read-all, writes **only** through super-admin-gated RPC functions
-- All 11 tables in the `supabase_realtime` publication
+- All 13 tables in the `supabase_realtime` publication
 
 ---
 

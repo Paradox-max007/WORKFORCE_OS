@@ -1,0 +1,1108 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Uniform Registry (list + shared create/renew dialog)
+     5→// ----------------------------------------------------------------------------
+     6→// Groups every non-deleted uniform entry per employee (newest entry + record
+     7→// count), with search / site filters, pagination, mobile cards, and a per-
+     8→// employee drill-down (UniformEntryDetails). All mutations go through dataApi
+     9→// and refetch live via useRealtimeVersion.
+    10→// ============================================================================
+    11→
+    12→import { AnimatePresence, motion } from 'framer-motion';
+    13→import {
+    14→  ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, Crown, Eye, History,
+    15→  Info, Loader2, Plus, RefreshCw, RotateCcw, Search, Shield, Shirt, Trash2,
+    16→} from 'lucide-react';
+    17→import { useEffect, useMemo, useState } from 'react';
+    18→import { toast } from 'sonner';
+    19→import {
+    20→  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+    21→  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+    22→} from '@/components/ui/alert-dialog';
+    23→import { Button } from '@/components/ui/button';
+    24→import { Checkbox } from '@/components/ui/checkbox';
+    25→import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    26→import { Input } from '@/components/ui/input';
+    27→import { Label } from '@/components/ui/label';
+    28→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    29→import { Skeleton } from '@/components/ui/skeleton';
+    30→import { Table, TableBody, TableCell, TableHead, TableHeader } from '@/components/ui/table';
+    31→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    32→import { EmptyState, PageHeader, SkeletonRows } from '@/components/shared/primitives';
+    33→import { dataApi } from '@/lib/data';
+    34→import { daysUntil, fmtDate } from '@/lib/format';
+    35→import { cn } from '@/lib/utils';
+    36→import { useRealtimeVersion } from '@/store/realtime';
+    37→import {
+    38→  UNIFORM_ITEMS,
+    39→  type EmployeeInput, type EmployeeVM, type SiteWithCount, type UniformEntry,
+    40→} from '@/lib/types';
+    41→import {
+    42→  DocTypeBadge, RenewalBadge, RenewalTag, UniformEntryDetails, UniformItemBadges,
+    43→  buildItemsRecord, errMessage, formatExpiryPreview, todayYMD,
+    44→} from './uniform-entry-details';
+    45→
+    46→const PAGE_SIZE = 10;
+    47→const NO_SITE = '__none__';
+    48→
+    49→// ---------------------------------------------------------------------------
+    50→// Local types & helpers
+    51→// ---------------------------------------------------------------------------
+    52→type DialogTarget =
+    53→  | { mode: 'create'; presetEmployeeId: string | null }
+    54→  | { mode: 'renew'; entry: UniformEntry };
+    55→
+    56→interface RegistryRow {
+    57→  entry: UniformEntry; // newest entry of this employee
+    58→  count: number; // total records of this employee
+    59→  employee: EmployeeVM | null;
+    60→}
+    61→
+    62→/** Build a full EmployeeInput payload from an EmployeeVM (for leader promotion). */
+    63→const toEmployeeInput = (e: EmployeeVM): EmployeeInput => ({
+    64→  full_name: e.full_name,
+    65→  nationality: e.nationality,
+    66→  date_of_birth: e.date_of_birth,
+    67→  phone: e.phone,
+    68→  email: e.email,
+    69→  address: e.address,
+    70→  emergency_contact: e.emergency_contact,
+    71→  position: e.position,
+    72→  join_date: e.join_date,
+    73→  company_name: e.company_name,
+    74→  passport_number: e.passport_number,
+    75→  passport_status: e.passport_status,
+    76→  id_number: e.id_number,
+    77→  id_status: e.id_status,
+    78→  current_site_id: e.current_site_id,
+    79→  camp_id: e.camp_id,
+    80→  photo: e.photo,
+    81→  is_team_leader: e.is_team_leader,
+    82→  team_leader_site_id: e.team_leader_site_id,
+    83→});
+    84→
+    85→// ---------------------------------------------------------------------------
+    86→// Registry page
+    87→// ---------------------------------------------------------------------------
+    88→export function UniformRegistryPage() {
+    89→  const version = useRealtimeVersion(['uniform_registry', 'employee', 'site']);
+    90→
+    91→  const [entries, setEntries] = useState<UniformEntry[] | null>(null);
+    92→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    93→  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+    94→
+    95→  // filters
+    96→  const [search, setSearch] = useState('');
+    97→  const [debouncedSearch, setDebouncedSearch] = useState('');
+    98→  const [siteFilter, setSiteFilter] = useState('all');
+    99→  const [page, setPage] = useState(1);
+   100→
+   101→  // details drill-down
+   102→  const [detailsEmployeeId, setDetailsEmployeeId] = useState<string | null>(null);
+   103→
+   104→  // shared create/renew dialog
+   105→  const [dialogTarget, setDialogTarget] = useState<DialogTarget | null>(null);
+   106→  const [dialogOpen, setDialogOpen] = useState(false);
+   107→
+   108→  const openDialog = (t: DialogTarget) => {
+   109→    setDialogTarget(t);
+   110→    setDialogOpen(true);
+   111→  };
+   112→
+   113→  // ---- data loading ---------------------------------------------------------
+   114→  useEffect(() => {
+   115→    let cancelled = false;
+   116→    (async () => {
+   117→      const [es, emps, sts] = await Promise.all([
+   118→        dataApi.listUniformEntries(),
+   119→        dataApi.listEmployees(),
+   120→        dataApi.listSites(),
+   121→      ]);
+   122→      if (!cancelled) {
+   123→        setEntries(es);
+   124→        setEmployees(emps);
+   125→        setSites(sts);
+   126→      }
+   127→    })().catch(() => {
+   128→      if (!cancelled) {
+   129→        setEntries([]);
+   130→        setEmployees([]);
+   131→        setSites([]);
+   132→      }
+   133→    });
+   134→    return () => { cancelled = true; };
+   135→  }, [version]);
+   136→
+   137→  // 300ms search debounce
+   138→  useEffect(() => {
+   139→    const t = setTimeout(() => setDebouncedSearch(search), 300);
+   140→    return () => clearTimeout(t);
+   141→  }, [search]);
+   142→
+   143→  const employeeMap = useMemo(
+   144→    () => new Map((employees ?? []).map((e) => [e.id, e])),
+   145→    [employees],
+   146→  );
+   147→
+   148→  // ---- rows: one per employee (newest entry + record count) -------------------
+   149→  const rows = useMemo<RegistryRow[] | null>(() => {
+   150→    if (!entries) return null;
+   151→    const byEmp = new Map<string, RegistryRow>();
+   152→    // listUniformEntries is newest-first → first occurrence IS the newest entry
+   153→    for (const entry of entries) {
+   154→      const cur = byEmp.get(entry.employee_id);
+   155→      if (cur) cur.count += 1;
+   156→      else {
+   157→        byEmp.set(entry.employee_id, {
+   158→          entry,
+   159→          count: 1,
+   160→          employee: employeeMap.get(entry.employee_id) ?? null,
+   161→        });
+   162→      }
+   163→    }
+   164→    return Array.from(byEmp.values());
+   165→  }, [entries, employeeMap]);
+   166→
+   167→  // site filter options = distinct site names present across entries
+   168→  const siteOptions = useMemo(() => {
+   169→    const names = new Set<string>();
+   170→    (entries ?? []).forEach((e) => {
+   171→      if (e.site_name) names.add(e.site_name);
+   172→    });
+   173→    return Array.from(names).sort((a, b) => a.localeCompare(b));
+   174→  }, [entries]);
+   175→
+   176→  // ---- filtering + pagination -------------------------------------------------
+   177→  const filteredRows = useMemo(() => {
+   178→    if (!rows) return null;
+   179→    const q = debouncedSearch.trim().toLowerCase();
+   180→    return rows.filter((r) => {
+   181→      if (siteFilter !== 'all' && r.entry.site_name !== siteFilter) return false;
+   182→      if (!q) return true;
+   183→      return (
+   184→        r.entry.employee_name.toLowerCase().includes(q) ||
+   185→        String(r.entry.token_number).includes(q) ||
+   186→        String(r.entry.uniform_id).includes(q)
+   187→      );
+   188→    });
+   189→  }, [rows, debouncedSearch, siteFilter]);
+   190→
+   191→  const totalPages = filteredRows ? Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE)) : 1;
+   192→  const safePage = Math.min(page, totalPages);
+   193→  const pageRows = filteredRows
+   194→    ? filteredRows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+   195→    : null;
+   196→
+   197→  const loading = entries === null || employees === null || sites === null;
+   198→  const filtersActive = debouncedSearch.trim() !== '' || siteFilter !== 'all';
+   199→
+   200→  const resetFilters = () => {
+   201→    setSearch('');
+   202→    setDebouncedSearch('');
+   203→    setSiteFilter('all');
+   204→    setPage(1);
+   205→  };
+   206→
+   207→  const handleDeleteEntry = async (entry: UniformEntry) => {
+   208→    try {
+   209→      await dataApi.deleteUniformEntry(entry.id);
+   210→      toast.success('Uniform entry deleted');
+   211→    } catch (err) {
+   212→      toast.error(errMessage(err));
+   213→    }
+   214→  };
+   215→
+   216→  const openDetails = (employeeId: string) => setDetailsEmployeeId(employeeId);
+   217→
+   218→  const detailsEmployee = detailsEmployeeId && employees
+   219→    ? employees.find((e) => e.id === detailsEmployeeId) ?? null
+   220→    : null;
+   221→
+   222→  // ---- row action handlers ----------------------------------------------------
+   223→  const rowActions = (row: RegistryRow) => ({
+   224→    onAdd: () => openDialog({ mode: 'create', presetEmployeeId: row.entry.employee_id }),
+   225→    onView: () => {
+   226→      if (row.employee) openDetails(row.employee.id);
+   227→    },
+   228→    onRenew: () => openDialog({ mode: 'renew', entry: row.entry }),
+   229→    onDelete: handleDeleteEntry,
+   230→  });
+   231→
+   232→  return (
+   233→    <div className="mx-auto max-w-7xl">
+   234→      <AnimatePresence mode="wait" initial={false}>
+   235→        {detailsEmployee ? (
+   236→          <motion.div
+   237→            key={`details-${detailsEmployee.id}`}
+   238→            initial={{ opacity: 0, y: 14 }}
+   239→            animate={{ opacity: 1, y: 0 }}
+   240→            exit={{ opacity: 0, y: -10 }}
+   241→            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+   242→          >
+   243→            <UniformEntryDetails
+   244→              key={detailsEmployee.id}
+   245→              employee={detailsEmployee}
+   246→              onBack={() => setDetailsEmployeeId(null)}
+   247→              autoOpenAdd={false}
+   248→              renewEntryId={dialogTarget?.mode === 'renew' ? dialogTarget.entry.id : null}
+   249→              onRenewEntry={(entry) => openDialog({ mode: 'renew', entry })}
+   250→            />
+   251→          </motion.div>
+   252→        ) : (
+   253→          <motion.div
+   254→            key="registry-list"
+   255→            initial={{ opacity: 0, y: 14 }}
+   256→            animate={{ opacity: 1, y: 0 }}
+   257→            exit={{ opacity: 0, y: -10 }}
+   258→            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+   259→          >
+   260→            <PageHeader
+   261→              title="Uniform Registry"
+   262→              description="Track issued uniforms, safety gear and 6-month renewals"
+   263→              actions={
+   264→                <Button
+   265→                  className="brand-gradient rounded-lg text-brand-foreground shadow-lg shadow-brand/20 hover:opacity-90"
+   266→                  onClick={() => openDialog({ mode: 'create', presetEmployeeId: null })}
+   267→                >
+   268→                  <Plus size={16} />
+   269→                  New Entry
+   270→                </Button>
+   271→              }
+   272→            />
+   273→
+   274→            {loading ? (
+   275→              <div className="space-y-4">
+   276→                <div className="flex flex-col gap-2 sm:flex-row">
+   277→                  <Skeleton className="h-10 w-full max-w-sm" />
+   278→                  <Skeleton className="h-10 w-48" />
+   279→                </div>
+   280→                <SkeletonRows rows={6} />
+   281→              </div>
+   282→            ) : (
+   283→              <>
+   284→                {/* Filters */}
+   285→                <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+   286→                  <div className="relative w-full sm:max-w-sm">
+   287→                    <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   288→                    <Input
+   289→                      className="h-10 bg-card pl-9"
+   290→                      placeholder="Search employee, token # or uniform ID…"
+   291→                      value={search}
+   292→                      onChange={(e) => {
+   293→                        setSearch(e.target.value);
+   294→                        setPage(1);
+   295→                      }}
+   296→                      aria-label="Search uniform registry"
+   297→                    />
+   298→                  </div>
+   299→                  <Select
+   300→                    value={siteFilter}
+   301→                    onValueChange={(v) => {
+   302→                      setSiteFilter(v);
+   303→                      setPage(1);
+   304→                    }}
+   305→                  >
+   306→                    <SelectTrigger className="h-10 w-full bg-card sm:w-52" aria-label="Filter by site">
+   307→                      <SelectValue />
+   308→                    </SelectTrigger>
+   309→                    <SelectContent>
+   310→                      <SelectItem value="all">All Sites</SelectItem>
+   311→                      {siteOptions.map((name) => (
+   312→                        <SelectItem key={name} value={name}>{name}</SelectItem>
+   313→                      ))}
+   314→                    </SelectContent>
+   315→                  </Select>
+   316→                  {filtersActive && (
+   317→                    <Button variant="ghost" size="sm" className="h-10" onClick={resetFilters}>
+   318→                      <RotateCcw size={14} />
+   319→                      Reset
+   320→                    </Button>
+   321→                  )}
+   322→                </div>
+   323→
+   324→                {/* Content */}
+   325→                {filteredRows && filteredRows.length === 0 ? (
+   326→                  (entries?.length ?? 0) === 0 ? (
+   327→                    <EmptyState
+   328→                      icon={<Shirt size={22} />}
+   329→                      title="No uniform entries yet"
+   330→                      description="Start tracking issued uniforms, safety gear and their 6-month renewals by creating the first entry."
+   331→                      action={
+   332→                        <Button
+   333→                          className="brand-gradient rounded-lg text-brand-foreground hover:opacity-90"
+   334→                          onClick={() => openDialog({ mode: 'create', presetEmployeeId: null })}
+   335→                        >
+   336→                          <Plus size={15} />
+   337→                          New Entry
+   338→                        </Button>
+   339→                      }
+   340→                    />
+   341→                  ) : (
+   342→                    <EmptyState
+   343→                      icon={<Search size={22} />}
+   344→                      title="No entries match your filters"
+   345→                      description="Try a different employee name, token number or site."
+   346→                      action={
+   347→                        <Button variant="outline" onClick={resetFilters}>
+   348→                          <RotateCcw size={14} />
+   349→                          Reset filters
+   350→                        </Button>
+   351→                      }
+   352→                    />
+   353→                  )
+   354→                ) : (
+   355→                  <>
+   356→                    {/* Desktop table */}
+   357→                    <div className="card-glow hidden overflow-hidden rounded-xl border bg-card md:block">
+   358→                      <Table>
+   359→                        <TableHeader>
+   360→                          <tr className="hover:bg-transparent">
+   361→                            <TableHead className="pl-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Token #</TableHead>
+   362→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Uniform ID</TableHead>
+   363→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Employee</TableHead>
+   364→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Document</TableHead>
+   365→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Items</TableHead>
+   366→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Site</TableHead>
+   367→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Team Leader</TableHead>
+   368→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Records</TableHead>
+   369→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Created</TableHead>
+   370→                            <TableHead className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Renewal</TableHead>
+   371→                            <TableHead className="pr-4 text-right text-xs font-semibold uppercase tracking-wide text-muted-foreground">Actions</TableHead>
+   372→                          </tr>
+   373→                        </TableHeader>
+   374→                        <TableBody>
+   375→                          {(pageRows ?? []).map((row, i) => (
+   376→                            <motion.tr
+   377→                              key={row.entry.id}
+   378→                              initial={{ opacity: 0, y: 12 }}
+   379→                              animate={{ opacity: 1, y: 0 }}
+   380→                              transition={{ delay: Math.min(i * 0.04, 0.35), duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+   381→                              className="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/40"
+   382→                            >
+   383→                              <TableCell className="pl-4">
+   384→                                <span className="font-mono text-sm font-semibold">#{row.entry.token_number}</span>
+   385→                                {row.entry.is_renewal && <span className="ml-1.5"><RenewalTag /></span>}
+   386→                              </TableCell>
+   387→                              <TableCell>
+   388→                                <span className="font-mono text-xs text-muted-foreground">{row.entry.uniform_id}</span>
+   389→                              </TableCell>
+   390→                              <TableCell>
+   391→                                <p className="font-medium">{row.entry.employee_name}</p>
+   392→                                {row.employee && (
+   393→                                  <p className="font-mono text-[11px] text-muted-foreground">{row.employee.employee_code}</p>
+   394→                                )}
+   395→                              </TableCell>
+   396→                              <TableCell>
+   397→                                <span className="flex items-center gap-1.5">
+   398→                                  <DocTypeBadge docType={row.entry.document_type} />
+   399→                                  <span className="font-mono text-xs">{row.entry.document_number}</span>
+   400→                                </span>
+   401→                              </TableCell>
+   402→                              <TableCell className="whitespace-normal">
+   403→                                <UniformItemBadges items={row.entry.items} />
+   404→                              </TableCell>
+   405→                              <TableCell>
+   406→                                <span className="text-xs">
+   407→                                  {row.entry.site_name ?? <span className="text-muted-foreground">—</span>}
+   408→                                </span>
+   409→                              </TableCell>
+   410→                              <TableCell>
+   411→                                {row.entry.team_leader_name ? (
+   412→                                  <span className="inline-flex items-center gap-1 text-xs">
+   413→                                    <Shield size={12} className="text-brand" />
+   414→                                    {row.entry.team_leader_name}
+   415→                                  </span>
+   416→                                ) : (
+   417→                                  <span className="text-muted-foreground">—</span>
+   418→                                )}
+   419→                              </TableCell>
+   420→                              <TableCell>
+   421→                                <RecordsBadge
+   422→                                  row={row}
+   423→                                  onOpen={() => row.employee && openDetails(row.employee.id)}
+   424→                                />
+   425→                              </TableCell>
+   426→                              <TableCell>
+   427→                                <span className="whitespace-nowrap text-xs text-muted-foreground">
+   428→                                  {fmtDate(row.entry.created_at)}
+   429→                                </span>
+   430→                              </TableCell>
+   431→                              <TableCell>
+   432→                                <RenewalBadge renewalDate={row.entry.renewal_date} />
+   433→                              </TableCell>
+   434→                              <TableCell className="pr-3">
+   435→                                <RowActions row={row} {...rowActions(row)} />
+   436→                              </TableCell>
+   437→                            </motion.tr>
+   438→                          ))}
+   439→                        </TableBody>
+   440→                      </Table>
+   441→                    </div>
+   442→
+   443→                    {/* Mobile cards */}
+   444→                    <div className="space-y-3 md:hidden">
+   445→                      {(pageRows ?? []).map((row, i) => (
+   446→                        <motion.div
+   447→                          key={row.entry.id}
+   448→                          initial={{ opacity: 0, y: 12 }}
+   449→                          animate={{ opacity: 1, y: 0 }}
+   450→                          transition={{ delay: Math.min(i * 0.04, 0.3), duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+   451→                          className="card-glow space-y-3 rounded-xl border bg-card p-4"
+   452→                        >
+   453→                          <div className="flex items-start justify-between gap-2">
+   454→                            <div className="min-w-0">
+   455→                              <p className="flex items-center gap-1.5 font-mono text-sm font-semibold">
+   456→                                #{row.entry.token_number}
+   457→                                {row.entry.is_renewal && <RenewalTag />}
+   458→                              </p>
+   459→                              <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+   460→                                Uniform ID {row.entry.uniform_id}
+   461→                              </p>
+   462→                            </div>
+   463→                            <RenewalBadge renewalDate={row.entry.renewal_date} />
+   464→                          </div>
+   465→                          <div>
+   466→                            <p className="truncate font-medium">{row.entry.employee_name}</p>
+   467→                            {row.employee && (
+   468→                              <p className="font-mono text-[11px] text-muted-foreground">{row.employee.employee_code}</p>
+   469→                            )}
+   470→                          </div>
+   471→                          <div className="flex flex-wrap items-center gap-1.5">
+   472→                            <DocTypeBadge docType={row.entry.document_type} />
+   473→                            <span className="font-mono text-xs">{row.entry.document_number}</span>
+   474→                          </div>
+   475→                          <UniformItemBadges items={row.entry.items} />
+   476→                          <div className="space-y-1 text-[11px] text-muted-foreground">
+   477→                            <p>
+   478→                              Site:{' '}
+   479→                              <span className="text-foreground/80">{row.entry.site_name ?? '—'}</span>
+   480→                            </p>
+   481→                            <p className="flex items-center gap-1">
+   482→                              Leader:{' '}
+   483→                              {row.entry.team_leader_name ? (
+   484→                                <>
+   485→                                  <Shield size={11} className="text-brand" />
+   486→                                  <span className="text-foreground/80">{row.entry.team_leader_name}</span>
+   487→                                </>
+   488→                              ) : (
+   489→                                '—'
+   490→                              )}
+   491→                            </p>
+   492→                            <p>Created: <span className="text-foreground/80">{fmtDate(row.entry.created_at)}</span></p>
+   493→                          </div>
+   494→                          <div className="flex items-center justify-between gap-2 border-t pt-3">
+   495→                            <RecordsBadge
+   496→                              row={row}
+   497→                              onOpen={() => row.employee && openDetails(row.employee.id)}
+   498→                            />
+   499→                            <RowActions row={row} {...rowActions(row)} />
+   500→                          </div>
+   501→                        </motion.div>
+   502→                      ))}
+   503→                    </div>
+   504→
+   505→                    {/* Pagination */}
+   506→                    {filteredRows && filteredRows.length > 0 && (
+   507→                      <div className="mt-4 flex flex-col items-center justify-between gap-3 sm:flex-row">
+   508→                        <p className="text-xs text-muted-foreground">
+   509→                          Showing {pageRows?.length ?? 0} of {filteredRows.length} employee
+   510→                          {filteredRows.length === 1 ? '' : 's'} · page {safePage} of {totalPages}
+   511→                        </p>
+   512→                        <ListPagination page={safePage} totalPages={totalPages} onPageChange={setPage} />
+   513→                      </div>
+   514→                    )}
+   515→                  </>
+   516→                )}
+   517→              </>
+   518→            )}
+   519→          </motion.div>
+   520→        )}
+   521→      </AnimatePresence>
+   522→
+   523→      {/* Shared Create / Renew dialog (available over both views) */}
+   524→      <CreateRenewDialog
+   525→        open={dialogOpen}
+   526→        target={dialogTarget}
+   527→        employees={employees ?? []}
+   528→        sites={sites ?? []}
+   529→        onClose={() => setDialogOpen(false)}
+   530→      />
+   531→    </div>
+   532→  );
+   533→}
+   534→
+   535→// ---------------------------------------------------------------------------
+   536→// Records badge ("N record(s)" — highlighted border when N > 1, opens details)
+   537→// ---------------------------------------------------------------------------
+   538→function RecordsBadge({ row, onOpen }: { row: RegistryRow; onOpen: () => void }) {
+   539→  return (
+   540→    <button
+   541→      type="button"
+   542→      onClick={onOpen}
+   543→      disabled={!row.employee}
+   544→      className={cn(
+   545→        'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
+   546→        row.count > 1
+   547→          ? 'border-brand/40 bg-brand/10 text-brand hover:bg-brand/20'
+   548→          : 'border-border bg-muted/50 text-muted-foreground hover:bg-muted',
+   549→        !row.employee && 'cursor-not-allowed opacity-60',
+   550→      )}
+   551→    >
+   552→      <History size={11} />
+   553→      {row.count} record{row.count === 1 ? '' : 's'}
+   554→    </button>
+   555→  );
+   556→}
+   557→
+   558→// ---------------------------------------------------------------------------
+   559→// Row actions: Add (Plus) · View (Eye) · Renew (RefreshCw, expired only) · Delete
+   560→// ---------------------------------------------------------------------------
+   561→function RowActions({
+   562→  row,
+   563→  onAdd,
+   564→  onView,
+   565→  onRenew,
+   566→  onDelete,
+   567→}: {
+   568→  row: RegistryRow;
+   569→  onAdd: () => void;
+   570→  onView: () => void;
+   571→  onRenew: () => void;
+   572→  onDelete: (entry: UniformEntry) => Promise<void>;
+   573→}) {
+   574→  const expired = daysUntil(row.entry.renewal_date) < 0;
+   575→  return (
+   576→    <div className="flex items-center justify-end gap-0.5">
+   577→      <Button
+   578→        variant="ghost"
+   579→        size="sm"
+   580→        className="size-8 text-brand hover:text-brand"
+   581→        onClick={onAdd}
+   582→        title="Add entry for this employee"
+   583→        aria-label="Add entry for this employee"
+   584→      >
+   585→        <Plus size={15} />
+   586→      </Button>
+   587→      <Button
+   588→        variant="ghost"
+   589→        size="sm"
+   590→        className="size-8"
+   591→        onClick={onView}
+   592→        disabled={!row.employee}
+   593→        title="View details"
+   594→        aria-label="View details"
+   595→      >
+   596→        <Eye size={15} />
+   597→      </Button>
+   598→      {expired && (
+   599→        <Button
+   600→          variant="ghost"
+   601→          size="sm"
+   602→          className="size-8 text-purple-500 hover:text-purple-500"
+   603→          onClick={onRenew}
+   604→          title="Renew entry"
+   605→          aria-label="Renew entry"
+   606→        >
+   607→          <RefreshCw size={15} />
+   608→        </Button>
+   609→      )}
+   610→      <AlertDialog>
+   611→        <AlertDialogTrigger asChild>
+   612→          <Button
+   613→            variant="ghost"
+   614→            size="sm"
+   615→            className="size-8 text-rose-500 hover:text-rose-500"
+   616→            title="Delete entry"
+   617→            aria-label="Delete entry"
+   618→          >
+   619→            <Trash2 size={15} />
+   620→          </Button>
+   621→        </AlertDialogTrigger>
+   622→        <AlertDialogContent>
+   623→          <AlertDialogHeader>
+   624→            <AlertDialogTitle>Delete uniform entry?</AlertDialogTitle>
+   625→            <AlertDialogDescription>
+   626→              Token #{row.entry.token_number} for {row.entry.employee_name} will be permanently
+   627→              removed from the registry. This action cannot be undone.
+   628→            </AlertDialogDescription>
+   629→          </AlertDialogHeader>
+   630→          <AlertDialogFooter>
+   631→            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   632→            <AlertDialogAction
+   633→              className="bg-destructive text-white hover:bg-destructive/90"
+   634→              onClick={() => void onDelete(row.entry)}
+   635→            >
+   636→              Delete
+   637→            </AlertDialogAction>
+   638→          </AlertDialogFooter>
+   639→        </AlertDialogContent>
+   640→      </AlertDialog>
+   641→    </div>
+   642→  );
+   643→}
+   644→
+   645→// ---------------------------------------------------------------------------
+   646→// Pagination: First / Prev / numbered / Next / Last
+   647→// ---------------------------------------------------------------------------
+   648→function ListPagination({
+   649→  page,
+   650→  totalPages,
+   651→  onPageChange,
+   652→}: {
+   653→  page: number;
+   654→  totalPages: number;
+   655→  onPageChange: (p: number) => void;
+   656→}) {
+   657→  if (totalPages <= 1) return null;
+   658→
+   659→  const pages: (number | 'ellipsis')[] = [];
+   660→  if (totalPages <= 7) {
+   661→    for (let p = 1; p <= totalPages; p++) pages.push(p);
+   662→  } else {
+   663→    pages.push(1);
+   664→    if (page > 3) pages.push('ellipsis');
+   665→    for (let p = Math.max(2, page - 1); p <= Math.min(totalPages - 1, page + 1); p++) pages.push(p);
+   666→    if (page < totalPages - 2) pages.push('ellipsis');
+   667→    pages.push(totalPages);
+   668→  }
+   669→
+   670→  return (
+   671→    <div className="flex items-center gap-1">
+   672→      <Button
+   673→        variant="outline"
+   674→        size="icon"
+   675→        className="size-8"
+   676→        disabled={page === 1}
+   677→        onClick={() => onPageChange(1)}
+   678→        aria-label="First page"
+   679→      >
+   680→        <ChevronsLeft size={15} />
+   681→      </Button>
+   682→      <Button
+   683→        variant="outline"
+   684→        size="icon"
+   685→        className="size-8"
+   686→        disabled={page === 1}
+   687→        onClick={() => onPageChange(page - 1)}
+   688→        aria-label="Previous page"
+   689→      >
+   690→        <ChevronLeft size={15} />
+   691→      </Button>
+   692→      {pages.map((p, idx) =>
+   693→        p === 'ellipsis' ? (
+   694→          <span key={`ellipsis-${idx}`} className="px-1 text-xs text-muted-foreground">
+   695→            …
+   696→          </span>
+   697→        ) : (
+   698→          <Button
+   699→            key={p}
+   700→            variant={p === page ? 'default' : 'outline'}
+   701→            size="icon"
+   702→            className={cn(
+   703→              'size-8 text-xs tabular-nums',
+   704→              p === page && 'brand-gradient border-transparent text-brand-foreground',
+   705→            )}
+   706→            onClick={() => onPageChange(p)}
+   707→            aria-label={`Page ${p}`}
+   708→            aria-current={p === page ? 'page' : undefined}
+   709→          >
+   710→            {p}
+   711→          </Button>
+   712→        ),
+   713→      )}
+   714→      <Button
+   715→        variant="outline"
+   716→        size="icon"
+   717→        className="size-8"
+   718→        disabled={page === totalPages}
+   719→        onClick={() => onPageChange(page + 1)}
+   720→        aria-label="Next page"
+   721→      >
+   722→        <ChevronRight size={15} />
+   723→      </Button>
+   724→      <Button
+   725→        variant="outline"
+   726→        size="icon"
+   727→        className="size-8"
+   728→        disabled={page === totalPages}
+   729→        onClick={() => onPageChange(totalPages)}
+   730→        aria-label="Last page"
+   731→      >
+   732→        <ChevronsRight size={15} />
+   733→      </Button>
+   734→    </div>
+   735→  );
+   736→}
+   737→
+   738→// ---------------------------------------------------------------------------
+   739→// Shared Create / Renew dialog
+   740→// ---------------------------------------------------------------------------
+   741→function CreateRenewDialog({
+   742→  open,
+   743→  target,
+   744→  employees,
+   745→  sites,
+   746→  onClose,
+   747→}: {
+   748→  open: boolean;
+   749→  target: DialogTarget | null;
+   750→  employees: EmployeeVM[];
+   751→  sites: SiteWithCount[];
+   752→  onClose: () => void;
+   753→}) {
+   754→  return (
+   755→    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+   756→      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+   757→        {target && (
+   758→          <EntryForm
+   759→            key={target.mode === 'renew' ? `renew-${target.entry.id}` : `create-${target.presetEmployeeId ?? 'blank'}`}
+   760→            mode={target.mode}
+   761→            presetEmployeeId={target.mode === 'renew' ? null : target.presetEmployeeId}
+   762→            renewEntry={target.mode === 'renew' ? target.entry : null}
+   763→            employees={employees}
+   764→            sites={sites}
+   765→            onClose={onClose}
+   766→          />
+   767→        )}
+   768→      </DialogContent>
+   769→    </Dialog>
+   770→  );
+   771→}
+   772→
+   773→interface EntryFormState {
+   774→  employeeId: string | null;
+   775→  docType: 'id' | 'passport';
+   776→  docNumber: string;
+   777→  items: Record<string, boolean>;
+   778→  siteName: string | null;
+   779→  leaderId: string | null;
+   780→  leaderFreeText: string;
+   781→  createdDate: string;
+   782→}
+   783→
+   784→function EntryForm({
+   785→  mode,
+   786→  presetEmployeeId,
+   787→  renewEntry,
+   788→  employees,
+   789→  sites,
+   790→  onClose,
+   791→}: {
+   792→  mode: 'create' | 'renew';
+   793→  presetEmployeeId: string | null;
+   794→  renewEntry: UniformEntry | null;
+   795→  employees: EmployeeVM[];
+   796→  sites: SiteWithCount[];
+   797→  onClose: () => void;
+   798→}) {
+   799→  const isRenew = mode === 'renew' && renewEntry !== null;
+   800→  const [submitting, setSubmitting] = useState(false);
+   801→
+   802→  const makeInitialState = (): EntryFormState => {
+   803→    if (mode === 'renew' && renewEntry) {
+   804→      const site = sites.find((s) => s.name === renewEntry.site_name) ?? null;
+   805→      const leader = site
+   806→        ? employees.find(
+   807→            (e) => e.status === 'active' && e.site_name === site.name && e.full_name === renewEntry.team_leader_name,
+   808→          ) ?? null
+   809→        : null;
+   810→      return {
+   811→        employeeId: renewEntry.employee_id,
+   812→        docType: renewEntry.document_type,
+   813→        docNumber: renewEntry.document_number,
+   814→        items: { ...renewEntry.items },
+   815→        siteName: site ? site.name : null,
+   816→        leaderId: leader ? leader.id : null,
+   817→        leaderFreeText: site ? '' : renewEntry.team_leader_name ?? '',
+   818→        createdDate: todayYMD(), // renewal happens today; backdating allowed
+   819→      };
+   820→    }
+   821→    // create mode — prefill documents when an employee is preset
+   822→    const preset = presetEmployeeId ? employees.find((e) => e.id === presetEmployeeId) ?? null : null;
+   823→    const doc = preset
+   824→      ? preset.passport_number
+   825→        ? { type: 'passport' as const, number: preset.passport_number }
+   826→        : preset.id_number
+   827→          ? { type: 'id' as const, number: preset.id_number }
+   828→          : null
+   829→      : null;
+   830→    return {
+   831→      employeeId: presetEmployeeId,
+   832→      docType: doc ? doc.type : 'passport',
+   833→      docNumber: doc ? doc.number : '',
+   834→      items: {},
+   835→      siteName: null,
+   836→      leaderId: null,
+   837→      leaderFreeText: '',
+   838→      createdDate: todayYMD(),
+   839→    };
+   840→  };
+   841→
+   842→  const [state, setState] = useState<EntryFormState>(makeInitialState);
+   843→  const patch = (p: Partial<EntryFormState>) => setState((prev) => ({ ...prev, ...p }));
+   844→  const patchItem = (key: string, value: boolean) =>
+   845→    setState((prev) => ({ ...prev, items: { ...prev.items, [key]: value } }));
+   846→
+   847→  const activeEmployees = useMemo(() => employees.filter((e) => e.status === 'active'), [employees]);
+   848→  const siteObj = useMemo(
+   849→    () => (state.siteName ? sites.find((s) => s.name === state.siteName) ?? null : null),
+   850→    [sites, state.siteName],
+   851→  );
+   852→  const leaderPool = useMemo(() => {
+   853→    if (!state.siteName) return [];
+   854→    const pool = activeEmployees.filter((e) => e.site_name === state.siteName);
+   855→    return [...pool].sort((a, b) => Number(b.is_team_leader) - Number(a.is_team_leader));
+   856→  }, [activeEmployees, state.siteName]);
+   857→  const currentLeader = useMemo(
+   858→    () => (siteObj ? employees.find((e) => e.is_team_leader && e.team_leader_site_id === siteObj.id) ?? null : null),
+   859→    [employees, siteObj],
+   860→  );
+   861→  const expiryPreview = formatExpiryPreview(state.createdDate);
+   862→
+   863→  const handleEmployeeChange = (id: string | null) => {
+   864→    const emp = id ? activeEmployees.find((e) => e.id === id) ?? null : null;
+   865→    if (emp) {
+   866→      // auto-fill document: passport wins when both exist, else id, else blank
+   867→      if (emp.passport_number) {
+   868→        patch({ employeeId: id, docType: 'passport', docNumber: emp.passport_number });
+   869→      } else if (emp.id_number) {
+   870→        patch({ employeeId: id, docType: 'id', docNumber: emp.id_number });
+   871→      } else {
+   872→        patch({ employeeId: id, docNumber: '' });
+   873→      }
+   874→    } else {
+   875→      patch({ employeeId: null, docNumber: '' });
+   876→    }
+   877→  };
+   878→
+   879→  const handleSiteChange = (value: string) => {
+   880→    const next = value === NO_SITE ? null : value;
+   881→    patch({ siteName: next, leaderId: null });
+   882→  };
+   883→
+   884→  const handleSubmit = async () => {
+   885→    if (!state.employeeId) {
+   886→      toast.error('Please select an employee');
+   887→      return;
+   888→    }
+   889→    if (!state.docNumber.trim()) {
+   890→      toast.error('Document number is required');
+   891→      return;
+   892→    }
+   893→    if (!UNIFORM_ITEMS.some((i) => state.items[i.key] === true)) {
+   894→      toast.error('Select at least one item given');
+   895→      return;
+   896→    }
+   897→    if (!state.createdDate) {
+   898→      toast.error('Created date is required');
+   899→      return;
+   900→    }
+   901→    setSubmitting(true);
+   902→    try {
+   903→      const leaderEmp = state.leaderId ? activeEmployees.find((e) => e.id === state.leaderId) ?? null : null;
+   904→      const teamLeaderName = siteObj
+   905→        ? leaderEmp?.full_name ?? null
+   906→        : state.leaderFreeText.trim() || null;
+   907→
+   908→      await dataApi.createUniformEntry({
+   909→        employee_id: state.employeeId,
+   910→        document_type: state.docType,
+   911→        document_number: state.docNumber.trim(),
+   912→        items: buildItemsRecord(state.items),
+   913→        site_name: siteObj ? siteObj.name : null,
+   914→        team_leader_name: teamLeaderName,
+   915→        created_at: new Date(state.createdDate).toISOString(),
+   916→        token_number: null, // auto-assigned
+   917→        is_renewal: isRenew,
+   918→        previous_token_id: isRenew && renewEntry ? renewEntry.token_number : null,
+   919→      });
+   920→
+   921→      // Team-leader promotion: demote the old leader first, then promote the pick
+   922→      if (siteObj && leaderEmp) {
+   923→        const needsPromote = !leaderEmp.is_team_leader || leaderEmp.team_leader_site_id !== siteObj.id;
+   924→        if (needsPromote) {
+   925→          if (currentLeader && currentLeader.id !== leaderEmp.id) {
+   926→            await dataApi.updateEmployee(currentLeader.id, {
+   927→              ...toEmployeeInput(currentLeader),
+   928→              is_team_leader: false,
+   929→              team_leader_site_id: null,
+   930→            });
+   931→          }
+   932→          await dataApi.updateEmployee(leaderEmp.id, {
+   933→            ...toEmployeeInput(leaderEmp),
+   934→            is_team_leader: true,
+   935→            team_leader_site_id: siteObj.id,
+   936→          });
+   937→        }
+   938→      }
+   939→
+   940→      toast.success(isRenew ? 'Uniform entry renewed — a new token number was assigned' : 'Uniform entry created');
+   941→      onClose();
+   942→    } catch (err) {
+   943→      toast.error(errMessage(err));
+   944→    } finally {
+   945→      setSubmitting(false);
+   946→    }
+   947→  };
+   948→
+   949→  return (
+   950→    <div className="space-y-4">
+   951→      <DialogHeader>
+   952→        <DialogTitle>{isRenew ? 'Renew Uniform Entry' : 'New Uniform Entry'}</DialogTitle>
+   953→        <DialogDescription>
+   954→          {isRenew && renewEntry
+   955→            ? `Renewing the uniform record with token #${renewEntry.token_number} for ${renewEntry.employee_name}.`
+   956→            : 'Record an issued uniform, safety gear and its 6-month renewal. Token and uniform IDs are assigned automatically.'}
+   957→        </DialogDescription>
+   958→      </DialogHeader>
+   959→
+   960→      {isRenew && (
+   961→        <div className="flex items-start gap-2 rounded-lg border border-purple-500/25 bg-purple-500/10 p-3 text-xs text-purple-400">
+   962→          <Info size={14} className="mt-0.5 shrink-0" />
+   963→          <span>A new token number will be assigned automatically.</span>
+   964→        </div>
+   965→      )}
+   966→
+   967→      <div className="grid gap-4 sm:grid-cols-2">
+   968→        <div className="space-y-1.5">
+   969→          <Label>Employee *</Label>
+   970→          <EmployeeCombobox
+   971→            employees={activeEmployees}
+   972→            value={state.employeeId}
+   973→            onChange={handleEmployeeChange}
+   974→            disabled={isRenew}
+   975→            placeholder="Search employees…"
+   976→          />
+   977→        </div>
+   978→        <div className="space-y-1.5">
+   979→          <Label>Document Type *</Label>
+   980→          <Select value={state.docType} onValueChange={(v) => patch({ docType: v as 'id' | 'passport' })}>
+   981→            <SelectTrigger className="h-11 w-full bg-card">
+   982→              <SelectValue />
+   983→            </SelectTrigger>
+   984→            <SelectContent>
+   985→              <SelectItem value="id">ID Card</SelectItem>
+   986→              <SelectItem value="passport">Passport</SelectItem>
+   987→            </SelectContent>
+   988→          </Select>
+   989→        </div>
+   990→        <div className="space-y-1.5">
+   991→          <Label>Document Number *</Label>
+   992→          <Input
+   993→            className="h-11"
+   994→            placeholder="e.g. P1543211"
+   995→            value={state.docNumber}
+   996→            onChange={(e) => patch({ docNumber: e.target.value })}
+   997→          />
+   998→        </div>
+   999→        <div className="space-y-1.5">
+  1000→          <Label>Created Date *</Label>
+  1001→          <Input
+  1002→            type="date"
+  1003→            className="h-11"
+  1004→            value={state.createdDate}
+  1005→            onChange={(e) => patch({ createdDate: e.target.value })}
+  1006→          />
+  1007→          <p className="text-[11px] text-muted-foreground">
+  1008→            Expiry:{' '}
+  1009→            <span className="font-medium text-foreground/80">{expiryPreview ?? '—'}</span> (6 months)
+  1010→          </p>
+  1011→        </div>
+  1012→        <div className="space-y-1.5">
+  1013→          <Label>Site</Label>
+  1014→          <Select value={state.siteName ?? NO_SITE} onValueChange={handleSiteChange}>
+  1015→            <SelectTrigger className="h-11 w-full bg-card">
+  1016→              <SelectValue />
+  1017→            </SelectTrigger>
+  1018→            <SelectContent>
+  1019→              <SelectItem value={NO_SITE}>No site</SelectItem>
+  1020→              {sites.map((s) => (
+  1021→                <SelectItem key={s.id} value={s.name}>{s.name}</SelectItem>
+  1022→              ))}
+  1023→            </SelectContent>
+  1024→          </Select>
+  1025→        </div>
+  1026→        <div className="space-y-1.5">
+  1027→          <Label>Team Leader</Label>
+  1028→          {siteObj ? (
+  1029→            <div className="space-y-1.5">
+  1030→              <EmployeeCombobox
+  1031→                employees={leaderPool}
+  1032→                value={state.leaderId}
+  1033→                onChange={(id) => patch({ leaderId: id })}
+  1034→                placeholder="Pick a team leader…"
+  1035→                emptyText="No active employees at this site."
+  1036→              />
+  1037→              {currentLeader ? (
+  1038→                <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
+  1039→                  <Crown size={11} className="shrink-0 fill-amber-400 text-amber-400" />
+  1040→                  {currentLeader.full_name} currently leads this site
+  1041→                  {state.leaderId && state.leaderId !== currentLeader.id
+  1042→                    ? ' — picking a different employee will transfer leadership'
+  1043→                    : ''}
+  1044→                </p>
+  1045→              ) : (
+  1046→                <p className="text-[11px] text-amber-500">No team leader set for this site</p>
+  1047→              )}
+  1048→              {state.leaderId && (
+  1049→                <Button
+  1050→                  type="button"
+  1051→                  variant="ghost"
+  1052→                  size="sm"
+  1053→                  className="h-6 px-2 text-[11px] text-muted-foreground"
+  1054→                  onClick={() => patch({ leaderId: null })}
+  1055→                >
+  1056→                  Clear selection
+  1057→                </Button>
+  1058→              )}
+  1059→            </div>
+  1060→          ) : (
+  1061→            <Input
+  1062→              className="h-11"
+  1063→              placeholder="Team leader name (optional)"
+  1064→              value={state.leaderFreeText}
+  1065→              onChange={(e) => patch({ leaderFreeText: e.target.value })}
+  1066→            />
+  1067→          )}
+  1068→        </div>
+  1069→        <div className="space-y-1.5 sm:col-span-2">
+  1070→          <Label>Items Given *</Label>
+  1071→          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+  1072→            {UNIFORM_ITEMS.map((item) => (
+  1073→              <label
+  1074→                key={item.key}
+  1075→                className={cn(
+  1076→                  'flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-accent/50',
+  1077→                  state.items[item.key] === true && 'border-brand/40 bg-brand/5',
+  1078→                )}
+  1079→              >
+  1080→                <Checkbox
+  1081→                  checked={state.items[item.key] === true}
+  1082→                  onCheckedChange={(c) => patchItem(item.key, c === true)}
+  1083→                />
+  1084→                <span aria-hidden>{item.emoji}</span>
+  1085→                {item.label}
+  1086→              </label>
+  1087→            ))}
+  1088→          </div>
+  1089→        </div>
+  1090→      </div>
+  1091→
+  1092→      <DialogFooter>
+  1093→        <Button variant="outline" onClick={onClose} disabled={submitting}>
+  1094→          Cancel
+  1095→        </Button>
+  1096→        <Button
+  1097→          className="brand-gradient rounded-lg text-brand-foreground hover:opacity-90"
+  1098→          onClick={() => void handleSubmit()}
+  1099→          disabled={submitting}
+  1100→        >
+  1101→          {submitting && <Loader2 size={15} className="animate-spin" />}
+  1102→          {isRenew ? 'Renew Entry' : 'Create Entry'}
+  1103→        </Button>
+  1104→      </DialogFooter>
+  1105→    </div>
+  1106→  );
+  1107→}
+  1108→

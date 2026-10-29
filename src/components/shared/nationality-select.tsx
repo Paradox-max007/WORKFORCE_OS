@@ -57,7 +57,7 @@ export function NationalitySelect({
           <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+      <PopoverContent className="w-(--radix-popper-anchor-width) p-0" align="start">
         <Command shouldFilter={false}>
           <CommandInput
             placeholder="Search or type to add custom…"
@@ -70,7 +70,7 @@ export function NationalitySelect({
               }
             }}
           />
-          <CommandList>
+          <CommandList className="overscroll-contain">
             <CommandEmpty>No country found — press Enter to add it as a custom entry.</CommandEmpty>
             <CommandGroup>
               {query.trim() && !filtered.some((c) => c.toLowerCase() === query.trim().toLowerCase()) && (

@@ -69,12 +69,14 @@ export function UniformItemBadges({ items }: { items: Record<string, boolean> })
   if (given.length === 0) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
+  // Clean single-row display — items sit side by side instead of stacking up
   return (
-    <span className="flex max-w-[260px] flex-wrap gap-1">
+    <span className="flex max-w-[320px] items-center gap-1 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {given.map((i) => (
         <span
           key={i.key}
-          className="inline-flex items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2 py-0.5 text-[11px] text-brand"
+          title={i.label}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2 py-0.5 text-[11px] text-brand"
         >
           <span aria-hidden>{i.emoji}</span>
           {i.label}

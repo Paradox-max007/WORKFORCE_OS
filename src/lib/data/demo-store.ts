@@ -40,6 +40,7 @@ export interface DemoDB {
   cancellationRequests: CancellationRequest[];
   uniforms: UniformEntry[];
   menuPermissions: { profile_id: string; menu_key: MenuKey; allowed: boolean }[];
+  siteAssignments: { profile_id: string; site_id: string }[];
   counters: { uniform_id: number; token_number: number };
 }
 
@@ -87,7 +88,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 4,
+    version: 5,
     profiles: [],
     sites: [],
     camps: [],
@@ -100,6 +101,7 @@ function seedDB(): DemoDB {
     cancellationRequests: [],
     uniforms: [],
     menuPermissions: [],
+    siteAssignments: [],
     counters: { uniform_id: 0, token_number: 0 },
   };
 
@@ -110,6 +112,7 @@ function seedDB(): DemoDB {
     { id: uid(), email: 'sara@pulse.app', name: 'Sara Menon', password: 'demo1234', role: 'admin', theme: 'light', accent: 'amber', created_at: nowISO() },
   ];
   const [superP, raviP] = db.profiles;
+  const saraP = db.profiles[2];
   db.menuPermissions = [
     { profile_id: raviP.id, menu_key: 'employees' as MenuKey, allowed: true },
     { profile_id: raviP.id, menu_key: 'attendance' as MenuKey, allowed: true },
@@ -124,6 +127,13 @@ function seedDB(): DemoDB {
   const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', false);
   db.sites = [npc, redCoast, marina, depot];
 
+  // site assignments — the two normal admins can only mark their assigned sites
+  db.siteAssignments = [
+    { profile_id: raviP.id, site_id: npc.id },
+    { profile_id: raviP.id, site_id: redCoast.id },
+    { profile_id: saraP.id, site_id: marina.id },
+  ];
+
   // ---- camps (accommodation) ----------------------------------------------
   const mkCamp = (name: string, location: string, capacity: number, notes: string | null = null, active = true): Camp =>
     ({ id: uid(), name, location, capacity, notes, is_active: active, created_at: nowISO() });
@@ -135,6 +145,18 @@ function seedDB(): DemoDB {
 
   // ---- employees -------------------------------------------------------------
   const year = new Date().getFullYear();
+  // Home-country addresses as per passport / official documents
+  const HOME_ADDRESS: Record<string, string> = {
+    India: 'House 14, Gandhi Nagar, Kochi, Kerala, India',
+    Pakistan: 'St. 7, Block C, Gulshan-e-Iqbal, Karachi, Pakistan',
+    Bangladesh: 'Village Badda, Post Badda, Dhaka, Bangladesh',
+    Nepal: 'Ward 5, Mahendranagar, Kanchanpur, Nepal',
+    Philippines: 'Blk 12 Lot 4, Quezon City, Metro Manila, Philippines',
+    Egypt: '12 El-Tahrir St., Nasr City, Cairo, Egypt',
+    'Sri Lanka': 'No. 24, Kandy Road, Katugastota, Sri Lanka',
+    Kenya: 'Plot 89, Eastleigh, Nairobi, Kenya',
+    Sudan: 'House 22, Al-Amaraat, Khartoum, Sudan',
+  };
   const mkEmp = (
     n: number, fullName: string, nationality: string, position: string,
     site: Site | null, leaderSite: Site | null, extra: Partial<Employee> = {},
@@ -146,7 +168,7 @@ function seedDB(): DemoDB {
     date_of_birth: `199${(n % 9) + 1}-0${(n % 8) + 1}-1${n % 9}`,
     phone: `+966 5${n}${n} ${n}0 ${n}0${n}`,
     email: null,
-    address: 'Labour Camp, Block C, Umm Al Quwain',
+    address: HOME_ADDRESS[nationality] ?? 'Home address as per passport',
     emergency_contact: `+966 5${(n % 5) + 5}1 23${n} 45${n % 7}`,
     position,
     join_date: `${year - 1}-0${(n % 9) + 1}-15`,
@@ -157,6 +179,8 @@ function seedDB(): DemoDB {
     id_status: n === 7 ? 'Expired' : 'Valid',
     current_site_id: site?.id ?? null,
     camp_id: null,
+    camp_block: null,
+    camp_room: null,
     rating: [5, 4.8, 4.5, 4.2, 5, 4.7, 4.1, 3.5, 4.9, 4.6, 4.4, 4.8, 4.5, 4.7, 4.2][n - 1] ?? 4.5,
     status: 'active',
     photo: null,
@@ -185,11 +209,20 @@ function seedDB(): DemoDB {
     mkEmp(15, 'Omar Farooq', 'Pakistan', 'Store Keeper', marina, null, { status: 'pending_deletion' as Employee['status'] }),
   ];
   // assign camps (one employee → exactly one camp; two workers left unassigned)
-  const inCamp = (camp: Camp, names: string[]): void =>
-    names.forEach((nm) => { const e = db.employees.find((x) => x.full_name === nm); if (e) e.camp_id = camp.id; });
-  inCamp(sonapur, ['Muhammad Iqbal', 'Kamal Hussain', 'Rahim Uddin', 'Sandeep Singh', 'Tharindu Perera', 'Ibrahim Toure']);
-  inCamp(alNahda, ['Arun Nair', 'Joseph Santos', 'Ahmed Hassan', 'John Mwangi']);
-  inCamp(muweilah, ['Suresh Patel', 'Dilip Shrestha', 'Ramesh Yadav', 'Omar Farooq']);
+  // with a block & room number where they stay
+  const inCamp = (camp: Camp, names: string[], block: string, rooms: string[]): void => {
+    names.forEach((nm, i) => {
+      const e = db.employees.find((x) => x.full_name === nm);
+      if (e) {
+        e.camp_id = camp.id;
+        e.camp_block = block;
+        e.camp_room = rooms[i % rooms.length];
+      }
+    });
+  };
+  inCamp(sonapur, ['Muhammad Iqbal', 'Kamal Hussain', 'Rahim Uddin', 'Sandeep Singh', 'Tharindu Perera', 'Ibrahim Toure'], 'B', ['204', '205', '206', '207', '208', '209']);
+  inCamp(alNahda, ['Arun Nair', 'Joseph Santos', 'Ahmed Hassan', 'John Mwangi'], 'A', ['101', '102', '103', '104']);
+  inCamp(muweilah, ['Suresh Patel', 'Dilip Shrestha', 'Ramesh Yadav', 'Omar Farooq'], 'C', ['12', '14', '16', '18']);
   const emp = (name: string): Employee => db.employees.find((e) => e.full_name === name)!;
 
   // ---- attendance (last 6 months incl. current, up to today) ----------------
@@ -349,7 +382,7 @@ function seedDB(): DemoDB {
 // Persistence + cross-tab realtime sync
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'pulse_demo_db_v4';
+const STORAGE_KEY = 'pulse_demo_db_v5';
 const SESSION_KEY = 'pulse_demo_session';
 const CHANNEL = 'pulse-demo-realtime';
 
@@ -377,7 +410,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 4) return parsed;
+      if (parsed.version === 5) return parsed;
     }
   } catch {
     // corrupted → reseed

@@ -1,0 +1,597 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Attendance (Excel-style marking sheet)
+     5→// ----------------------------------------------------------------------------
+     6→// • Every cell is an always-editable input: type custom hours (e.g. 8, 10.5)
+     7→//   or "A" for absent, or clear it to unmark the day.
+     8→// • Rows are ALPHABETICAL by employee name; the site filter narrows the sheet
+     9→//   to only that site's crew (still alphabetical).
+    10→// • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
+    11→// • Calendar view: per-employee month calendar with the same editing model.
+    12→// ============================================================================
+    13→
+    14→import { motion } from 'framer-motion';
+    15→import {
+    16→  CalendarCheck, ChevronLeft, ChevronRight, Loader2, Search, Tent,
+    17→} from 'lucide-react';
+    18→import { useEffect, useMemo, useState } from 'react';
+    19→import { toast } from 'sonner';
+    20→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    21→import { EmptyState, SectionTitle, SkeletonRows } from '@/components/shared/primitives';
+    22→import { Button } from '@/components/ui/button';
+    23→import { Input } from '@/components/ui/input';
+    24→import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+    25→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    26→import { Skeleton } from '@/components/ui/skeleton';
+    27→import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    28→import { dataApi } from '@/lib/data';
+    29→import { initials } from '@/lib/format';
+    30→import { cn } from '@/lib/utils';
+    31→import type { Attendance, EmployeeVM, SiteWithCount } from '@/lib/types';
+    32→import { useRealtimeVersion } from '@/store/realtime';
+    33→
+    34→const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+    35→  'July', 'August', 'September', 'October', 'November', 'December'];
+    36→const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    37→const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+    38→
+    39→const pad = (n: number): string => String(n).padStart(2, '0');
+    40→const ymd = (y: number, m: number, d: number): string => `${y}-${pad(m)}-${pad(d)}`;
+    41→const todayYMD = (): string => {
+    42→  const t = new Date();
+    43→  return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
+    44→};
+    45→const isFriday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 5;
+    46→const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
+    47→
+    48→/** Parse a cell value → { kind, hours }. kind: 'absent' | 'hours' | 'clear' | 'invalid' */
+    49→function parseCell(raw: string): { kind: 'absent' | 'hours' | 'clear' | 'invalid'; hours: number | null } {
+    50→  const v = raw.trim();
+    51→  if (v === '') return { kind: 'clear', hours: null };
+    52→  if (v.toLowerCase() === 'a' || v.toLowerCase() === 'absent') return { kind: 'absent', hours: null };
+    53→  const n = Number(v);
+    54→  if (Number.isNaN(n) || !Number.isFinite(n) || n < 0 || n > 24) return { kind: 'invalid', hours: null };
+    55→  return { kind: 'hours', hours: Math.round(n * 100) / 100 };
+    56→}
+    57→
+    58→// ---------------------------------------------------------------------------
+    59→// Page
+    60→// ---------------------------------------------------------------------------
+    61→export function AttendancePage() {
+    62→  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp']);
+    63→
+    64→  const now = new Date();
+    65→  const [monthKey, setMonthKey] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
+    66→  const [view, setView] = useState<'sheet' | 'calendar'>('sheet');
+    67→
+    68→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    69→  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+    70→  const [records, setRecords] = useState<Attendance[] | null>(null);
+    71→
+    72→  // filters
+    73→  const [search, setSearch] = useState('');
+    74→  const [debouncedSearch, setDebouncedSearch] = useState('');
+    75→  const [siteFilter, setSiteFilter] = useState<string>('all');
+    76→
+    77→  // editing state: cellKey "empId|YYYY-MM-DD" → raw input text
+    78→  const [edits, setEdits] = useState<Record<string, string>>({});
+    79→  const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set());
+    80→
+    81→  // calendar view state
+    82→  const [calendarEmployeeId, setCalendarEmployeeId] = useState<string | null>(null);
+    83→
+    84→  const [year, month] = useMemo(() => {
+    85→    const [y, m] = monthKey.split('-').map(Number);
+    86→    return [y, m];
+    87→  }, [monthKey]);
+    88→
+    89→  const today = todayYMD();
+    90→  const days = daysInMonth(year, month);
+    91→  const isCurrentMonth = monthKey === `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+    92→  const isFutureMonth = monthKey > `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+    93→
+    94→  // ---- data loading ----------------------------------------------------------
+    95→  useEffect(() => {
+    96→    let cancelled = false;
+    97→    (async () => {
+    98→      try {
+    99→        const [emps, sts] = await Promise.all([dataApi.listEmployees(), dataApi.listSites()]);
+   100→        if (!cancelled) { setEmployees(emps); setSites(sts); }
+   101→      } catch (err) {
+   102→        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
+   103→      }
+   104→    })();
+   105→    return () => { cancelled = true; };
+   106→  }, [realtimeVersion]);
+   107→
+   108→  useEffect(() => {
+   109→    let cancelled = false;
+   110→    dataApi.getMonthAttendance(monthKey)
+   111→      .then((rows) => { if (!cancelled) setRecords(rows); })
+   112→      .catch(() => { if (!cancelled) setRecords([]); });
+   113→    return () => { cancelled = true; };
+   114→  }, [monthKey, realtimeVersion]);
+   115→
+   116→  useEffect(() => {
+   117→    const t = setTimeout(() => setDebouncedSearch(search), 300);
+   118→    return () => clearTimeout(t);
+   119→  }, [search]);
+   120→
+   121→  // ---- alphabetical crew (site filter narrows) --------------------------------
+   122→  const crew = useMemo(() => {
+   123→    const list = (employees ?? []).filter((e) => e.status !== 'deleted');
+   124→    const filtered = siteFilter === 'all' ? list : list.filter((e) => e.current_site_id === siteFilter);
+   125→    const q = debouncedSearch.toLowerCase().trim();
+   126→    const searched = q
+   127→      ? filtered.filter((e) =>
+   128→          `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q))
+   129→      : filtered;
+   130→    return [...searched].sort((a, b) => a.full_name.localeCompare(b.full_name));
+   131→  }, [employees, siteFilter, debouncedSearch]);
+   132→
+   133→  // ---- record lookups ---------------------------------------------------------
+   134→  const recordMap = useMemo(() => {
+   135→    const map = new Map<string, Attendance>();
+   136→    (records ?? []).forEach((r) => map.set(`${r.employee_id}|${r.date}`, r));
+   137→    return map;
+   138→  }, [records]);
+   139→
+   140→  const recordToText = (r: Attendance | undefined): string => {
+   141→    if (!r) return '';
+   142→    if (r.status === 'absent') return 'A';
+   143→    if (r.status === 'present' && r.hours != null) return String(r.hours);
+   144→    return '';
+   145→  };
+   146→
+   147→  const cellText = (empId: string, date: string): string => {
+   148→    const key = `${empId}|${date}`;
+   149→    return edits[key] ?? recordToText(recordMap.get(key));
+   150→  };
+   151→
+   152→  // ---- commit a cell ------------------------------------------------------------
+   153→  const commitCell = async (empId: string, date: string) => {
+   154→    const key = `${empId}|${date}`;
+   155→    const raw = edits[key];
+   156→    if (raw === undefined) return; // untouched
+   157→
+   158→    const current = recordToText(recordMap.get(key));
+   159→    if (raw === current) { // no change → drop local edit
+   160→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   161→      return;
+   162→    }
+   163→
+   164→    const parsed = parseCell(raw);
+   165→    if (parsed.kind === 'invalid') {
+   166→      toast.error('Invalid value', { description: 'Enter hours (0–24, e.g. 8 or 10.5) or A for absent.' });
+   167→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   168→      return;
+   169→    }
+   170→
+   171→    setSavingKeys((prev) => new Set(prev).add(key));
+   172→    try {
+   173→      await dataApi.markAttendance(empId, date, parsed.kind === 'clear' ? '' : raw.trim());
+   174→      // optimistic local sync (realtime refetch will reconcile)
+   175→      setRecords((prev) => {
+   176→        const list = prev ?? [];
+   177→        const rest = list.filter((r) => !(r.employee_id === empId && r.date === date));
+   178→        if (parsed.kind === 'clear') return rest;
+   179→        const base = list.find((r) => r.employee_id === empId && r.date === date);
+   180→        return [...rest, {
+   181→          id: base?.id ?? `local-${key}`,
+   182→          employee_id: empId,
+   183→          date,
+   184→          status: parsed.kind === 'absent' ? 'absent' : 'present',
+   185→          hours: parsed.hours,
+   186→          is_hidden: false,
+   187→          created_at: base?.created_at ?? new Date().toISOString(),
+   188→        }];
+   189→      });
+   190→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   191→    } catch (err) {
+   192→      toast.error(err instanceof Error ? err.message : 'Failed to save');
+   193→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   194→    } finally {
+   195→      setSavingKeys((prev) => { const n = new Set(prev); n.delete(key); return n; });
+   196→    }
+   197→  };
+   198→
+   199→  const setCell = (empId: string, date: string, value: string) => {
+   200→    const key = `${empId}|${date}`;
+   201→    setEdits((prev) => ({ ...prev, [key]: value }));
+   202→  };
+   203→
+   204→  // ---- row totals (TOTAL HOURS + ABSENCES) ---------------------------------------
+   205→  const rowTotals = (empId: string): { hours: number; absents: number } => {
+   206→    let hours = 0;
+   207→    let absents = 0;
+   208→    for (let d = 1; d <= days; d++) {
+   209→      const date = ymd(year, month, d);
+   210→      const parsed = parseCell(cellText(empId, date));
+   211→      if (parsed.kind === 'hours') hours += parsed.hours ?? 0;
+   212→      if (parsed.kind === 'absent') absents += 1;
+   213→    }
+   214→    return { hours: Math.round(hours * 100) / 100, absents };
+   215→  };
+   216→
+   217→  // ---- month navigation ----------------------------------------------------------
+   218→  const shiftMonth = (delta: number) => {
+   219→    const d = new Date(year, month - 1 + delta, 1);
+   220→    setMonthKey(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
+   221→  };
+   222→
+   223→  const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
+   224→  const loading = !employees || !records || !sites;
+   225→  const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
+   226→
+   227→  const dayColumns = useMemo(() => {
+   228→    const cols: number[] = [];
+   229→    const last = isCurrentMonth ? now.getDate() : isFutureMonth ? 0 : days;
+   230→    for (let d = 1; d <= last; d++) cols.push(d);
+   231→    return cols;
+   232→  }, [days, isCurrentMonth, isFutureMonth, now]);
+   233→
+   234→  return (
+   235→    <div className="mx-auto max-w-[1600px]">
+   236→      {/* header */}
+   237→      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+   238→        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ease: EASE }}>
+   239→          <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Attendance</h1>
+   240→          <p className="mt-1 text-sm text-muted-foreground">
+   241→            Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent
+   242→          </p>
+   243→        </motion.div>
+   244→        <div className="flex flex-wrap items-center gap-2">
+   245→          <Tabs value={view} onValueChange={(v) => setView(v as 'sheet' | 'calendar')}>
+   246→            <TabsList>
+   247→              <TabsTrigger value="sheet"><CalendarCheck size={14} className="mr-1" />Sheet</TabsTrigger>
+   248→              <TabsTrigger value="calendar">Calendar</TabsTrigger>
+   249→            </TabsList>
+   250→          </Tabs>
+   251→          <div className="flex items-center gap-1">
+   252→            <Button variant="outline" size="icon" className="size-9" onClick={() => shiftMonth(-1)} aria-label="Previous month">
+   253→              <ChevronLeft size={16} />
+   254→            </Button>
+   255→            <Select value={MONTH_NAMES[month - 1]} onValueChange={(m) => setMonthKey(`${year}-${pad(MONTH_NAMES.indexOf(m) + 1)}`)}>
+   256→              <SelectTrigger className="h-9 w-32 bg-card"><SelectValue /></SelectTrigger>
+   257→              <SelectContent>
+   258→                {MONTH_NAMES.map((m) => (
+   259→                  <SelectItem key={m} value={m}>{m}</SelectItem>
+   260→                ))}
+   261→              </SelectContent>
+   262→            </Select>
+   263→            <Select value={String(year)} onValueChange={(y) => setMonthKey(`${y}-${pad(month)}`)}>
+   264→              <SelectTrigger className="h-9 w-[76px] bg-card"><SelectValue /></SelectTrigger>
+   265→              <SelectContent>
+   266→                {[now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => (
+   267→                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+   268→                ))}
+   269→              </SelectContent>
+   270→            </Select>
+   271→            <Button
+   272→              variant="outline" size="icon" className="size-9"
+   273→              disabled={monthKey >= `${now.getFullYear()}-${pad(now.getMonth() + 1)}`}
+   274→              onClick={() => shiftMonth(1)} aria-label="Next month"
+   275→            >
+   276→              <ChevronRight size={16} />
+   277→            </Button>
+   278→          </div>
+   279→        </div>
+   280→      </div>
+   281→
+   282→      {/* toolbar */}
+   283→      <div className="mb-4 flex flex-wrap items-center gap-2">
+   284→        {view === 'sheet' && (
+   285→          <>
+   286→            <div className="relative min-w-52 flex-1 sm:max-w-xs">
+   287→              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   288→              <Input
+   289→                placeholder="Search employees…"
+   290→                className="h-10 pl-9"
+   291→                value={search}
+   292→                onChange={(e) => setSearch(e.target.value)}
+   293→              />
+   294→            </div>
+   295→            <Select value={siteFilter} onValueChange={setSiteFilter}>
+   296→              <SelectTrigger className="h-10 w-56 bg-card"><SelectValue /></SelectTrigger>
+   297→              <SelectContent>
+   298→                <SelectItem value="all">All Sites</SelectItem>
+   299→                {activeSites.map((s) => (
+   300→                  <SelectItem key={s.id} value={s.id}>
+   301→                    {s.name} ({s.employee_count})
+   302→                  </SelectItem>
+   303→                ))}
+   304→              </SelectContent>
+   305→            </Select>
+   306→          </>
+   307→        )}
+   308→        {view === 'calendar' && (
+   309→          <div className="min-w-64 flex-1 sm:max-w-sm">
+   310→            <EmployeeCombobox
+   311→              employees={crew}
+   312→              value={calendarEmployeeId}
+   313→              onChange={(id) => setCalendarEmployeeId(id)}
+   314→              placeholder="Select an employee to view their timesheet…"
+   315→            />
+   316→          </div>
+   317→        )}
+   318→        <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
+   319→          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/20 ring-1 ring-rose-500/40" />A = Absent</span>
+   320→          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-emerald-500/20 ring-1 ring-emerald-500/40" />Hours</span>
+   321→          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/[0.06] ring-1 ring-border" />Friday</span>
+   322→        </div>
+   323→      </div>
+   324→
+   325→      {/* ============================ SHEET VIEW ============================ */}
+   326→      {view === 'sheet' && (
+   327→        loading ? (
+   328→          <SkeletonRows rows={8} />
+   329→        ) : crew.length === 0 ? (
+   330→          <EmptyState
+   331→            icon={<CalendarCheck size={22} />}
+   332→            title={debouncedSearch || siteFilter !== 'all' ? 'No employees match your filters' : 'No employees yet'}
+   333→            description={debouncedSearch || siteFilter !== 'all'
+   334→              ? 'Try adjusting the search or site filter.'
+   335→              : 'Add employees first to start marking attendance.'}
+   336→          />
+   337→        ) : (
+   338→          <motion.div
+   339→            initial={{ opacity: 0, y: 12 }}
+   340→            animate={{ opacity: 1, y: 0 }}
+   341→            transition={{ duration: 0.35, ease: EASE }}
+   342→            className="card-glow overflow-hidden rounded-xl border bg-card"
+   343→          >
+   344→            <div className="overflow-x-auto">
+   345→              <table className="w-full min-w-max border-collapse text-sm">
+   346→                <thead>
+   347→                  <tr className="border-b bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+   348→                    <th className="sticky left-0 z-20 min-w-[220px] bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
+   349→                    {dayColumns.map((d) => {
+   350→                      const date = ymd(year, month, d);
+   351→                      const fri = isFriday(date);
+   352→                      return (
+   353→                        <th
+   354→                          key={d}
+   355→                          className={cn(
+   356→                            'w-10 min-w-10 px-1 py-2.5 text-center font-medium',
+   357→                            fri && 'bg-rose-500/[0.07] text-rose-500',
+   358→                          )}
+   359→                          title={`${MONTH_NAMES[month - 1]} ${d}${fri ? ' (Friday)' : ''}`}
+   360→                        >
+   361→                          <div>{d}</div>
+   362→                          <div className="text-[9px] font-normal normal-case opacity-70">
+   363→                            {WEEKDAYS[new Date(`${date}T00:00:00`).getDay()]}
+   364→                          </div>
+   365→                        </th>
+   366→                      );
+   367→                    })}
+   368→                    <th className="sticky right-[92px] z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
+   369→                    <th className="sticky right-0 z-20 w-[92px] bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
+   370→                  </tr>
+   371→                </thead>
+   372→                <tbody>
+   373→                  {crew.map((emp, i) => {
+   374→                    const totals = rowTotals(emp.id);
+   375→                    return (
+   376→                      <motion.tr
+   377→                        key={emp.id}
+   378→                        initial={{ opacity: 0, y: 6 }}
+   379→                        animate={{ opacity: 1, y: 0 }}
+   380→                        transition={{ delay: Math.min(i * 0.02, 0.3), ease: EASE }}
+   381→                        className="border-b border-border/40 transition-colors last:border-0 hover:bg-brand/[0.02]"
+   382→                      >
+   383→                        <td className="sticky left-0 z-10 bg-card px-4 py-2">
+   384→                          <div className="flex items-center gap-2.5">
+   385→                            <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+   386→                              {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
+   387→                            </span>
+   388→                            <div className="min-w-0">
+   389→                              <p className="truncate text-[13px] font-medium">{emp.full_name}</p>
+   390→                              <p className="flex items-center gap-1 truncate text-[10px] text-muted-foreground">
+   391→                                <span className="font-mono">{emp.employee_code}</span>
+   392→                                {emp.camp_name && (
+   393→                                  <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400"><Tent size={9} className="inline" />{emp.camp_name}</span>
+   394→                                )}
+   395→                              </p>
+   396→                            </div>
+   397→                          </div>
+   398→                        </td>
+   399→                        {dayColumns.map((d) => {
+   400→                          const date = ymd(year, month, d);
+   401→                          const key = `${emp.id}|${date}`;
+   402→                          const value = cellText(emp.id, date);
+   403→                          const busy = savingKeys.has(key);
+   404→                          const fri = isFriday(date);
+   405→                          const withinLast7 = date > new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+   406→                          const isA = value.trim().toLowerCase() === 'a';
+   407→                          return (
+   408→                            <td
+   409→                              key={d}
+   410→                              className={cn(
+   411→                                'p-0 text-center',
+   412→                                fri && 'bg-rose-500/[0.04]',
+   413→                                withinLast7 && !fri && 'bg-emerald-500/[0.04]',
+   414→                              )}
+   415→                            >
+   416→                              <div className="relative">
+   417→                                <input
+   418→                                  value={value}
+   419→                                  disabled={busy}
+   420→                                  onChange={(e) => setCell(emp.id, date, e.target.value)}
+   421→                                  onBlur={() => commitCell(emp.id, date)}
+   422→                                  onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+   423→                                  aria-label={`${emp.full_name} — ${date}`}
+   424→                                  className={cn(
+   425→                                    'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
+   426→                                    'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
+   427→                                    isA && 'bg-rose-500/10 font-bold text-rose-500',
+   428→                                    value !== '' && !isA && 'text-foreground',
+   429→                                    busy && 'opacity-50',
+   430→                                  )}
+   431→                                />
+   432→                                {busy && (
+   433→                                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+   434→                                    <Loader2 size={10} className="animate-spin text-brand" />
+   435→                                  </span>
+   436→                                )}
+   437→                              </div>
+   438→                            </td>
+   439→                          );
+   440→                        })}
+   441→                        {/* Total hours */}
+   442→                        <td className="sticky right-[92px] z-10 bg-card px-2 text-center">
+   443→                          <span className="inline-flex min-w-12 rounded-lg bg-emerald-500/10 px-1.5 py-1 text-[12px] font-bold tabular-nums text-emerald-500">
+   444→                            {totals.hours}
+   445→                          </span>
+   446→                        </td>
+   447→                        {/* Absences */}
+   448→                        <td className="sticky right-0 z-10 bg-card px-2 text-center">
+   449→                          <span
+   450→                            className={cn(
+   451→                              'inline-flex min-w-8 rounded-lg px-1.5 py-1 text-[12px] font-bold tabular-nums',
+   452→                              totals.absents > 0 ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground',
+   453→                            )}
+   454→                          >
+   455→                            {totals.absents}
+   456→                          </span>
+   457→                        </td>
+   458→                      </motion.tr>
+   459→                    );
+   460→                  })}
+   461→                </tbody>
+   462→              </table>
+   463→            </div>
+   464→            <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
+   465→              {crew.length} employee{crew.length !== 1 ? 's' : ''} · alphabetical
+   466→              {siteFilter !== 'all' && ' (filtered by site)'} · every cell is editable — click a cell and type hours (e.g. 8, 10.5) or A, then press Enter or click away
+   467→            </p>
+   468→          </motion.div>
+   469→        )
+   470→      )}
+   471→
+   472→      {/* ============================ CALENDAR VIEW ============================ */}
+   473→      {view === 'calendar' && (
+   474→        loading ? (
+   475→          <div className="grid gap-3 sm:grid-cols-7">
+   476→            {Array.from({ length: 35 }).map((_, i) => <Skeleton key={i} className="h-20 rounded-lg" />)}
+   477→          </div>
+   478→        ) : !calendarEmployee ? (
+   479→          <EmptyState
+   480→            icon={<CalendarCheck size={22} />}
+   481→            title="Select an employee"
+   482→            description="Pick an employee above to view and edit their monthly timesheet."
+   483→          />
+   484→        ) : (
+   485→          <motion.div
+   486→            key={calendarEmployee.id + monthKey}
+   487→            initial={{ opacity: 0, y: 12 }}
+   488→            animate={{ opacity: 1, y: 0 }}
+   489→            transition={{ duration: 0.35, ease: EASE }}
+   490→            className="card-glow rounded-xl border bg-card p-5"
+   491→          >
+   492→            <SectionTitle
+   493→              title={`${calendarEmployee.full_name} — ${MONTH_NAMES[month - 1]} ${year}`}
+   494→              sub={`${calendarEmployee.employee_code}${calendarEmployee.site_name ? ' · ' + calendarEmployee.site_name : ' · Idle'}`}
+   495→            />
+   496→            <div className="mt-4 grid grid-cols-7 gap-1.5">
+   497→              {WEEKDAYS.map((w) => (
+   498→                <div key={w} className={cn('pb-1 text-center text-[11px] font-medium uppercase tracking-wide', w === 'Fri' ? 'text-rose-500' : 'text-muted-foreground')}>
+   499→                  {w}
+   500→                </div>
+   501→              ))}
+   502→              {Array.from({ length: new Date(year, month - 1, 1).getDay() }).map((_, i) => <div key={`pad-${i}`} />)}
+   503→              {Array.from({ length: days }).map((_, idx) => {
+   504→                const d = idx + 1;
+   505→                const date = ymd(year, month, d);
+   506→                const future = date > today;
+   507→                const fri = isFriday(date);
+   508→                const value = cellText(calendarEmployee.id, date);
+   509→                const parsed = parseCell(value);
+   510→                return (
+   511→                  <Popover key={d}>
+   512→                    <PopoverTrigger asChild>
+   513→                      <button
+   514→                        disabled={future}
+   515→                        className={cn(
+   516→                          'group relative flex h-16 flex-col items-center justify-center rounded-lg border text-sm transition-all',
+   517→                          future
+   518→                            ? 'cursor-not-allowed border-dashed opacity-40'
+   519→                            : 'hover:border-brand/50 hover:shadow-[0_4px_16px_-6px_var(--glow)]',
+   520→                          fri && 'border-rose-500/20 bg-rose-500/[0.04]',
+   521→                          !future && !fri && 'bg-card',
+   522→                          date === today && 'ring-2 ring-brand/50',
+   523→                        )}
+   524→                      >
+   525→                        <span className="absolute left-1.5 top-1 text-[10px] text-muted-foreground">{d}</span>
+   526→                        {parsed.kind === 'absent' ? (
+   527→                          <span className="text-lg font-bold text-rose-500">A</span>
+   528→                        ) : parsed.kind === 'hours' ? (
+   529→                          <span className="text-base font-semibold tabular-nums text-emerald-500">{parsed.hours}h</span>
+   530→                        ) : (
+   531→                          <span className="text-xs text-muted-foreground/50">—</span>
+   532→                        )}
+   533→                      </button>
+   534→                    </PopoverTrigger>
+   535→                    <PopoverContent className="w-56 p-3" align="center">
+   536→                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   537→                        {calendarEmployee.full_name} · {date}{fri ? ' (Friday)' : ''}
+   538→                      </p>
+   539→                      <Input
+   540→                        autoFocus
+   541→                        value={value}
+   542→                        disabled={future}
+   543→                        placeholder="Hours (8) or A"
+   544→                        onChange={(e) => setCell(calendarEmployee.id, date, e.target.value)}
+   545→                        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+   546→                        onBlur={() => commitCell(calendarEmployee.id, date)}
+   547→                        className="h-9 text-center font-semibold tabular-nums"
+   548→                      />
+   549→                      <div className="mt-2 grid grid-cols-4 gap-1">
+   550→                        {['8', '10', '12'].map((h) => (
+   551→                          <Button key={h} variant="outline" size="sm" className="h-7 px-0 text-xs" onClick={() => { setCell(calendarEmployee.id, date, h); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}>
+   552→                            {h}h
+   553→                          </Button>
+   554→                        ))}
+   555→                        <Button variant="outline" size="sm" className="h-7 px-0 text-xs font-bold text-rose-500" onClick={() => { setCell(calendarEmployee.id, date, 'A'); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}>
+   556→                          A
+   557→                        </Button>
+   558→                      </div>
+   559→                      <Button
+   560→                        variant="ghost" size="sm"
+   561→                        className="mt-1.5 w-full text-xs text-muted-foreground"
+   562→                        onClick={() => { setCell(calendarEmployee.id, date, ''); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}
+   563→                      >
+   564→                        Clear day
+   565→                      </Button>
+   566→                    </PopoverContent>
+   567→                  </Popover>
+   568→                );
+   569→              })}
+   570→            </div>
+   571→
+   572→            {/* Month totals */}
+   573→            <div className="mt-4 flex flex-wrap items-center gap-3 border-t pt-4">
+   574→              {(() => {
+   575→                const totals = rowTotals(calendarEmployee.id);
+   576→                return (
+   577→                  <>
+   578→                    <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-4 py-1.5 text-sm font-semibold text-emerald-500">
+   579→                      Total Hours: {totals.hours}
+   580→                    </span>
+   581→                    <span className={cn(
+   582→                      'rounded-full border px-4 py-1.5 text-sm font-semibold',
+   583→                      totals.absents > 0 ? 'border-rose-500/25 bg-rose-500/10 text-rose-500' : 'border-border bg-muted text-muted-foreground',
+   584→                    )}>
+   585→                      Total Absent: {totals.absents}
+   586→                    </span>
+   587→                  </>
+   588→                );
+   589→              })()}
+   590→            </div>
+   591→          </motion.div>
+   592→        )
+   593→      )}
+   594→    </div>
+   595→  );
+   596→}
+   597→

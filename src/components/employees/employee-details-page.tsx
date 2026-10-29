@@ -289,7 +289,7 @@ function PrintHeaderBlock({ emp, points }: { emp: EmployeeVM; points: MonthPoint
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 border-t border-zinc-200 pt-2 text-[11px] leading-relaxed text-zinc-800 sm:grid-cols-3">
         <p><span className="font-semibold text-zinc-500">Site:</span> {emp.site_name ?? 'No Site Assigned'}</p>
-        <p><span className="font-semibold text-zinc-500">Camp:</span> {emp.camp_name ?? '—'}</p>
+        <p><span className="font-semibold text-zinc-500">Camp:</span> {emp.camp_name ?? '—'}{emp.camp_name ? ` (Block ${emp.camp_block ?? '—'}, Room ${emp.camp_room ?? '—'})` : ''}</p>
         <p><span className="font-semibold text-zinc-500">Nationality:</span> {emp.nationality ?? '—'}</p>
         <p><span className="font-semibold text-zinc-500">Rating:</span> {emp.rating.toFixed(1)} / 5.0</p>
         <p><span className="font-semibold text-zinc-500">Status:</span> {STATUS_LABEL[emp.status]}</p>
@@ -791,9 +791,17 @@ export function EmployeeDetailsPage() {
               </p>
               <div className="mt-2 flex flex-wrap items-center justify-center gap-2 sm:justify-start">
                 <SiteBadge name={emp.site_name} />
-                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
-                  <Tent size={11} className="inline" aria-hidden="true" /> {emp.camp_name ?? 'No camp'}
-                </span>
+                {emp.camp_name ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                    <Tent size={11} className="inline" aria-hidden="true" /> {emp.camp_name}
+                    {emp.camp_block && <> · Block {emp.camp_block}</>}
+                    {emp.camp_room && <> · Room {emp.camp_room}</>}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                    <Tent size={11} className="inline" aria-hidden="true" /> No camp
+                  </span>
+                )}
               </div>
               <div className="mt-2 flex justify-center sm:justify-start">
                 <RatingStars rating={emp.rating} size={15} />
@@ -838,7 +846,7 @@ export function EmployeeDetailsPage() {
           <InfoRow label="Email" value={emp.email ?? '—'} />
           <InfoRow label="Emergency Contact" value={emp.emergency_contact ?? '—'} />
           <div className="sm:col-span-2">
-            <InfoRow label="Address" value={emp.address ?? '—'} />
+            <InfoRow label="Home Country Address" value={emp.address ?? '—'} />
           </div>
         </InfoCard>
 
@@ -848,10 +856,15 @@ export function EmployeeDetailsPage() {
           <InfoRow label="Company" value={emp.company_name ?? '—'} />
           <InfoRow label="Site" value={<SiteBadge name={emp.site_name} />} />
           <InfoRow
-            label="Camp"
+            label="Accommodation"
             value={emp.camp_name
-              ? <span className="inline-flex items-center gap-1 text-sm font-medium text-amber-600 dark:text-amber-400"><Tent size={13} className="inline" aria-hidden="true" />{emp.camp_name}</span>
-              : '—'}
+              ? (
+                <span className="inline-flex items-center gap-1 text-sm font-medium text-amber-600 dark:text-amber-400">
+                  <Tent size={13} className="inline" aria-hidden="true" />
+                  {emp.camp_name} — Block {emp.camp_block ?? '—'}, Room {emp.camp_room ?? '—'}
+                </span>
+              )
+              : 'No camp assigned'}
           />
           <InfoRow
             label="Team Leader"

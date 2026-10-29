@@ -185,6 +185,21 @@ export const prodApi = {
     assertOk(error);
   },
 
+  // ---- admin site assignments (attendance scoping) ---------------------------
+  async getSiteAssignments(profileId: string): Promise<string[]> {
+    const { data, error } = await sb().from('admin_site')
+      .select('site_id').eq('profile_id', profileId);
+    assertOk(error);
+    return ((data ?? []) as { site_id: string }[]).map((r) => r.site_id);
+  },
+
+  async setSiteAssignment(profileId: string, siteId: string, allowed: boolean): Promise<void> {
+    const { error } = await sb().rpc('set_admin_site', {
+      p_profile_id: profileId, p_site_id: siteId, p_allowed: allowed,
+    });
+    assertOk(error);
+  },
+
   // ---- sites -----------------------------------------------------------------
   async listSites(): Promise<SiteWithCount[]> {
     const [sitesRes, empRes] = await Promise.all([
@@ -269,9 +284,13 @@ export const prodApi = {
     assertOk(error);
   },
 
-  async assignEmployeeCamp(employeeId: string, campId: string | null): Promise<EmployeeVM> {
+  async assignEmployeeCamp(
+    employeeId: string, campId: string | null,
+    block?: string | null, room?: string | null,
+  ): Promise<EmployeeVM> {
     const { data, error } = await sb().rpc('assign_employee_camp', {
       p_employee_id: employeeId, p_camp_id: campId,
+      p_block: block ?? null, p_room: room ?? null,
     });
     assertOk(error);
     const updated = data as unknown as Record<string, unknown>;
@@ -576,7 +595,7 @@ export const prodApi = {
     const client = supabase;
     if (!client) return () => undefined;
     const tables: RealtimeTable[] = [
-      'profiles', 'menu_permission', 'site', 'camp', 'employee', 'attendance', 'notification',
+      'profiles', 'menu_permission', 'admin_site', 'site', 'camp', 'employee', 'attendance', 'notification',
       'warning', 'fine', 'leave_request', 'cancellation_request', 'uniform_registry',
     ];
     const channel = client.channel('pulse-db-changes');

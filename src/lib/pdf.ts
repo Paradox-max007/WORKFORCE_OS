@@ -89,7 +89,7 @@ export function generateEmployeeCvPdf(emp: EmployeeVM, asCv: boolean): jsPDF {
   kvRow('Phone', emp.phone);
   kvRow('Email', emp.email);
   kvRow('Emergency Contact', emp.emergency_contact);
-  kvRow('Address', emp.address);
+  kvRow('Home Country Address', emp.address);
   y += 4;
 
   sectionTitle('Employment Information');
@@ -97,6 +97,9 @@ export function generateEmployeeCvPdf(emp: EmployeeVM, asCv: boolean): jsPDF {
   kvRow('Company', emp.company_name);
   kvRow('Join Date', emp.join_date);
   kvRow('Current Site', emp.site_name ?? 'Not Assigned');
+  kvRow('Accommodation', emp.camp_name
+    ? `${emp.camp_name}${emp.camp_block ? ` — Block ${emp.camp_block}` : ''}${emp.camp_room ? `, Room ${emp.camp_room}` : ''}`
+    : 'No camp assigned');
   kvRow('Employment Status', emp.status === 'active' ? 'Active' : emp.status === 'pending_deletion' ? 'Pending Deletion' : 'Deleted');
   kvRow('Team Leader', emp.is_team_leader ? `Yes — of ${emp.leader_site_name ?? 'a site'}` : 'No');
   kvRow('Performance Rating', `${emp.rating.toFixed(1)} / 5.0`);

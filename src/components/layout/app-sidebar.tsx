@@ -7,7 +7,7 @@
 import { motion } from 'framer-motion';
 import {
   Ban, Bell, Building2, CalendarCheck, ChevronLeft, FileWarning, LayoutDashboard,
-  LogOut, Moon, Shirt, Sun, Users, UserSquare2,
+  LogOut, Moon, Shirt, Sun, Tent, Users, UserSquare2,
 } from 'lucide-react';
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
@@ -32,6 +32,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'employees', label: 'Employees', icon: Users },
   { id: 'sites', label: 'Sites', icon: Building2 },
+  { id: 'camps', label: 'Camps', icon: Tent },
   { id: 'attendance', label: 'Attendance', icon: CalendarCheck },
   { id: 'uniform_registry', label: 'Uniform Registry', icon: Shirt },
   { id: 'leave_requests', label: 'Leave Requests', icon: FileWarning },
@@ -105,6 +106,8 @@ function SidebarContent({
   const allowed = (id: AppView): boolean => {
     if (user.role === 'super_admin') return true;
     if (id === 'dashboard' || id === 'uniform_registry') return true;
+    // the dedicated employee details page belongs to the Employees module
+    if (id === 'employee_details') return perms ? perms.employees : false;
     return perms ? perms[id as keyof typeof perms] ?? false : false;
   };
 
@@ -139,8 +142,8 @@ function SidebarContent({
         )}
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-2">
+      {/* Nav — scrolls independently ONLY when the menu list outgrows the viewport */}
+      <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-2">
         {visibleItems.map((item) => {
           const active = currentView === item.id;
           const showBadge = item.id === 'notifications' && unread > 0;
@@ -288,7 +291,7 @@ export function AppSidebar() {
       initial={false}
       animate={{ width: sidebarOpen ? 264 : 76 }}
       transition={{ type: 'spring', stiffness: 300, damping: 32 }}
-      className="relative z-30 hidden shrink-0 border-r border-border/60 bg-sidebar md:block"
+      className="sticky top-0 z-30 hidden h-screen shrink-0 border-r border-border/60 bg-sidebar md:block"
     >
       <SidebarContent user={user} collapsed={!sidebarOpen} />
       <button

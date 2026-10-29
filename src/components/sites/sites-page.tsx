@@ -84,6 +84,7 @@ const toEmployeeInput = (
   id_number: e.id_number,
   id_status: e.id_status,
   current_site_id: e.current_site_id,
+  camp_id: e.camp_id,
   photo: e.photo,
   is_team_leader: e.is_team_leader,
   team_leader_site_id: e.team_leader_site_id,
@@ -165,6 +166,9 @@ const ATT_CSS = `
 .att-sheet .att-row-sup{background:#eff6ff}
 .att-sheet .att-extra-no{color:#9ca3af}
 .att-sheet .att-extra-title{margin-top:12px;margin-bottom:4px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#000}
+.att-sheet .att-totals{display:flex;gap:40px;margin-top:16px;padding-top:10px;border-top:2px solid #000}
+.att-sheet .att-totals-cell{flex:1;display:flex;align-items:flex-end;gap:6px;font-size:12px;font-weight:700;text-transform:uppercase;color:#000}
+.att-sheet .att-totals-blank{flex:1;border-bottom:1.5px solid #000;min-height:18px;font-weight:700;color:#000}
 .att-sheet .att-pageinfo{text-align:right;font-size:10px;color:#6b7280;margin-top:4px;text-transform:uppercase}
 .att-sheet .att-text{min-height:16px;color:#000;font-weight:700}
 .att-sheet .att-input{width:100%;background:transparent;border:none;outline:none;font-family:inherit;font-size:inherit;font-weight:700;text-transform:uppercase;color:#000;padding:0;min-height:16px;cursor:text}
@@ -1335,14 +1339,12 @@ function AttendanceSheetView({
   const [extras, setExtras] = useState<ExtraRow[]>(() =>
     Array.from({ length: EXTRA_ROWS }, () => ({ name: '', code: '', trade: '', signature: '' })),
   );
+  // hand-written totals (blank lines to be filled after signing)
+  const [totalPresent, setTotalPresent] = useState('');
+  const [totalAbsent, setTotalAbsent] = useState('');
 
   const sortedRows = useMemo(
-    () =>
-      [...rows].sort((a, b) => {
-        if (a.isTeamLeader !== b.isTeamLeader) return a.isTeamLeader ? -1 : 1;
-        if (a.isSupervisor !== b.isSupervisor) return a.isSupervisor ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      }),
+    () => [...rows].sort((a, b) => a.name.localeCompare(b.name)),
     [rows],
   );
 
@@ -1558,6 +1560,22 @@ function AttendanceSheetView({
                 ))}
               </tbody>
             </table>
+
+            {/* hand-written totals — AFTER the signing rows */}
+            <div className="att-totals">
+              <div className="att-totals-cell">
+                <span className="att-totals-label">TOTAL PRESENT :</span>
+                <span className="att-totals-blank">
+                  {cell(totalPresent, interactive ? (v) => setTotalPresent(v) : null, true)}
+                </span>
+              </div>
+              <div className="att-totals-cell">
+                <span className="att-totals-label">TOTAL ABSENT :</span>
+                <span className="att-totals-blank">
+                  {cell(totalAbsent, interactive ? (v) => setTotalAbsent(v) : null, true)}
+                </span>
+              </div>
+            </div>
           </>
         )}
 

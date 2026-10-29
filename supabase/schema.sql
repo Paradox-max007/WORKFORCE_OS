@@ -66,6 +66,7 @@ create table if not exists public.employee (
   id_number           text,
   id_status           text check (id_status in ('Valid','Expired','N/A')),
   current_site_id     uuid references public.site(id) on delete set null,
+  camp_id             uuid references public.camp(id) on delete set null,
   rating              numeric(2,1) not null default 5.0 check (rating >= 0 and rating <= 5),
   status              text not null default 'active' check (status in ('active','pending_deletion','deleted')),
   photo               text,                            -- base64 data-url
@@ -75,13 +76,24 @@ create table if not exists public.employee (
   updated_at          timestamptz not null default now()
 );
 
--- Daily attendance
+-- Accommodation camps (where employees stay; one employee → at most one camp)
+create table if not exists public.camp (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique,
+  location    text,
+  capacity    int check (capacity is null or capacity >= 0),
+  notes       text,
+  is_active   boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+
+-- Daily attendance (Excel-style marking: hours worked, or absent)
 create table if not exists public.attendance (
   id             uuid primary key default gen_random_uuid(),
   employee_id    uuid not null references public.employee(id) on delete cascade,
   date           date not null,
-  status         text not null default 'present' check (status in ('present','absent','no_site','overtime','not_marked')),
-  overtime_hours numeric(4,1) check (overtime_hours >= 0 and overtime_hours <= 24),
+  status         text not null default 'present' check (status in ('present','absent','not_marked')),
+  hours          numeric(4,2) check (hours is null or (hours >= 0 and hours <= 24)),
   is_hidden      boolean not null default false,
   created_at     timestamptz not null default now(),
   unique (employee_id, date)
@@ -177,8 +189,10 @@ create table if not exists public.uniform_registry (
 -- 2. INDEXES
 -- ============================================================================
 create index if not exists idx_employee_site        on public.employee(current_site_id);
+create index if not exists idx_employee_camp        on public.employee(camp_id);
 create index if not exists idx_employee_status      on public.employee(status);
 create index if not exists idx_employee_code        on public.employee(employee_code);
+create index if not exists idx_camp_active          on public.camp(is_active);
 create index if not exists idx_attendance_emp       on public.attendance(employee_id);
 create index if not exists idx_attendance_date      on public.attendance(date);
 create index if not exists idx_attendance_hidden    on public.attendance(is_hidden);
@@ -307,6 +321,7 @@ create trigger trg_profiles_touch before update on public.profiles
 alter table public.profiles            enable row level security;
 alter table public.menu_permission     enable row level security;
 alter table public.site                enable row level security;
+alter table public.camp                enable row level security;
 alter table public.employee            enable row level security;
 alter table public.attendance          enable row level security;
 alter table public.notification        enable row level security;
@@ -338,6 +353,8 @@ create policy notification_update on public.notification
 -- restrictions are enforced in the UI + RPC write guards below)
 drop policy if exists site_select on public.site;
 create policy site_select on public.site for select using (public.is_staff());
+drop policy if exists camp_select on public.camp;
+create policy camp_select on public.camp for select using (public.is_staff());
 drop policy if exists employee_select on public.employee;
 create policy employee_select on public.employee for select using (public.is_staff());
 drop policy if exists attendance_select on public.attendance;
@@ -491,6 +508,83 @@ begin
 end; $$;
 
 -- ============================================================================
+-- 7b. CAMP RPCs (accommodation management)
+-- ============================================================================
+
+create or replace function public.create_camp(
+  p_name text, p_location text default null, p_capacity int default null, p_notes text default null
+)
+returns public.camp language plpgsql
+security definer set search_path = public
+as $$
+declare result public.camp;
+begin
+  if not public.has_menu_permission('camps') then raise exception 'Access denied'; end if;
+  if exists (select 1 from public.camp where lower(name) = lower(p_name)) then
+    raise exception 'A camp with this name already exists';
+  end if;
+  if p_capacity is not null and p_capacity < 0 then raise exception 'Capacity cannot be negative'; end if;
+  insert into public.camp (name, location, capacity, notes)
+  values (p_name, nullif(p_location,''), p_capacity, nullif(p_notes,''))
+  returning * into result;
+  return result;
+end; $$;
+
+-- Update a camp. Deactivating keeps assignments (unlike sites) — camps are
+-- living quarters; an inactive camp just stops accepting new assignments.
+create or replace function public.update_camp(
+  p_id uuid, p_name text, p_location text, p_capacity int, p_notes text, p_is_active boolean
+)
+returns public.camp language plpgsql
+security definer set search_path = public
+as $$
+declare result public.camp;
+begin
+  if not public.has_menu_permission('camps') then raise exception 'Access denied'; end if;
+  if exists (select 1 from public.camp where lower(name) = lower(p_name) and id <> p_id) then
+    raise exception 'A camp with this name already exists';
+  end if;
+  if p_capacity is not null and p_capacity < 0 then raise exception 'Capacity cannot be negative'; end if;
+  update public.camp set
+    name = p_name, location = nullif(p_location,''), capacity = p_capacity,
+    notes = nullif(p_notes,''), is_active = p_is_active
+  where id = p_id returning * into result;
+  if result.id is null then raise exception 'Camp not found'; end if;
+  return result;
+end; $$;
+
+-- Delete a camp (employees fall back to "no camp"; they are never deleted)
+create or replace function public.delete_camp(p_id uuid)
+returns void language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if not public.has_menu_permission('camps') then raise exception 'Access denied'; end if;
+  update public.employee set camp_id = null where camp_id = p_id;
+  delete from public.camp where id = p_id;
+end; $$;
+
+-- Move an employee to a camp (one employee → exactly one camp; p_camp_id null unassigns)
+create or replace function public.assign_employee_camp(p_employee_id uuid, p_camp_id uuid default null)
+returns public.employee language plpgsql
+security definer set search_path = public
+as $$
+declare result public.employee;
+begin
+  if not public.has_menu_permission('camps') and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
+  if p_camp_id is not null and not exists (select 1 from public.camp where id = p_camp_id and is_active) then
+    raise exception 'The selected camp does not exist or is inactive';
+  end if;
+  update public.employee set camp_id = p_camp_id, updated_at = now()
+  where id = p_employee_id and status <> 'deleted'
+  returning * into result;
+  if result.id is null then raise exception 'Employee not found'; end if;
+  return result;
+end; $$;
+
+-- ============================================================================
 -- 8. EMPLOYEE RPCs
 -- ============================================================================
 
@@ -511,6 +605,7 @@ security definer set search_path = public
 as $$
 declare result public.employee;
 declare v_site uuid := nullif(p_employee->>'current_site_id','');
+declare v_camp uuid := nullif(p_employee->>'camp_id','');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
 declare conflicting public.employee;
@@ -520,6 +615,10 @@ begin
   -- site must exist and be active
   if v_site is not null and not exists (select 1 from public.site where id = v_site and is_active) then
     raise exception 'The selected site does not exist or is inactive';
+  end if;
+  -- camp must exist and be active
+  if v_camp is not null and not exists (select 1 from public.camp where id = v_camp and is_active) then
+    raise exception 'The selected camp does not exist or is inactive';
   end if;
 
   -- one team leader per site
@@ -534,7 +633,7 @@ begin
   insert into public.employee (
     full_name, employee_code, nationality, date_of_birth, phone, email, address,
     emergency_contact, position, join_date, company_name, passport_number, passport_status,
-    id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id
+    id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id, camp_id
   ) values (
     p_employee->>'full_name', public.next_employee_code(),
     nullif(p_employee->>'nationality',''), (p_employee->>'date_of_birth')::date,
@@ -543,7 +642,7 @@ begin
     (p_employee->>'join_date')::date, nullif(p_employee->>'company_name',''),
     nullif(p_employee->>'passport_number',''), nullif(p_employee->>'passport_status',''),
     nullif(p_employee->>'id_number',''), nullif(p_employee->>'id_status',''),
-    v_site, 5.0, 'active', nullif(p_employee->>'photo',''), v_is_leader, v_leader_site
+    v_site, 5.0, 'active', nullif(p_employee->>'photo',''), v_is_leader, v_leader_site, v_camp
   ) returning * into result;
   return result;
 end; $$;
@@ -554,6 +653,7 @@ security definer set search_path = public
 as $$
 declare result public.employee;
 declare v_site uuid := nullif(p_employee->>'current_site_id','');
+declare v_camp uuid := nullif(p_employee->>'camp_id','');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
 declare conflicting public.employee;
@@ -562,6 +662,9 @@ begin
 
   if v_site is not null and not exists (select 1 from public.site where id = v_site and is_active) then
     raise exception 'The selected site does not exist or is inactive';
+  end if;
+  if v_camp is not null and not exists (select 1 from public.camp where id = v_camp and is_active) then
+    raise exception 'The selected camp does not exist or is inactive';
   end if;
 
   if v_is_leader and v_leader_site is not null then
@@ -589,6 +692,7 @@ begin
     id_number         = nullif(p_employee->>'id_number',''),
     id_status         = nullif(p_employee->>'id_status',''),
     current_site_id   = v_site,
+    camp_id           = v_camp,
     photo             = nullif(p_employee->>'photo',''),
     is_team_leader    = v_is_leader,
     team_leader_site_id = case when v_is_leader then v_leader_site else null end,
@@ -718,9 +822,11 @@ begin
     last_day := m_end;
   end if;
 
-  -- auto-create missing records: present for site employees, no_site for idle
-  insert into public.attendance (employee_id, date, status)
-  select e.id, d::date, case when e.current_site_id is null then 'no_site' else 'present' end
+  -- auto-create missing records: 8h present for site employees, unmarked for idle
+  insert into public.attendance (employee_id, date, status, hours)
+  select e.id, d::date,
+         case when e.current_site_id is null then 'not_marked' else 'present' end,
+         case when e.current_site_id is null then null else 8 end
   from public.employee e
   cross join generate_series(m_start, last_day, interval '1 day') d
   where e.status <> 'deleted'
@@ -738,9 +844,10 @@ begin
     order by a.date;
 end; $$;
 
--- Mark one day (upsert) with rating engine + auto-warning on 3 consecutive absences
+-- Mark one day Excel-style (upsert) with rating engine + auto-warning on 3 consecutive absences.
+--   p_value: 'A' (absent) | numeric hours text e.g. '8', '10.5' (present) | '' / null (clear cell)
 create or replace function public.mark_attendance(
-  p_employee_id uuid, p_date date, p_status text, p_overtime_hours numeric default null
+  p_employee_id uuid, p_date date, p_value text default null
 )
 returns public.attendance language plpgsql
 security definer set search_path = public
@@ -748,38 +855,57 @@ as $$
 declare
   result public.attendance;
   prev public.attendance;
+  v_hours numeric := null;
+  v_status text;
   ot_delta numeric := 0;
   walk date;
   absent_dates date[] := array[p_date];
 begin
-  if p_status not in ('present','absent','no_site','overtime','not_marked') then
-    raise exception 'Invalid attendance status';
-  end if;
   if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
     raise exception 'Access denied';
+  end if;
+
+  -- parse the cell value
+  if p_value is null or btrim(p_value) = '' then
+    -- cleared cell: remove the record entirely
+    delete from public.attendance where employee_id = p_employee_id and date = p_date;
+    return prev;
+  elsif lower(btrim(p_value)) in ('a', 'absent') then
+    v_status := 'absent';
+  else
+    begin
+      v_hours := btrim(p_value)::numeric;
+    exception when others then
+      raise exception 'Invalid value %. Enter hours (e.g. 8, 10.5) or A for absent', p_value;
+    end;
+    if v_hours < 0 or v_hours > 24 then
+      raise exception 'Hours must be between 0 and 24';
+    end if;
+    v_status := 'present';
   end if;
 
   select * into prev from public.attendance
     where employee_id = p_employee_id and date = p_date;
   if prev.id is not null then
-    ot_delta := coalesce(p_overtime_hours, 0) - coalesce(prev.overtime_hours, 0);
+    ot_delta := greatest(0, coalesce(v_hours,0) - 8) - greatest(0, coalesce(prev.hours,0) - 8);
+  else
+    ot_delta := greatest(0, coalesce(v_hours,0) - 8);
   end if;
 
-  insert into public.attendance (employee_id, date, status, overtime_hours)
-  values (p_employee_id, p_date, p_status,
-          case when p_status = 'overtime' then p_overtime_hours else null end)
+  insert into public.attendance (employee_id, date, status, hours)
+  values (p_employee_id, p_date, v_status, case when v_status = 'present' then v_hours else null end)
   on conflict (employee_id, date) do update set
     status = excluded.status,
-    overtime_hours = case when excluded.status = 'overtime' then excluded.overtime_hours else null end
+    hours = excluded.hours
   returning * into result;
 
-  -- rating: +/- 0.2 stars per overtime hour delta
+  -- rating: +/- 0.2 stars per overtime-hour delta (hours above 8/day)
   if ot_delta <> 0 then
     update public.employee set rating = public.clamp_rating(rating + 0.2 * ot_delta) where id = p_employee_id;
   end if;
 
   -- auto-warning: 3 consecutive absences (walking back, skipping Fridays)
-  if p_status = 'absent' then
+  if v_status = 'absent' then
     walk := p_date - 1;
     while walk >= p_date - 7 loop
       if extract(isodow from walk) = 5 then walk := walk - 1; continue; end if;
@@ -810,7 +936,7 @@ begin
 end; $$;
 
 -- Full rating recompute from a month's attendance:
--- (present + overtime days / working days excluding Fridays) * 5
+-- (worked days / working days excluding Fridays) * 5
 create or replace function public.recalc_employee_rating(p_employee_id uuid, p_month text)
 returns numeric language plpgsql
 security definer set search_path = public
@@ -822,7 +948,7 @@ declare
 begin
   select count(*) into worked from public.attendance
     where employee_id = p_employee_id and to_char(date,'YYYY-MM') = p_month
-      and status in ('present','overtime') and not is_hidden;
+      and status = 'present' and not is_hidden;
   select count(*) into workdays from generate_series(
     to_date(p_month || '-01','YYYY-MM-DD'),
     least(current_date, (to_date(p_month || '-01','YYYY-MM-DD') + interval '1 month - 1 day')::date),
@@ -1072,6 +1198,7 @@ begin
   alter publication supabase_realtime add table public.profiles;
   alter publication supabase_realtime add table public.menu_permission;
   alter publication supabase_realtime add table public.site;
+  alter publication supabase_realtime add table public.camp;
   alter publication supabase_realtime add table public.employee;
   alter publication supabase_realtime add table public.attendance;
   alter publication supabase_realtime add table public.notification;

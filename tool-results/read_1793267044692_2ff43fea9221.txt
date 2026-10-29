@@ -1,0 +1,1700 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Sites module (site list, per-site crews, attendance
+     5→// sheets). Ported from the legacy app with the PULSE premium design language.
+     6→// ============================================================================
+     7→//
+     8→// Layout of this file:
+     9→//   1. helpers / constants
+    10→//   2. SitesPage            — main view switcher (list ⇆ site employees)
+    11→//   3. SiteCard             — one site card in the grid
+    12→//   4. SiteFormDialog       — create / edit site dialog
+    13→//   5. SiteEmployeesView    — per-site crew management sub-view
+    14→//   6. AttendanceSheetView  — full-screen A4 attendance sheet (print / PDF)
+    15→// ============================================================================
+    16→
+    17→import { AnimatePresence, motion } from 'framer-motion';
+    18→import {
+    19→  ArrowLeft, Building2, Crown, Download, Eye, FileSpreadsheet, Loader2, Pencil,
+    20→  Plus, Power, PowerOff, Printer, Search, Trash2, TriangleAlert, UserMinus,
+    21→  Users, X,
+    22→} from 'lucide-react';
+    23→import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+    24→import { toast } from 'sonner';
+    25→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    26→import {
+    27→  EmptyState, EmployeeStatusBadge, PageHeader, RatingStars, SectionTitle,
+    28→} from '@/components/shared/primitives';
+    29→import {
+    30→  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+    31→  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    32→} from '@/components/ui/alert-dialog';
+    33→import { Badge } from '@/components/ui/badge';
+    34→import { Button } from '@/components/ui/button';
+    35→import { Checkbox } from '@/components/ui/checkbox';
+    36→import {
+    37→  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+    38→} from '@/components/ui/dialog';
+    39→import { Input } from '@/components/ui/input';
+    40→import { Label } from '@/components/ui/label';
+    41→import { Skeleton } from '@/components/ui/skeleton';
+    42→import {
+    43→  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+    44→} from '@/components/ui/table';
+    45→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    46→import { dataApi } from '@/lib/data';
+    47→import { fmtDate, initials } from '@/lib/format';
+    48→import { exportElementToPdf, printElement } from '@/lib/pdf';
+    49→import { cn } from '@/lib/utils';
+    50→import type { EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+    51→import { useAuthStore } from '@/store/auth-store';
+    52→import { useRealtimeVersion } from '@/store/realtime';
+    53→
+    54→// ---------------------------------------------------------------------------
+    55→// Helpers & constants
+    56→// ---------------------------------------------------------------------------
+    57→
+    58→type SubView = 'list' | 'employees';
+    59→type SiteTab = 'active' | 'inactive';
+    60→
+    61→const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+    62→
+    63→/**
+    64→ * updateEmployee() requires the FULL EmployeeInput — build one from an existing
+    65→ * EmployeeVM (every field passed through) and override only the site/leader
+    66→ * fields the caller needs (mirrors how employee-page.tsx builds its payloads).
+    67→ */
+    68→const toEmployeeInput = (
+    69→  e: EmployeeVM,
+    70→  overrides: Partial<Pick<EmployeeInput, 'current_site_id' | 'is_team_leader' | 'team_leader_site_id'>> = {},
+    71→): EmployeeInput => ({
+    72→  full_name: e.full_name,
+    73→  nationality: e.nationality,
+    74→  date_of_birth: e.date_of_birth,
+    75→  phone: e.phone,
+    76→  email: e.email,
+    77→  address: e.address,
+    78→  emergency_contact: e.emergency_contact,
+    79→  position: e.position,
+    80→  join_date: e.join_date,
+    81→  company_name: e.company_name,
+    82→  passport_number: e.passport_number,
+    83→  passport_status: e.passport_status,
+    84→  id_number: e.id_number,
+    85→  id_status: e.id_status,
+    86→  current_site_id: e.current_site_id,
+    87→  camp_id: e.camp_id,
+    88→  photo: e.photo,
+    89→  is_team_leader: e.is_team_leader,
+    90→  team_leader_site_id: e.team_leader_site_id,
+    91→  ...overrides,
+    92→});
+    93→
+    94→const upper = (v: string): string => v.toUpperCase();
+    95→
+    96→const formatDateDisplay = (d: Date): string =>
+    97→  `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+    98→
+    99→// ---------------------------------------------------------------------------
+   100→// Attendance sheet constants (A4 at 96dpi = 794 × 1123 css px)
+   101→// ---------------------------------------------------------------------------
+   102→const ROWS_PER_PAGE = 24;
+   103→const FIRST_PAGE_ROWS = 18; // first page carries the big header block
+   104→const EXTRA_ROWS = 5;
+   105→
+   106→interface SheetRow {
+   107→  id: string;
+   108→  name: string;
+   109→  code: string;
+   110→  position: string;
+   111→  signature: string;
+   112→  isTeamLeader: boolean;
+   113→  isSupervisor: boolean;
+   114→}
+   115→
+   116→interface ExtraRow {
+   117→  name: string;
+   118→  code: string;
+   119→  trade: string;
+   120→  signature: string;
+   121→}
+   122→
+   123→const stripTradeSuffix = (v: string): string => v.replace(/\s*\/\s*(TL|SUPERVISOR)$/i, '');
+   124→
+   125→const displayTrade = (r: Pick<SheetRow, 'position' | 'isTeamLeader' | 'isSupervisor'>): string => {
+   126→  const pos = r.position.trim();
+   127→  if (r.isTeamLeader) return pos ? `${pos} / TL` : 'TL';
+   128→  if (r.isSupervisor) return pos ? `${pos} / SUPERVISOR` : 'SUPERVISOR';
+   129→  return pos;
+   130→};
+   131→
+   132→/**
+   133→ * Styles for the attendance sheet. This <style> tag lives INSIDE the printable
+   134→ * container, so it travels with `el.outerHTML` when `printElement()` copies the
+   135→ * sheet into its iframe, and it also styles the live preview + the off-screen
+   136→ * PDF copy. Everything is scoped under `.att-sheet` so it never leaks into the
+   137→ * rest of the app. Row paddings are tuned so a full page (24 rows + the extra
+   138→ * table) always fits within the fixed 1123px page height.
+   139→ */
+   140→const ATT_CSS = `
+   141→.att-sheet,.att-sheet *{-webkit-print-color-adjust:exact;print-color-adjust:exact;box-sizing:border-box}
+   142→.att-sheet{font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff}
+   143→.att-sheet .att-page{position:relative;width:794px;height:1123px;padding:38px;background:#fff;color:#000;overflow:hidden}
+   144→.att-sheet .att-band{display:flex;align-items:center;justify-content:space-between;border:1px solid #000;background:#E8E8E8;padding:8px 12px;margin-bottom:10px;min-height:52px}
+   145→.att-sheet .att-band-compact{display:block;padding:6px 12px;text-align:center}
+   146→.att-sheet .att-company{font-size:16px;font-weight:700;text-align:center;text-transform:uppercase;letter-spacing:.08em;color:#000}
+   147→.att-sheet .att-company-sm{font-size:14px}
+   148→.att-sheet .att-subband{background:#bbbcbd;color:#000;text-align:center;padding:5px;font-size:13px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;margin-top:6px}
+   149→.att-sheet .att-band-compact .att-subband{margin-top:4px;padding:4px}
+   150→.att-sheet .att-compact-line{display:flex;justify-content:space-between;font-size:12px;margin:8px 4px 10px;text-transform:uppercase;color:#374151}
+   151→.att-sheet .att-info{font-family:'Times New Roman',Times,serif;font-size:12px;text-transform:uppercase;margin:10px 4px 12px;line-height:1.9}
+   152→.att-sheet .att-info-row{display:flex;align-items:baseline;margin-bottom:3px}
+   153→.att-sheet .att-info-label{font-weight:700;width:130px;flex-shrink:0;color:#000}
+   154→.att-sheet .att-info-value{flex:1;border-bottom:1px solid #555;padding:0 4px;min-height:16px;font-weight:700;color:#000}
+   155→.att-sheet .att-table{width:100%;border-collapse:collapse;font-size:13px;text-transform:uppercase;table-layout:fixed}
+   156→.att-sheet .att-table th{background:#bbbcbd;color:#000;border:1px solid #000;padding:6px;font-weight:700;text-align:center;font-size:14px;line-height:1.2}
+   157→.att-sheet .att-table td{border:1px solid #000;padding:6px;font-weight:700;vertical-align:middle;color:#000;line-height:1.2}
+   158→.att-sheet .att-c-sl{width:40px}
+   159→.att-sheet .att-c-code{width:99px}
+   160→.att-sheet .att-c-trade{width:159px}
+   161→.att-sheet .att-c-sign{width:140px}
+   162→.att-sheet .att-ta-center{text-align:center}
+   163→.att-sheet .att-ta-left{text-align:left}
+   164→.att-sheet .att-row-even{background:#f3f4f6}
+   165→.att-sheet .att-row-tl{background:#fffbeb}
+   166→.att-sheet .att-row-sup{background:#eff6ff}
+   167→.att-sheet .att-extra-no{color:#9ca3af}
+   168→.att-sheet .att-extra-title{margin-top:12px;margin-bottom:4px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#000}
+   169→.att-sheet .att-totals{display:flex;gap:40px;margin-top:16px;padding-top:10px;border-top:2px solid #000}
+   170→.att-sheet .att-totals-cell{flex:1;display:flex;align-items:flex-end;gap:6px;font-size:12px;font-weight:700;text-transform:uppercase;color:#000}
+   171→.att-sheet .att-totals-blank{flex:1;border-bottom:1.5px solid #000;min-height:18px;font-weight:700;color:#000}
+   172→.att-sheet .att-pageinfo{text-align:right;font-size:10px;color:#6b7280;margin-top:4px;text-transform:uppercase}
+   173→.att-sheet .att-text{min-height:16px;color:#000;font-weight:700}
+   174→.att-sheet .att-input{width:100%;background:transparent;border:none;outline:none;font-family:inherit;font-size:inherit;font-weight:700;text-transform:uppercase;color:#000;padding:0;min-height:16px;cursor:text}
+   175→.att-sheet .att-pdfwrap{width:800px;height:1148px;display:flex;align-items:center;justify-content:center;background:#fff}
+   176→.att-print-root .att-page{height:1122px;page-break-after:always;page-break-inside:avoid}
+   177→.att-print-root .att-page:last-child{page-break-after:auto}
+   178→@page{size:A4;margin:0}
+   179→`;
+   180→
+   181→/** Inline SVG logo (html2canvas-safe and survives printElement's outerHTML copy). */
+   182→function AttLogo() {
+   183→  return (
+   184→    <svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="PULSE logo">
+   185→      <defs>
+   186→        <linearGradient id="att-logo-g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+   187→          <stop stopColor="#8b5cf6" />
+   188→          <stop offset="1" stopColor="#d946ef" />
+   189→        </linearGradient>
+   190→      </defs>
+   191→      <rect width="64" height="64" rx="16" fill="url(#att-logo-g)" />
+   192→      <path d="M10 34h9l6-16 10 30 7-14h12" stroke="white" strokeWidth="4.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+   193→    </svg>
+   194→  );
+   195→}
+   196→
+   197→// ---------------------------------------------------------------------------
+   198→// Main page
+   199→// ---------------------------------------------------------------------------
+   200→export function SitesPage() {
+   201→  const user = useAuthStore((s) => s.user);
+   202→  const isSuperAdmin = user?.role === 'super_admin';
+   203→  const version = useRealtimeVersion(['site', 'employee']);
+   204→
+   205→  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+   206→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+   207→
+   208→  const [subView, setSubView] = useState<SubView>('list');
+   209→  const [viewSiteId, setViewSiteId] = useState<string | null>(null);
+   210→  const [tab, setTab] = useState<SiteTab>('active');
+   211→  const [search, setSearch] = useState('');
+   212→  const [debouncedSearch, setDebouncedSearch] = useState('');
+   213→  const [togglingId, setTogglingId] = useState<string | null>(null);
+   214→
+   215→  // dialogs
+   216→  const [formOpen, setFormOpen] = useState(false);
+   217→  const [editTarget, setEditTarget] = useState<SiteWithCount | null>(null);
+   218→  const [deleteTarget, setDeleteTarget] = useState<SiteWithCount | null>(null);
+   219→  const [deactivateTarget, setDeactivateTarget] = useState<SiteWithCount | null>(null);
+   220→  const [dialogBusy, setDialogBusy] = useState(false);
+   221→
+   222→  // attendance sheet overlay
+   223→  const [attendanceSiteId, setAttendanceSiteId] = useState<string | null>(null);
+   224→
+   225→  // ---- data loading (re-fetches whenever sites or employees change) --------
+   226→  useEffect(() => {
+   227→    let cancelled = false;
+   228→    (async () => {
+   229→      try {
+   230→        const [s, e] = await Promise.all([dataApi.listSites(), dataApi.listEmployees()]);
+   231→        if (!cancelled) {
+   232→          setSites(s);
+   233→          setEmployees(e);
+   234→        }
+   235→      } catch {
+   236→        if (!cancelled) {
+   237→          setSites([]);
+   238→          setEmployees([]);
+   239→        }
+   240→      }
+   241→    })();
+   242→    return () => {
+   243→      cancelled = true;
+   244→    };
+   245→  }, [version]);
+   246→
+   247→  // ---- search debounce (300ms) ---------------------------------------------
+   248→  useEffect(() => {
+   249→    const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 300);
+   250→    return () => clearTimeout(t);
+   251→  }, [search]);
+   252→
+   253→  // ---- derived values --------------------------------------------------------
+   254→  const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
+   255→  const inactiveSites = useMemo(() => (sites ?? []).filter((s) => !s.is_active), [sites]);
+   256→  const loading = sites === null;
+   257→
+   258→  const viewSite = useMemo(
+   259→    () => (sites ?? []).find((s) => s.id === viewSiteId) ?? null,
+   260→    [sites, viewSiteId],
+   261→  );
+   262→  const attendanceSite = useMemo(
+   263→    () => (sites ?? []).find((s) => s.id === attendanceSiteId) ?? null,
+   264→    [sites, attendanceSiteId],
+   265→  );
+   266→  const showEmployeesView = subView === 'employees' && !!viewSite;
+   267→
+   268→  const matchesSearch = (s: SiteWithCount): boolean => {
+   269→    if (!debouncedSearch) return true;
+   270→    const hay = `${s.name} ${s.client_name ?? ''} ${s.project_name ?? ''}`.toLowerCase();
+   271→    return hay.includes(debouncedSearch);
+   272→  };
+   273→
+   274→  // ---- actions ---------------------------------------------------------------
+   275→
+   276→  const openCreate = () => {
+   277→    setEditTarget(null);
+   278→    setFormOpen(true);
+   279→  };
+   280→  const openEdit = (site: SiteWithCount) => {
+   281→    setEditTarget(site);
+   282→    setFormOpen(true);
+   283→  };
+   284→
+   285→  const openEmployees = (site: SiteWithCount) => {
+   286→    setViewSiteId(site.id);
+   287→    setSubView('employees');
+   288→  };
+   289→  const backToList = () => {
+   290→    setSubView('list');
+   291→    setViewSiteId(null);
+   292→  };
+   293→
+   294→  /** Activate directly; deactivating first asks for confirmation. */
+   295→  const handleToggleActive = async (site: SiteWithCount) => {
+   296→    if (site.is_active) {
+   297→      setDeactivateTarget(site);
+   298→      return;
+   299→    }
+   300→    setTogglingId(site.id);
+   301→    try {
+   302→      await dataApi.updateSite(site.id, {
+   303→        name: site.name,
+   304→        client_name: site.client_name,
+   305→        project_name: site.project_name,
+   306→        is_active: true,
+   307→      });
+   308→      toast.success('Site activated', {
+   309→        description: `"${site.name}" is active again — employees can be assigned to it.`,
+   310→      });
+   311→    } catch (err) {
+   312→      toast.error(err instanceof Error ? err.message : 'Failed to activate the site');
+   313→    } finally {
+   314→      setTogglingId(null);
+   315→    }
+   316→  };
+   317→
+   318→  const handleConfirmDeactivate = async () => {
+   319→    if (!deactivateTarget) return;
+   320→    setDialogBusy(true);
+   321→    try {
+   322→      const { unassignedCount } = await dataApi.updateSite(deactivateTarget.id, {
+   323→        name: deactivateTarget.name,
+   324→        client_name: deactivateTarget.client_name,
+   325→        project_name: deactivateTarget.project_name,
+   326→        is_active: false,
+   327→      });
+   328→      toast.success('Site deactivated', {
+   329→        description: `"${deactivateTarget.name}" was moved to the Inactive tab.${
+   330→          unassignedCount > 0
+   331→            ? ` ${unassignedCount} employee(s) were set to idle/unassigned and team leader status was cleared.`
+   332→            : ''
+   333→        }`,
+   334→      });
+   335→      setDeactivateTarget(null);
+   336→    } catch (err) {
+   337→      toast.error(err instanceof Error ? err.message : 'Failed to deactivate the site');
+   338→    } finally {
+   339→      setDialogBusy(false);
+   340→    }
+   341→  };
+   342→
+   343→  const handleConfirmDelete = async () => {
+   344→    if (!deleteTarget) return;
+   345→    setDialogBusy(true);
+   346→    try {
+   347→      await dataApi.deleteSite(deleteTarget.id);
+   348→      toast.success('Site deleted', {
+   349→        description: `"${deleteTarget.name}" was removed. Assigned employees were unassigned — not deleted.`,
+   350→      });
+   351→      setDeleteTarget(null);
+   352→    } catch (err) {
+   353→      toast.error(err instanceof Error ? err.message : 'Failed to delete the site');
+   354→    } finally {
+   355→      setDialogBusy(false);
+   356→    }
+   357→  };
+   358→
+   359→  // ---- grid renderer (shared by both tabs) ----------------------------------
+   360→  const renderGrid = (list: SiteWithCount[], tabValue: SiteTab) => {
+   361→    if (loading) {
+   362→      return (
+   363→        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+   364→          {Array.from({ length: 6 }).map((_, i) => (
+   365→            <Skeleton key={i} className="h-52 rounded-xl" />
+   366→          ))}
+   367→        </div>
+   368→      );
+   369→    }
+   370→    const filtered = list.filter(matchesSearch);
+   371→    if (filtered.length === 0) {
+   372→      const searching = debouncedSearch.length > 0;
+   373→      return (
+   374→        <EmptyState
+   375→          icon={<Building2 size={22} />}
+   376→          title={
+   377→            searching
+   378→              ? 'No matching sites'
+   379→              : tabValue === 'active'
+   380→                ? 'No active sites'
+   381→                : 'No inactive sites'
+   382→          }
+   383→          description={
+   384→            searching
+   385→              ? 'Try a different search term — search covers site, client and project names.'
+   386→              : tabValue === 'active'
+   387→                ? 'Create your first work site to start assigning crews and tracking attendance.'
+   388→                : 'Sites you deactivate will be moved here and can be reactivated at any time.'
+   389→          }
+   390→          action={
+   391→            !searching && tabValue === 'active' ? (
+   392→              <Button onClick={openCreate} className="brand-gradient font-semibold text-white">
+   393→                <Plus size={16} /> New Site
+   394→              </Button>
+   395→            ) : undefined
+   396→          }
+   397→        />
+   398→      );
+   399→    }
+   400→    return (
+   401→      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+   402→        {filtered.map((site, i) => (
+   403→          <SiteCard
+   404→            key={site.id}
+   405→            site={site}
+   406→            index={i}
+   407→            canDelete={isSuperAdmin}
+   408→            busy={togglingId === site.id}
+   409→            onToggle={handleToggleActive}
+   410→            onEdit={openEdit}
+   411→            onDelete={setDeleteTarget}
+   412→            onViewEmployees={openEmployees}
+   413→            onAttendance={(s) => setAttendanceSiteId(s.id)}
+   414→          />
+   415→        ))}
+   416→      </div>
+   417→    );
+   418→  };
+   419→
+   420→  // ---- render ----------------------------------------------------------------
+   421→  return (
+   422→    <div className="mx-auto max-w-7xl">
+   423→      <AnimatePresence mode="wait">
+   424→        {showEmployeesView && viewSite ? (
+   425→          <motion.div
+   426→            key="site-employees"
+   427→            initial={{ opacity: 0, x: 32 }}
+   428→            animate={{ opacity: 1, x: 0 }}
+   429→            exit={{ opacity: 0, x: 32 }}
+   430→            transition={{ duration: 0.3, ease: EASE }}
+   431→          >
+   432→            <SiteEmployeesView site={viewSite} employees={employees ?? []} onBack={backToList} />
+   433→          </motion.div>
+   434→        ) : (
+   435→          <motion.div
+   436→            key="site-list"
+   437→            initial={{ opacity: 0, y: 16 }}
+   438→            animate={{ opacity: 1, y: 0 }}
+   439→            exit={{ opacity: 0, y: -16 }}
+   440→            transition={{ duration: 0.3, ease: EASE }}
+   441→          >
+   442→            <div className="space-y-6">
+   443→              <PageHeader
+   444→                title="Sites"
+   445→                description="Manage work sites and the crews assigned to each location."
+   446→                actions={
+   447→                  <Button
+   448→                    onClick={openCreate}
+   449→                    className="h-10 brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   450→                  >
+   451→                    <Plus size={16} /> New Site
+   452→                  </Button>
+   453→                }
+   454→              />
+   455→
+   456→              <Tabs value={tab} onValueChange={(v) => setTab(v as SiteTab)}>
+   457→                <div className="card-glow rounded-xl border bg-card">
+   458→                  {/* Tabs + shared search */}
+   459→                  <div className="flex flex-col gap-3 border-b p-4 lg:flex-row lg:items-center lg:justify-between">
+   460→                    <TabsList className="h-11 w-full gap-1 sm:w-auto">
+   461→                      <TabsTrigger value="active" className="h-9 gap-2 px-4">
+   462→                        <Power size={15} className="text-emerald-500" />
+   463→                        Active
+   464→                        <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500">
+   465→                          {activeSites.length}
+   466→                        </span>
+   467→                      </TabsTrigger>
+   468→                      <TabsTrigger value="inactive" className="h-9 gap-2 px-4">
+   469→                        <PowerOff size={15} className="text-zinc-400" />
+   470→                        Inactive
+   471→                        <span className="rounded-full bg-zinc-500/15 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-zinc-400">
+   472→                          {inactiveSites.length}
+   473→                        </span>
+   474→                      </TabsTrigger>
+   475→                    </TabsList>
+   476→                    <div className="relative w-full lg:max-w-xs">
+   477→                      <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   478→                      <Input
+   479→                        value={search}
+   480→                        onChange={(e) => setSearch(e.target.value)}
+   481→                        placeholder="Search by site, client or project…"
+   482→                        aria-label="Search sites"
+   483→                        className="h-10 pl-9 pr-9"
+   484→                      />
+   485→                      {search && (
+   486→                        <button
+   487→                          type="button"
+   488→                          onClick={() => setSearch('')}
+   489→                          aria-label="Clear search"
+   490→                          className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+   491→                        >
+   492→                          <X size={14} />
+   493→                        </button>
+   494→                      )}
+   495→                    </div>
+   496→                  </div>
+   497→
+   498→                  <TabsContent value="active" className="mt-0 p-4">
+   499→                    {renderGrid(activeSites, 'active')}
+   500→                  </TabsContent>
+   501→                  <TabsContent value="inactive" className="mt-0 p-4">
+   502→                    {renderGrid(inactiveSites, 'inactive')}
+   503→                  </TabsContent>
+   504→                </div>
+   505→              </Tabs>
+   506→            </div>
+   507→          </motion.div>
+   508→        )}
+   509→      </AnimatePresence>
+   510→
+   511→      {/* ---- Create / Edit site dialog ---- */}
+   512→      <SiteFormDialog open={formOpen} onOpenChange={setFormOpen} editing={editTarget} />
+   513→
+   514→      {/* ---- Deactivate confirmation ---- */}
+   515→      <AlertDialog
+   516→        open={!!deactivateTarget}
+   517→        onOpenChange={(o) => {
+   518→          if (!o) setDeactivateTarget(null);
+   519→        }}
+   520→      >
+   521→        <AlertDialogContent>
+   522→          <AlertDialogHeader>
+   523→            <AlertDialogTitle className="flex items-center gap-2">
+   524→              <TriangleAlert className="size-5 text-amber-500" /> Deactivate Site
+   525→            </AlertDialogTitle>
+   526→            <AlertDialogDescription>
+   527→              Are you sure you want to deactivate{' '}
+   528→              <span className="font-medium text-foreground">{deactivateTarget?.name}</span>?
+   529→            </AlertDialogDescription>
+   530→          </AlertDialogHeader>
+   531→          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3">
+   532→            <p className="text-sm font-medium text-amber-600 dark:text-amber-400">This will affect employees:</p>
+   533→            <ul className="mt-2 list-inside list-disc space-y-1 text-xs text-muted-foreground">
+   534→              <li>
+   535→                All{' '}
+   536→                <span className="font-semibold text-foreground">
+   537→                  {deactivateTarget?.employee_count ?? 0}
+   538→                </span>{' '}
+   539→                employee(s) assigned to this site will be set to{' '}
+   540→                <span className="font-medium text-amber-600 dark:text-amber-400">idle/unassigned</span>
+   541→              </li>
+   542→              <li>Team leader status for this site will be cleared</li>
+   543→              <li>The site will be moved to the Inactive tab</li>
+   544→            </ul>
+   545→          </div>
+   546→          <AlertDialogFooter>
+   547→            <AlertDialogCancel disabled={dialogBusy}>Cancel</AlertDialogCancel>
+   548→            <Button
+   549→              onClick={handleConfirmDeactivate}
+   550→              disabled={dialogBusy}
+   551→              className="bg-amber-600 font-semibold text-white hover:bg-amber-600/90"
+   552→            >
+   553→              {dialogBusy ? <Loader2 size={16} className="animate-spin" /> : <PowerOff size={16} />}
+   554→              Deactivate Site
+   555→            </Button>
+   556→          </AlertDialogFooter>
+   557→        </AlertDialogContent>
+   558→      </AlertDialog>
+   559→
+   560→      {/* ---- Delete confirmation ---- */}
+   561→      <AlertDialog
+   562→        open={!!deleteTarget}
+   563→        onOpenChange={(o) => {
+   564→          if (!o) setDeleteTarget(null);
+   565→        }}
+   566→      >
+   567→        <AlertDialogContent>
+   568→          <AlertDialogHeader>
+   569→            <AlertDialogTitle className="flex items-center gap-2">
+   570→              <Trash2 className="size-5 text-rose-500" /> Delete Site
+   571→            </AlertDialogTitle>
+   572→            <AlertDialogDescription>
+   573→              Are you sure you want to permanently delete{' '}
+   574→              <span className="font-medium text-foreground">{deleteTarget?.name}</span>? Employees
+   575→              assigned to this site will be unassigned (not deleted).
+   576→            </AlertDialogDescription>
+   577→          </AlertDialogHeader>
+   578→          <AlertDialogFooter>
+   579→            <AlertDialogCancel disabled={dialogBusy}>Cancel</AlertDialogCancel>
+   580→            <Button
+   581→              onClick={handleConfirmDelete}
+   582→              disabled={dialogBusy}
+   583→              className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90"
+   584→            >
+   585→              {dialogBusy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+   586→              Delete Site
+   587→            </Button>
+   588→          </AlertDialogFooter>
+   589→        </AlertDialogContent>
+   590→      </AlertDialog>
+   591→
+   592→      {/* ---- Attendance sheet full-screen overlay ---- */}
+   593→      <AnimatePresence>
+   594→        {attendanceSite && (
+   595→          <motion.div
+   596→            key="attendance-sheet"
+   597→            role="dialog"
+   598→            aria-modal="true"
+   599→            aria-label={`Attendance sheet for ${attendanceSite.name}`}
+   600→            className="fixed inset-0 z-50 flex flex-col bg-background"
+   601→            initial={{ opacity: 0, y: 24 }}
+   602→            animate={{ opacity: 1, y: 0 }}
+   603→            exit={{ opacity: 0, y: 24 }}
+   604→            transition={{ duration: 0.3, ease: EASE }}
+   605→          >
+   606→            <AttendanceSheetView
+   607→              site={attendanceSite}
+   608→              employees={(employees ?? []).filter(
+   609→                (e) => e.current_site_id === attendanceSite.id && e.status !== 'deleted',
+   610→              )}
+   611→              onClose={() => setAttendanceSiteId(null)}
+   612→            />
+   613→          </motion.div>
+   614→        )}
+   615→      </AnimatePresence>
+   616→    </div>
+   617→  );
+   618→}
+   619→
+   620→// ---------------------------------------------------------------------------
+   621→// Site card (grid tile)
+   622→// ---------------------------------------------------------------------------
+   623→function SiteCard({
+   624→  site, index, canDelete, busy, onToggle, onEdit, onDelete, onViewEmployees, onAttendance,
+   625→}: {
+   626→  site: SiteWithCount;
+   627→  index: number;
+   628→  canDelete: boolean;
+   629→  busy: boolean;
+   630→  onToggle: (site: SiteWithCount) => void;
+   631→  onEdit: (site: SiteWithCount) => void;
+   632→  onDelete: (site: SiteWithCount) => void;
+   633→  onViewEmployees: (site: SiteWithCount) => void;
+   634→  onAttendance: (site: SiteWithCount) => void;
+   635→}) {
+   636→  return (
+   637→    <motion.div
+   638→      initial={{ opacity: 0, y: 18 }}
+   639→      animate={{ opacity: 1, y: 0 }}
+   640→      transition={{ delay: Math.min(index * 0.05, 0.5), duration: 0.35, ease: EASE }}
+   641→      whileHover={{ y: -4 }}
+   642→      className={cn(
+   643→        'card-glow group relative flex flex-col gap-4 rounded-xl border bg-card p-5',
+   644→        !site.is_active && 'opacity-80',
+   645→      )}
+   646→    >
+   647→      {/* header: icon, name, per-card actions */}
+   648→      <div className="flex items-start justify-between gap-2">
+   649→        <div className="flex min-w-0 items-center gap-3">
+   650→          <div
+   651→            className={cn(
+   652→              'flex size-10 shrink-0 items-center justify-center rounded-lg',
+   653→              site.is_active
+   654→                ? 'bg-emerald-500/10 text-emerald-500'
+   655→                : 'bg-zinc-500/10 text-zinc-400',
+   656→            )}
+   657→          >
+   658→            <Building2 size={20} />
+   659→          </div>
+   660→          <div className="min-w-0">
+   661→            <h3 className="truncate text-base font-semibold" title={site.name}>
+   662→              {site.name}
+   663→            </h3>
+   664→            <p className="mt-0.5 text-[11px] text-muted-foreground">
+   665→              Created {fmtDate(site.created_at)}
+   666→            </p>
+   667→          </div>
+   668→        </div>
+   669→        <div className="flex shrink-0 items-center gap-0.5">
+   670→          <Button
+   671→            variant="ghost"
+   672→            size="icon"
+   673→            disabled={busy}
+   674→            onClick={() => onToggle(site)}
+   675→            title={site.is_active ? 'Deactivate site' : 'Activate site'}
+   676→            aria-label={site.is_active ? `Deactivate site ${site.name}` : `Activate site ${site.name}`}
+   677→            className={cn(
+   678→              'size-8',
+   679→              site.is_active
+   680→                ? 'text-amber-500 hover:bg-amber-500/10 hover:text-amber-500'
+   681→                : 'text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-500',
+   682→            )}
+   683→          >
+   684→            {busy ? (
+   685→              <Loader2 size={15} className="animate-spin" />
+   686→            ) : site.is_active ? (
+   687→              <PowerOff size={15} />
+   688→            ) : (
+   689→              <Power size={15} />
+   690→            )}
+   691→          </Button>
+   692→          <Button
+   693→            variant="ghost"
+   694→            size="icon"
+   695→            onClick={() => onEdit(site)}
+   696→            title="Edit site"
+   697→            aria-label={`Edit site ${site.name}`}
+   698→            className="size-8 text-muted-foreground hover:bg-brand/10 hover:text-brand"
+   699→          >
+   700→            <Pencil size={14} />
+   701→          </Button>
+   702→          {canDelete && (
+   703→            <Button
+   704→              variant="ghost"
+   705→              size="icon"
+   706→              onClick={() => onDelete(site)}
+   707→              title="Delete site"
+   708→              aria-label={`Delete site ${site.name}`}
+   709→              className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
+   710→            >
+   711→              <Trash2 size={15} />
+   712→            </Button>
+   713→          )}
+   714→        </div>
+   715→      </div>
+   716→
+   717→      {/* client / project meta */}
+   718→      {(site.client_name || site.project_name) && (
+   719→        <div className="space-y-1">
+   720→          {site.client_name && (
+   721→            <p className="truncate text-xs text-muted-foreground">
+   722→              <span className="text-muted-foreground/60">Client:</span> {site.client_name}
+   723→            </p>
+   724→          )}
+   725→          {site.project_name && (
+   726→            <p className="truncate text-xs text-muted-foreground">
+   727→              <span className="text-muted-foreground/60">Project:</span> {site.project_name}
+   728→            </p>
+   729→          )}
+   730→        </div>
+   731→      )}
+   732→
+   733→      {/* counts */}
+   734→      <div className="flex flex-wrap items-center gap-2">
+   735→        <Badge variant="secondary" className="gap-1 border-brand/25 bg-brand/10 text-brand">
+   736→          <Users size={11} />
+   737→          {site.employee_count} {site.employee_count === 1 ? 'employee' : 'employees'}
+   738→        </Badge>
+   739→        {!site.is_active && (
+   740→          <Badge variant="secondary" className="border-zinc-500/25 bg-zinc-500/10 text-zinc-400">
+   741→            Inactive
+   742→          </Badge>
+   743→        )}
+   744→      </div>
+   745→
+   746→      {/* main actions */}
+   747→      <div className="mt-auto flex gap-2 border-t pt-4">
+   748→        <Button
+   749→          variant="outline"
+   750→          className="h-9 flex-1 gap-2 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+   751→          onClick={() => onViewEmployees(site)}
+   752→        >
+   753→          <Eye size={15} /> View Employees
+   754→        </Button>
+   755→        <Button
+   756→          variant="outline"
+   757→          size="icon"
+   758→          className="h-9 w-9 shrink-0 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+   759→          onClick={() => onAttendance(site)}
+   760→          title="Attendance sheet"
+   761→          aria-label={`Open attendance sheet for ${site.name}`}
+   762→        >
+   763→          <FileSpreadsheet size={15} />
+   764→        </Button>
+   765→      </div>
+   766→    </motion.div>
+   767→  );
+   768→}
+   769→
+   770→// ---------------------------------------------------------------------------
+   771→// Create / Edit site dialog
+   772→// ---------------------------------------------------------------------------
+   773→function SiteFormDialog({
+   774→  open, onOpenChange, editing,
+   775→}: {
+   776→  open: boolean;
+   777→  onOpenChange: (open: boolean) => void;
+   778→  editing: SiteWithCount | null;
+   779→}) {
+   780→  const [name, setName] = useState('');
+   781→  const [client, setClient] = useState('');
+   782→  const [project, setProject] = useState('');
+   783→  const [busy, setBusy] = useState(false);
+   784→
+   785→  // Reset the form every time the dialog opens
+   786→  useEffect(() => {
+   787→    if (open) {
+   788→      setName(editing?.name ?? '');
+   789→      setClient(editing?.client_name ?? '');
+   790→      setProject(editing?.project_name ?? '');
+   791→      setBusy(false);
+   792→    }
+   793→  }, [open, editing]);
+   794→
+   795→  const trimmedName = name.trim();
+   796→  const unchanged =
+   797→    !!editing &&
+   798→    trimmedName === editing.name &&
+   799→    client.trim() === (editing.client_name ?? '') &&
+   800→    project.trim() === (editing.project_name ?? '');
+   801→
+   802→  const submit = async () => {
+   803→    if (!trimmedName || busy || unchanged) return;
+   804→    setBusy(true);
+   805→    try {
+   806→      if (editing) {
+   807→        await dataApi.updateSite(editing.id, {
+   808→          name: trimmedName,
+   809→          client_name: client.trim() || null,
+   810→          project_name: project.trim() || null,
+   811→          is_active: editing.is_active,
+   812→        });
+   813→        toast.success('Site updated', { description: `Details for "${trimmedName}" were saved.` });
+   814→      } else {
+   815→        const created = await dataApi.createSite(
+   816→          trimmedName,
+   817→          client.trim() || null,
+   818→          project.trim() || null,
+   819→        );
+   820→        toast.success('Site created', { description: `"${created.name}" has been added.` });
+   821→      }
+   822→      onOpenChange(false);
+   823→    } catch (err) {
+   824→      toast.error(err instanceof Error ? err.message : 'Failed to save the site');
+   825→    } finally {
+   826→      setBusy(false);
+   827→    }
+   828→  };
+   829→
+   830→  return (
+   831→    <Dialog open={open} onOpenChange={onOpenChange}>
+   832→      <DialogContent className="sm:max-w-md">
+   833→        <DialogHeader>
+   834→          <DialogTitle>{editing ? 'Edit Site' : 'Add New Site'}</DialogTitle>
+   835→          <DialogDescription>
+   836→            {editing
+   837→              ? `Update the details of "${editing.name}". Assigned employees are unaffected.`
+   838→              : 'Enter the details for the new work site.'}
+   839→          </DialogDescription>
+   840→        </DialogHeader>
+   841→
+   842→        <div className="space-y-4">
+   843→          <div className="space-y-2">
+   844→            <Label htmlFor="site-name">
+   845→              Site Name <span className="text-rose-500">*</span>
+   846→            </Label>
+   847→            <Input
+   848→              id="site-name"
+   849→              value={name}
+   850→              onChange={(e) => setName(e.target.value)}
+   851→              placeholder="e.g. NPC — Umm Al Quwain"
+   852→              className="h-11"
+   853→              onKeyDown={(e) => {
+   854→                if (e.key === 'Enter') submit();
+   855→              }}
+   856→            />
+   857→          </div>
+   858→          <div className="space-y-2">
+   859→            <Label htmlFor="site-client">Client Name</Label>
+   860→            <Input
+   861→              id="site-client"
+   862→              value={client}
+   863→              onChange={(e) => setClient(e.target.value)}
+   864→              placeholder="e.g. NPC"
+   865→              className="h-11"
+   866→              onKeyDown={(e) => {
+   867→                if (e.key === 'Enter') submit();
+   868→              }}
+   869→            />
+   870→          </div>
+   871→          <div className="space-y-2">
+   872→            <Label htmlFor="site-project">Project Name</Label>
+   873→            <Input
+   874→              id="site-project"
+   875→              value={project}
+   876→              onChange={(e) => setProject(e.target.value)}
+   877→              placeholder="e.g. NPC — Umm Al Quwain"
+   878→              className="h-11"
+   879→              onKeyDown={(e) => {
+   880→                if (e.key === 'Enter') submit();
+   881→              }}
+   882→            />
+   883→          </div>
+   884→        </div>
+   885→
+   886→        <DialogFooter>
+   887→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+   888→            Cancel
+   889→          </Button>
+   890→          <Button
+   891→            onClick={submit}
+   892→            disabled={!trimmedName || busy || unchanged}
+   893→            className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   894→          >
+   895→            {busy ? <Loader2 size={16} className="animate-spin" /> : editing ? <Pencil size={16} /> : <Plus size={16} />}
+   896→            {editing ? 'Save Changes' : 'Add Site'}
+   897→          </Button>
+   898→        </DialogFooter>
+   899→      </DialogContent>
+   900→    </Dialog>
+   901→  );
+   902→}
+   903→
+   904→// ---------------------------------------------------------------------------
+   905→// Per-site employees sub-view
+   906→// ---------------------------------------------------------------------------
+   907→function SiteEmployeesView({
+   908→  site, employees, onBack,
+   909→}: {
+   910→  site: SiteWithCount;
+   911→  employees: EmployeeVM[];
+   912→  onBack: () => void;
+   913→}) {
+   914→  const [search, setSearch] = useState('');
+   915→  const [selected, setSelected] = useState<Set<string>>(new Set());
+   916→  const [removeOpen, setRemoveOpen] = useState(false);
+   917→  const [removing, setRemoving] = useState(false);
+   918→  const [addingId, setAddingId] = useState<string | null>(null);
+   919→  const [pickerValue, setPickerValue] = useState<string | null>(null);
+   920→
+   921→  const siteEmployees = useMemo(
+   922→    () => employees.filter((e) => e.current_site_id === site.id && e.status !== 'deleted'),
+   923→    [employees, site.id],
+   924→  );
+   925→  const leader = useMemo(
+   926→    () => siteEmployees.find((e) => e.is_team_leader && e.team_leader_site_id === site.id) ?? null,
+   927→    [siteEmployees, site.id],
+   928→  );
+   929→  // transferable: active employees that are not already on this site
+   930→  const addable = useMemo(
+   931→    () => employees.filter((e) => e.status === 'active' && e.current_site_id !== site.id),
+   932→    [employees, site.id],
+   933→  );
+   934→
+   935→  const filtered = useMemo(() => {
+   936→    const q = search.trim().toLowerCase();
+   937→    const list = q
+   938→      ? siteEmployees.filter((e) =>
+   939→          `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`
+   940→            .toLowerCase()
+   941→            .includes(q),
+   942→        )
+   943→      : siteEmployees;
+   944→    // team leader of this site first, everything else keeps list order
+   945→    return [...list].sort((a, b) => {
+   946→      const aLead = a.is_team_leader && a.team_leader_site_id === site.id;
+   947→      const bLead = b.is_team_leader && b.team_leader_site_id === site.id;
+   948→      if (aLead !== bLead) return aLead ? -1 : 1;
+   949→      return 0;
+   950→    });
+   951→  }, [siteEmployees, search, site.id]);
+   952→
+   953→  const allSelected = filtered.length > 0 && filtered.every((e) => selected.has(e.id));
+   954→  const someSelected = !allSelected && filtered.some((e) => selected.has(e.id));
+   955→
+   956→  const toggleOne = (id: string) => {
+   957→    setSelected((prev) => {
+   958→      const next = new Set(prev);
+   959→      if (next.has(id)) next.delete(id);
+   960→      else next.add(id);
+   961→      return next;
+   962→    });
+   963→  };
+   964→  const toggleAll = () => {
+   965→    setSelected(allSelected ? new Set() : new Set(filtered.map((e) => e.id)));
+   966→  };
+   967→
+   968→  // ---- add / transfer an employee onto this site -----------------------------
+   969→  const handleAdd = async (id: string | null) => {
+   970→    setPickerValue(null);
+   971→    if (!id || addingId) return;
+   972→    const emp = employees.find((e) => e.id === id);
+   973→    if (!emp) return;
+   974→    setAddingId(id);
+   975→    try {
+   976→      await dataApi.updateEmployee(id, toEmployeeInput(emp, { current_site_id: site.id }));
+   977→      if (emp.site_name) {
+   978→        toast.success('Employee transferred', {
+   979→          description: `${emp.full_name} was transferred from "${emp.site_name}" to "${site.name}".`,
+   980→        });
+   981→      } else {
+   982→        toast.success('Employee added', {
+   983→          description: `${emp.full_name} was added to "${site.name}".`,
+   984→        });
+   985→      }
+   986→    } catch (err) {
+   987→      toast.error(err instanceof Error ? err.message : 'Failed to add the employee');
+   988→    } finally {
+   989→      setAddingId(null);
+   990→    }
+   991→  };
+   992→
+   993→  // ---- remove selected employees (set to idle, never delete) -----------------
+   994→  const handleRemove = async () => {
+   995→    if (selected.size === 0) return;
+   996→    setRemoving(true);
+   997→    try {
+   998→      await Promise.all(
+   999→        [...selected].map((id) => {
+  1000→          const emp = employees.find((e) => e.id === id);
+  1001→          if (!emp) return Promise.resolve();
+  1002→          const leadsThisSite = emp.is_team_leader && emp.team_leader_site_id === site.id;
+  1003→          return dataApi.updateEmployee(
+  1004→            id,
+  1005→            toEmployeeInput(emp, {
+  1006→              current_site_id: null,
+  1007→              ...(leadsThisSite ? { is_team_leader: false, team_leader_site_id: null } : {}),
+  1008→            }),
+  1009→          );
+  1010→        }),
+  1011→      );
+  1012→      toast.success(`${selected.size} employee(s) removed`, {
+  1013→        description: 'They were set to idle/unassigned — not deleted. Team leader status was cleared where applicable.',
+  1014→      });
+  1015→      setSelected(new Set());
+  1016→      setRemoveOpen(false);
+  1017→    } catch (err) {
+  1018→      toast.error(err instanceof Error ? err.message : 'Failed to remove the employee(s)');
+  1019→    } finally {
+  1020→      setRemoving(false);
+  1021→    }
+  1022→  };
+  1023→
+  1024→  const meta = [site.client_name, site.project_name].filter(Boolean).join(' · ');
+  1025→
+  1026→  return (
+  1027→    <div className="space-y-6">
+  1028→      {/* ---- header: back, site identity, team leader callout ---- */}
+  1029→      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+  1030→        <div className="flex items-start gap-3">
+  1031→          <Button
+  1032→            variant="outline"
+  1033→            size="icon"
+  1034→            onClick={onBack}
+  1035→            aria-label="Back to sites"
+  1036→            className="size-10 shrink-0"
+  1037→          >
+  1038→            <ArrowLeft size={17} />
+  1039→          </Button>
+  1040→          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-brand/10 p-2.5 text-brand">
+  1041→            <Building2 size={20} />
+  1042→          </div>
+  1043→          <div className="min-w-0">
+  1044→            <div className="flex flex-wrap items-center gap-2">
+  1045→              <h1 className="text-xl font-semibold tracking-tight md:text-2xl">{site.name}</h1>
+  1046→              <Badge variant="secondary" className="tabular-nums">
+  1047→                {siteEmployees.length} {siteEmployees.length === 1 ? 'employee' : 'employees'}
+  1048→              </Badge>
+  1049→              {!site.is_active && (
+  1050→                <Badge variant="secondary" className="border-zinc-500/25 bg-zinc-500/10 text-zinc-400">
+  1051→                  Inactive
+  1052→                </Badge>
+  1053→              )}
+  1054→            </div>
+  1055→            <p className="mt-1 truncate text-sm text-muted-foreground">
+  1056→              {meta ? `${meta} · ` : ''}Created {fmtDate(site.created_at)}
+  1057→            </p>
+  1058→            {leader ? (
+  1059→              <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+  1060→                <Crown size={13} className="fill-amber-400 text-amber-400" />
+  1061→                Team Leader · {leader.full_name}
+  1062→              </div>
+  1063→            ) : (
+  1064→              <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+  1065→                <Crown size={13} className="text-muted-foreground/50" /> No team leader assigned
+  1066→              </p>
+  1067→            )}
+  1068→          </div>
+  1069→        </div>
+  1070→
+  1071→        <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto lg:shrink-0">
+  1072→          <div className="w-full sm:w-72">
+  1073→            <EmployeeCombobox
+  1074→              employees={addable}
+  1075→              value={pickerValue}
+  1076→              onChange={handleAdd}
+  1077→              disabled={!!addingId}
+  1078→              placeholder="Add employee to this site…"
+  1079→              emptyText="No active employees available."
+  1080→            />
+  1081→          </div>
+  1082→          {selected.size > 0 && (
+  1083→            <Button variant="destructive" onClick={() => setRemoveOpen(true)} className="gap-2">
+  1084→              <UserMinus size={16} /> Remove ({selected.size})
+  1085→            </Button>
+  1086→          )}
+  1087→        </div>
+  1088→      </div>
+  1089→
+  1090→      {/* ---- crew table card ---- */}
+  1091→      <div className="card-glow rounded-xl border bg-card">
+  1092→        <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
+  1093→          <SectionTitle
+  1094→            icon={<Users size={16} />}
+  1095→            title="Crew Members"
+  1096→            sub="Sorted with the team leader first"
+  1097→          />
+  1098→          <div className="relative w-full sm:max-w-xs">
+  1099→            <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+  1100→            <Input
+  1101→              value={search}
+  1102→              onChange={(e) => setSearch(e.target.value)}
+  1103→              placeholder="Search employees…"
+  1104→              aria-label="Search site employees"
+  1105→              className="h-10 pl-9 pr-9"
+  1106→            />
+  1107→            {search && (
+  1108→              <button
+  1109→                type="button"
+  1110→                onClick={() => setSearch('')}
+  1111→                aria-label="Clear search"
+  1112→                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+  1113→              >
+  1114→                <X size={14} />
+  1115→              </button>
+  1116→            )}
+  1117→          </div>
+  1118→        </div>
+  1119→
+  1120→        {filtered.length === 0 ? (
+  1121→          <div className="p-4">
+  1122→            <EmptyState
+  1123→              icon={<Users size={22} />}
+  1124→              title={search ? 'No matching employees' : 'No employees assigned'}
+  1125→              description={
+  1126→                search
+  1127→                  ? 'Try a different search term.'
+  1128→                  : 'Use the picker above to add or transfer employees to this site.'
+  1129→              }
+  1130→            />
+  1131→          </div>
+  1132→        ) : (
+  1133→          <>
+  1134→            {/* ---- Desktop table ---- */}
+  1135→            <div className="hidden overflow-x-auto p-2 md:block">
+  1136→              <Table>
+  1137→                <TableHeader>
+  1138→                  <TableRow>
+  1139→                    <TableHead className="w-10 px-3 py-3">
+  1140→                      <Checkbox
+  1141→                        checked={allSelected ? true : someSelected ? 'indeterminate' : false}
+  1142→                        onCheckedChange={toggleAll}
+  1143→                        aria-label="Select all employees"
+  1144→                      />
+  1145→                    </TableHead>
+  1146→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Employee</TableHead>
+  1147→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">ID</TableHead>
+  1148→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Position</TableHead>
+  1149→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Rating</TableHead>
+  1150→                    <TableHead className="px-3 py-3 text-center text-xs uppercase tracking-wide text-muted-foreground">Status</TableHead>
+  1151→                  </TableRow>
+  1152→                </TableHeader>
+  1153→                <TableBody>
+  1154→                  {filtered.map((emp, i) => {
+  1155→                    const leads = emp.is_team_leader && emp.team_leader_site_id === site.id;
+  1156→                    return (
+  1157→                      <motion.tr
+  1158→                        key={emp.id}
+  1159→                        initial={{ opacity: 0, y: 10 }}
+  1160→                        animate={{ opacity: 1, y: 0 }}
+  1161→                        transition={{ delay: Math.min(i * 0.03, 0.3), duration: 0.28, ease: EASE }}
+  1162→                        className={cn(
+  1163→                          'border-b border-border/40 transition-colors last:border-0 hover:bg-muted/30',
+  1164→                          selected.has(emp.id) && 'bg-brand/5',
+  1165→                        )}
+  1166→                      >
+  1167→                        <TableCell className="px-3 py-3">
+  1168→                          <Checkbox
+  1169→                            checked={selected.has(emp.id)}
+  1170→                            onCheckedChange={() => toggleOne(emp.id)}
+  1171→                            aria-label={`Select ${emp.full_name}`}
+  1172→                          />
+  1173→                        </TableCell>
+  1174→                        <TableCell className="px-3 py-3">
+  1175→                          <div className="flex items-center gap-2.5">
+  1176→                            <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[11px] font-bold text-brand">
+  1177→                              {emp.photo ? (
+  1178→                                <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+  1179→                              ) : (
+  1180→                                initials(emp.full_name)
+  1181→                              )}
+  1182→                            </span>
+  1183→                            <div className="min-w-0">
+  1184→                              <div className="flex items-center gap-1.5">
+  1185→                                <p className="truncate text-sm font-medium">{emp.full_name}</p>
+  1186→                                {leads && (
+  1187→                                  <Badge className="gap-0.5 border-amber-500/25 bg-amber-500/10 px-1.5 text-[10px] text-amber-500">
+  1188→                                    <Crown size={10} className="fill-amber-400 text-amber-400" /> Team Leader
+  1189→                                  </Badge>
+  1190→                                )}
+  1191→                              </div>
+  1192→                              {emp.nationality && (
+  1193→                                <p className="text-xs text-muted-foreground">{emp.nationality}</p>
+  1194→                              )}
+  1195→                            </div>
+  1196→                          </div>
+  1197→                        </TableCell>
+  1198→                        <TableCell className="px-3 py-3 font-mono text-[13px]">{emp.employee_code}</TableCell>
+  1199→                        <TableCell className="px-3 py-3">
+  1200→                          {emp.position ?? <span className="text-muted-foreground/50">—</span>}
+  1201→                        </TableCell>
+  1202→                        <TableCell className="px-3 py-3">
+  1203→                          <RatingStars rating={emp.rating} />
+  1204→                        </TableCell>
+  1205→                        <TableCell className="px-3 py-3 text-center">
+  1206→                          <EmployeeStatusBadge status={emp.status} />
+  1207→                        </TableCell>
+  1208→                      </motion.tr>
+  1209→                    );
+  1210→                  })}
+  1211→                </TableBody>
+  1212→              </Table>
+  1213→            </div>
+  1214→
+  1215→            {/* ---- Mobile cards ---- */}
+  1216→            <div className="space-y-3 p-4 md:hidden">
+  1217→              {filtered.map((emp, i) => {
+  1218→                const leads = emp.is_team_leader && emp.team_leader_site_id === site.id;
+  1219→                return (
+  1220→                  <motion.div
+  1221→                    key={emp.id}
+  1222→                    initial={{ opacity: 0, y: 12 }}
+  1223→                    animate={{ opacity: 1, y: 0 }}
+  1224→                    transition={{ delay: Math.min(i * 0.04, 0.3), duration: 0.28, ease: EASE }}
+  1225→                    className={cn(
+  1226→                      'rounded-xl border bg-background/40 p-4',
+  1227→                      selected.has(emp.id) && 'border-brand/40 bg-brand/5',
+  1228→                    )}
+  1229→                  >
+  1230→                    <div className="flex items-start gap-3">
+  1231→                      <Checkbox
+  1232→                        checked={selected.has(emp.id)}
+  1233→                        onCheckedChange={() => toggleOne(emp.id)}
+  1234→                        aria-label={`Select ${emp.full_name}`}
+  1235→                        className="mt-1.5"
+  1236→                      />
+  1237→                      <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
+  1238→                        {emp.photo ? (
+  1239→                          <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+  1240→                        ) : (
+  1241→                          initials(emp.full_name)
+  1242→                        )}
+  1243→                      </span>
+  1244→                      <div className="min-w-0 flex-1">
+  1245→                        <div className="flex flex-wrap items-center gap-1.5">
+  1246→                          <p className="truncate text-sm font-medium">{emp.full_name}</p>
+  1247→                          {leads && (
+  1248→                            <Badge className="gap-0.5 border-amber-500/25 bg-amber-500/10 px-1.5 text-[10px] text-amber-500">
+  1249→                              <Crown size={10} className="fill-amber-400 text-amber-400" /> TL
+  1250→                            </Badge>
+  1251→                          )}
+  1252→                        </div>
+  1253→                        <p className="font-mono text-[11px] text-muted-foreground">
+  1254→                          {emp.employee_code}
+  1255→                          {emp.nationality ? ` · ${emp.nationality}` : ''}
+  1256→                        </p>
+  1257→                      </div>
+  1258→                      <EmployeeStatusBadge status={emp.status} />
+  1259→                    </div>
+  1260→                    <div className="mt-3 flex items-center justify-between border-t pt-3">
+  1261→                      <p className="text-xs text-muted-foreground">{emp.position ?? 'No position'}</p>
+  1262→                      <RatingStars rating={emp.rating} />
+  1263→                    </div>
+  1264→                  </motion.div>
+  1265→                );
+  1266→              })}
+  1267→            </div>
+  1268→          </>
+  1269→        )}
+  1270→      </div>
+  1271→
+  1272→      {/* ---- Remove selected confirmation ---- */}
+  1273→      <AlertDialog open={removeOpen} onOpenChange={setRemoveOpen}>
+  1274→        <AlertDialogContent>
+  1275→          <AlertDialogHeader>
+  1276→            <AlertDialogTitle className="flex items-center gap-2">
+  1277→              <TriangleAlert className="size-5 text-amber-500" />
+  1278→              Remove {selected.size} {selected.size === 1 ? 'Employee' : 'Employees'}
+  1279→            </AlertDialogTitle>
+  1280→            <AlertDialogDescription>
+  1281→              Remove {selected.size} {selected.size === 1 ? 'employee' : 'employees'} from{' '}
+  1282→              <span className="font-medium text-foreground">{site.name}</span>? They will be set to
+  1283→              idle/unassigned and will not be deleted from the database. Team leader status will be
+  1284→              cleared for anyone who leads this site.
+  1285→            </AlertDialogDescription>
+  1286→          </AlertDialogHeader>
+  1287→          <AlertDialogFooter>
+  1288→            <AlertDialogCancel disabled={removing}>Cancel</AlertDialogCancel>
+  1289→            <Button
+  1290→              onClick={handleRemove}
+  1291→              disabled={removing}
+  1292→              className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90"
+  1293→            >
+  1294→              {removing ? <Loader2 size={16} className="animate-spin" /> : <UserMinus size={16} />}
+  1295→              Remove
+  1296→            </Button>
+  1297→          </AlertDialogFooter>
+  1298→        </AlertDialogContent>
+  1299→      </AlertDialog>
+  1300→    </div>
+  1301→  );
+  1302→}
+  1303→
+  1304→// ---------------------------------------------------------------------------
+  1305→// Attendance sheet — full-screen overlay with an editable A4 preview
+  1306→// ---------------------------------------------------------------------------
+  1307→function AttendanceSheetView({
+  1308→  site, employees, onClose,
+  1309→}: {
+  1310→  site: SiteWithCount;
+  1311→  employees: EmployeeVM[];
+  1312→  onClose: () => void;
+  1313→}) {
+  1314→  const printRef = useRef<HTMLDivElement | null>(null);
+  1315→  const pdfRef = useRef<HTMLDivElement | null>(null);
+  1316→  const previewRef = useRef<HTMLDivElement | null>(null);
+  1317→
+  1318→  const [scale, setScale] = useState(1);
+  1319→  const [busy, setBusy] = useState(false);
+  1320→
+  1321→  // editable header fields
+  1322→  const [clientName, setClientName] = useState((site.client_name ?? '').toUpperCase());
+  1323→  const [projectName, setProjectName] = useState((site.project_name ?? site.name).toUpperCase());
+  1324→  const [dateInput, setDateInput] = useState(() => formatDateDisplay(new Date()));
+  1325→  const [strength, setStrength] = useState(String(employees.length));
+  1326→
+  1327→  // editable rows (team leaders first, then supervisors, then alphabetical)
+  1328→  const [rows, setRows] = useState<SheetRow[]>(() =>
+  1329→    employees.map((e) => ({
+  1330→      id: e.id,
+  1331→      name: e.full_name,
+  1332→      code: e.employee_code,
+  1333→      position: e.position ?? '',
+  1334→      signature: '',
+  1335→      isTeamLeader: e.is_team_leader && e.team_leader_site_id === site.id,
+  1336→      isSupervisor: (e.position ?? '').toLowerCase().includes('supervisor'),
+  1337→    })),
+  1338→  );
+  1339→  const [extras, setExtras] = useState<ExtraRow[]>(() =>
+  1340→    Array.from({ length: EXTRA_ROWS }, () => ({ name: '', code: '', trade: '', signature: '' })),
+  1341→  );
+  1342→  // hand-written totals (blank lines to be filled after signing)
+  1343→  const [totalPresent, setTotalPresent] = useState('');
+  1344→  const [totalAbsent, setTotalAbsent] = useState('');
+  1345→
+  1346→  const sortedRows = useMemo(
+  1347→    () => [...rows].sort((a, b) => a.name.localeCompare(b.name)),
+  1348→    [rows],
+  1349→  );
+  1350→
+  1351→  // pagination: 18 rows on the first page (big header), 24 afterwards
+  1352→  const pages = useMemo(() => {
+  1353→    if (sortedRows.length <= FIRST_PAGE_ROWS) return [sortedRows];
+  1354→    const rest = sortedRows.slice(FIRST_PAGE_ROWS);
+  1355→    const out: SheetRow[][] = [sortedRows.slice(0, FIRST_PAGE_ROWS)];
+  1356→    for (let i = 0; i < rest.length; i += ROWS_PER_PAGE) out.push(rest.slice(i, i + ROWS_PER_PAGE));
+  1357→    return out;
+  1358→  }, [sortedRows]);
+  1359→
+  1360→  // close on Escape
+  1361→  useEffect(() => {
+  1362→    const onKey = (e: KeyboardEvent) => {
+  1363→      if (e.key === 'Escape') onClose();
+  1364→    };
+  1365→    window.addEventListener('keydown', onKey);
+  1366→    return () => window.removeEventListener('keydown', onKey);
+  1367→  }, [onClose]);
+  1368→
+  1369→  // responsive preview scale (fit the 794px page into the viewport)
+  1370→  useEffect(() => {
+  1371→    const el = previewRef.current;
+  1372→    if (!el) return;
+  1373→    const update = () => {
+  1374→      setScale(Math.min(1, Math.max(0.25, (el.clientWidth - 48) / 794)));
+  1375→    };
+  1376→    update();
+  1377→    const ro = new ResizeObserver(update);
+  1378→    ro.observe(el);
+  1379→    return () => ro.disconnect();
+  1380→  }, []);
+  1381→
+  1382→  const updateRow = (id: string, field: 'name' | 'code' | 'position' | 'signature', value: string) => {
+  1383→    setRows((prev) =>
+  1384→      prev.map((r) =>
+  1385→        r.id === id
+  1386→          ? {
+  1387→              ...r,
+  1388→              [field]: value,
+  1389→              ...(field === 'position'
+  1390→                ? { isSupervisor: value.toLowerCase().includes('supervisor') }
+  1391→                : {}),
+  1392→            }
+  1393→          : r,
+  1394→      ),
+  1395→    );
+  1396→  };
+  1397→  const updateExtra = (idx: number, field: keyof ExtraRow, value: string) => {
+  1398→    setExtras((prev) => prev.map((x, i) => (i === idx ? { ...x, [field]: value } : x)));
+  1399→  };
+  1400→
+  1401→  /** Inline editable cell — renders an <input> on screen and plain text in the
+  1402→   *  hidden print/PDF copies (input values don't survive outerHTML cloning). */
+  1403→  const cell = (value: string, onChange: ((v: string) => void) | null, center = false) =>
+  1404→    onChange ? (
+  1405→      <input
+  1406→        type="text"
+  1407→        value={value}
+  1408→        onChange={(e) => onChange(upper(e.target.value))}
+  1409→        aria-label="Editable cell"
+  1410→        className={cn(
+  1411→          'att-input rounded-sm bg-transparent transition-colors hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60',
+  1412→          center && 'att-ta-center',
+  1413→        )}
+  1414→      />
+  1415→    ) : (
+  1416→      <div className="att-text">{value || '\u00A0'}</div>
+  1417→    );
+  1418→
+  1419→  /** One A4 page. `interactive` = on-screen preview (editable inputs);
+  1420→   *  otherwise plain text for the print / PDF copies. */
+  1421→  const renderPage = (pageRows: SheetRow[], pageIdx: number, interactive: boolean) => {
+  1422→    const isFirst = pageIdx === 0;
+  1423→    const isLast = pageIdx === pages.length - 1;
+  1424→    const serialOffset = pages.slice(0, pageIdx).reduce((n, p) => n + p.length, 0);
+  1425→    const extraStart = sortedRows.length + 1;
+  1426→
+  1427→    return (
+  1428→      <div className="att-page">
+  1429→        {/* header band + info fields (first page) / compact header (rest) */}
+  1430→        {isFirst ? (
+  1431→          <>
+  1432→            <div className="att-band">
+  1433→              <div style={{ flex: 1 }} />
+  1434→              <div style={{ flex: '0 0 auto', textAlign: 'center' }}>
+  1435→                <div className="att-company">PULSE WORKFORCE OS LLC.</div>
+  1436→                <div className="att-subband">DAILY ATTENDANCE</div>
+  1437→              </div>
+  1438→              <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+  1439→                <AttLogo />
+  1440→              </div>
+  1441→            </div>
+  1442→            <div className="att-info">
+  1443→              <div className="att-info-row">
+  1444→                <span className="att-info-label">• CLIENT NAME :</span>
+  1445→                <span className="att-info-value">
+  1446→                  {cell(clientName, interactive ? (v) => setClientName(v) : null)}
+  1447→                </span>
+  1448→              </div>
+  1449→              <div className="att-info-row">
+  1450→                <span className="att-info-label">• PROJECT NAME :</span>
+  1451→                <span className="att-info-value">
+  1452→                  {cell(projectName, interactive ? (v) => setProjectName(v) : null)}
+  1453→                </span>
+  1454→              </div>
+  1455→              <div className="att-info-row">
+  1456→                <span className="att-info-label">• DATE :</span>
+  1457→                <span className="att-info-value">
+  1458→                  {cell(dateInput, interactive ? (v) => setDateInput(v) : null)}
+  1459→                </span>
+  1460→              </div>
+  1461→              <div className="att-info-row">
+  1462→                <span className="att-info-label">• STRENGTH :</span>
+  1463→                <span className="att-info-value">
+  1464→                  {cell(strength, interactive ? (v) => setStrength(v) : null)}
+  1465→                </span>
+  1466→              </div>
+  1467→            </div>
+  1468→          </>
+  1469→        ) : (
+  1470→          <>
+  1471→            <div className="att-band att-band-compact">
+  1472→              <div className="att-company att-company-sm">PULSE WORKFORCE OS LLC.</div>
+  1473→              <div className="att-subband">DAILY ATTENDANCE</div>
+  1474→            </div>
+  1475→            <div className="att-compact-line">
+  1476→              <span>
+  1477→                <strong>CLIENT:</strong> {upper(clientName)} &nbsp;&nbsp;{' '}
+  1478→                <strong>PROJECT:</strong> {upper(projectName)}
+  1479→              </span>
+  1480→              <span>
+  1481→                <strong>DATE:</strong> {upper(dateInput)}
+  1482→              </span>
+  1483→            </div>
+  1484→          </>
+  1485→        )}
+  1486→
+  1487→        {/* main attendance table */}
+  1488→        <table className="att-table">
+  1489→          <thead>
+  1490→            <tr>
+  1491→              <th className="att-c-sl">SL. NO</th>
+  1492→              <th className="att-ta-left">NAME</th>
+  1493→              <th className="att-c-code">EMP. CODE</th>
+  1494→              <th className="att-c-trade att-ta-left">TRADE</th>
+  1495→              <th className="att-c-sign">SIGNATURE</th>
+  1496→            </tr>
+  1497→          </thead>
+  1498→          <tbody>
+  1499→            {pageRows.map((row, idx) => {
+  1500→              const rowCls = row.isTeamLeader
+  1501→                ? 'att-row-tl'
+  1502→                : row.isSupervisor
+  1503→                  ? 'att-row-sup'
+  1504→                  : idx % 2 === 1
+  1505→                    ? 'att-row-even'
+  1506→                    : '';
+  1507→              return (
+  1508→                <tr key={row.id} className={rowCls}>
+  1509→                  <td className="att-ta-center">{serialOffset + idx + 1}</td>
+  1510→                  <td>{cell(upper(row.name), interactive ? (v) => updateRow(row.id, 'name', v) : null)}</td>
+  1511→                  <td className="att-ta-center">
+  1512→                    {cell(upper(row.code), interactive ? (v) => updateRow(row.id, 'code', v) : null, true)}
+  1513→                  </td>
+  1514→                  <td>
+  1515→                    {cell(
+  1516→                      upper(displayTrade(row)),
+  1517→                      interactive ? (v) => updateRow(row.id, 'position', stripTradeSuffix(v)) : null,
+  1518→                    )}
+  1519→                  </td>
+  1520→                  <td className="att-ta-center">
+  1521→                    {cell(
+  1522→                      upper(row.signature),
+  1523→                      interactive ? (v) => updateRow(row.id, 'signature', v) : null,
+  1524→                      true,
+  1525→                    )}
+  1526→                  </td>
+  1527→                </tr>
+  1528→              );
+  1529→            })}
+  1530→          </tbody>
+  1531→        </table>
+  1532→
+  1533→        {/* extra employees table (last page only) */}
+  1534→        {isLast && (
+  1535→          <>
+  1536→            <div className="att-extra-title">EXTRA EMPLOYEES (IF ANY)</div>
+  1537→            <table className="att-table">
+  1538→              <thead>
+  1539→                <tr>
+  1540→                  <th className="att-c-sl">SL. NO</th>
+  1541→                  <th className="att-ta-left">NAME</th>
+  1542→                  <th className="att-c-code">EMP. CODE</th>
+  1543→                  <th className="att-c-trade att-ta-left">TRADE</th>
+  1544→                  <th className="att-c-sign">SIGNATURE</th>
+  1545→                </tr>
+  1546→              </thead>
+  1547→              <tbody>
+  1548→                {extras.map((x, idx) => (
+  1549→                  <tr key={idx}>
+  1550→                    <td className="att-ta-center att-extra-no">{extraStart + idx}</td>
+  1551→                    <td>{cell(x.name, interactive ? (v) => updateExtra(idx, 'name', v) : null)}</td>
+  1552→                    <td className="att-ta-center">
+  1553→                      {cell(x.code, interactive ? (v) => updateExtra(idx, 'code', v) : null, true)}
+  1554→                    </td>
+  1555→                    <td>{cell(x.trade, interactive ? (v) => updateExtra(idx, 'trade', v) : null)}</td>
+  1556→                    <td className="att-ta-center">
+  1557→                      {cell(x.signature, interactive ? (v) => updateExtra(idx, 'signature', v) : null, true)}
+  1558→                    </td>
+  1559→                  </tr>
+  1560→                ))}
+  1561→              </tbody>
+  1562→            </table>
+  1563→
+  1564→            {/* hand-written totals — AFTER the signing rows */}
+  1565→            <div className="att-totals">
+  1566→              <div className="att-totals-cell">
+  1567→                <span className="att-totals-label">TOTAL PRESENT :</span>
+  1568→                <span className="att-totals-blank">
+  1569→                  {cell(totalPresent, interactive ? (v) => setTotalPresent(v) : null, true)}
+  1570→                </span>
+  1571→              </div>
+  1572→              <div className="att-totals-cell">
+  1573→                <span className="att-totals-label">TOTAL ABSENT :</span>
+  1574→                <span className="att-totals-blank">
+  1575→                  {cell(totalAbsent, interactive ? (v) => setTotalAbsent(v) : null, true)}
+  1576→                </span>
+  1577→              </div>
+  1578→            </div>
+  1579→          </>
+  1580→        )}
+  1581→
+  1582→        <div className="att-pageinfo">
+  1583→          PAGE {pageIdx + 1} OF {pages.length}
+  1584→        </div>
+  1585→      </div>
+  1586→    );
+  1587→  };
+  1588→
+  1589→  // ---- export helpers ---------------------------------------------------------
+  1590→  const dateSlug = (() => {
+  1591→    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dateInput.trim());
+  1592→    return m ? `${m[3]}-${m[2]}-${m[1]}` : new Date().toISOString().slice(0, 10);
+  1593→  })();
+  1594→  const filename = `attendance-${site.name.replace(/\s+/g, '-').toLowerCase()}-${dateSlug}.pdf`;
+  1595→
+  1596→  /**
+  1597→   * PDF copy: the hidden container stacks 800×1148px wrappers (each holding a
+  1598→   * 794×1123 page). At html2canvas scale 2 every wrapper maps to exactly 287mm
+  1599→   * — the slice height used by `exportElementToPdf` — so each jsPDF page lines
+  1600→   * up perfectly with one sheet page.
+  1601→   */
+  1602→  const handleDownload = async () => {
+  1603→    const el = pdfRef.current;
+  1604→    if (!el || busy) return;
+  1605→    setBusy(true);
+  1606→    try {
+  1607→      await exportElementToPdf(el, filename);
+  1608→      toast.success('Attendance sheet downloaded', {
+  1609→        description: `${pages.length} page(s) · ${site.name}`,
+  1610→      });
+  1611→    } catch {
+  1612→      toast.error('Failed to generate the PDF. Please try again.');
+  1613→    } finally {
+  1614→      setBusy(false);
+  1615→    }
+  1616→  };
+  1617→
+  1618→  /** Print copy: true-A4 pages (794×1122) with an embedded stylesheet, so the
+  1619→   *  outerHTML that `printElement` copies into its iframe stays fully styled. */
+  1620→  const handlePrint = () => {
+  1621→    const el = printRef.current;
+  1622→    if (el) printElement(el);
+  1623→  };
+  1624→
+  1625→  return (
+  1626→    <div className="flex h-full min-h-0 flex-col bg-background">
+  1627→      {/* ---- toolbar ---- */}
+  1628→      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-card/90 px-3 py-2.5 backdrop-blur sm:px-4">
+  1629→        <Button variant="outline" size="sm" onClick={onClose} className="gap-1.5 font-semibold">
+  1630→          <ArrowLeft size={15} /> Back
+  1631→        </Button>
+  1632→        <div className="hidden h-5 w-px bg-border sm:block" />
+  1633→        <div className="min-w-0 flex-1">
+  1634→          <p className="truncate text-sm font-semibold">Attendance Sheet — {site.name}</p>
+  1635→          <p className="truncate text-[11px] text-muted-foreground">
+  1636→            {sortedRows.length} employee(s) · {pages.length} page(s) · fields are editable before export
+  1637→          </p>
+  1638→        </div>
+  1639→        <div className="ml-auto flex items-center gap-2">
+  1640→          <Button variant="outline" size="sm" onClick={handleDownload} disabled={busy} className="gap-1.5">
+  1641→            {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+  1642→            <span className="hidden sm:inline">Download PDF</span>
+  1643→          </Button>
+  1644→          <Button
+  1645→            size="sm"
+  1646→            onClick={handlePrint}
+  1647→            className="brand-gradient gap-1.5 font-semibold text-white shadow-lg shadow-[var(--glow)]"
+  1648→          >
+  1649→            <Printer size={15} />
+  1650→            <span className="hidden sm:inline">Print</span>
+  1651→          </Button>
+  1652→        </div>
+  1653→      </div>
+  1654→
+  1655→      {/* ---- scrollable A4 preview ---- */}
+  1656→      <div ref={previewRef} className="flex-1 overflow-auto bg-muted/50 p-4 sm:p-6 dark:bg-zinc-950/40">
+  1657→        <div className="mx-auto flex w-fit flex-col items-center gap-6">
+  1658→          {pages.map((pageRows, i) => (
+  1659→            <div
+  1660→              key={i}
+  1661→              style={{ width: Math.round(794 * scale), height: Math.round(1123 * scale) }}
+  1662→              className="overflow-hidden shadow-2xl ring-1 ring-border"
+  1663→            >
+  1664→              <div
+  1665→                style={{ width: 794, height: 1123, transform: `scale(${scale})`, transformOrigin: 'top left' }}
+  1666→              >
+  1667→                <div className="att-sheet">{renderPage(pageRows, i, true)}</div>
+  1668→              </div>
+  1669→            </div>
+  1670→          ))}
+  1671→        </div>
+  1672→      </div>
+  1673→
+  1674→      {/* ---- hidden print copy (true A4, text cells, styled via embedded CSS) ---- */}
+  1675→      <div aria-hidden className="pointer-events-none" style={{ position: 'absolute', left: '-20000px', top: 0 }}>
+  1676→        <div ref={printRef} className="att-sheet att-print-root" style={{ width: 794 }}>
+  1677→          <style>{ATT_CSS}</style>
+  1678→          {pages.map((pageRows, i) => (
+  1679→            <Fragment key={i}>{renderPage(pageRows, i, false)}</Fragment>
+  1680→          ))}
+  1681→        </div>
+  1682→      </div>
+  1683→
+  1684→      {/* ---- hidden PDF copy (800×1148 wrappers for exact jsPDF slicing) ---- */}
+  1685→      <div
+  1686→        ref={pdfRef}
+  1687→        aria-hidden
+  1688→        className="pointer-events-none att-sheet"
+  1689→        style={{ position: 'absolute', left: '-21000px', top: 0, width: 800 }}
+  1690→      >
+  1691→        {pages.map((pageRows, i) => (
+  1692→          <div key={i} className="att-pdfwrap">
+  1693→            {renderPage(pageRows, i, false)}
+  1694→          </div>
+  1695→        ))}
+  1696→      </div>
+  1697→    </div>
+  1698→  );
+  1699→}
+  1700→

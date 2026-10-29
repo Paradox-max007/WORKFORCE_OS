@@ -13,7 +13,7 @@ import { motion } from 'framer-motion';
 import {
   Ban, Bell, Building2, Calendar, CalendarCheck, Crown, Eye, EyeOff, FileText,
   KeyRound, LayoutDashboard, Loader2, Lock, Mail, Pencil, Plus, Search, Shield,
-  Shirt, Trash2, User, Users, X,
+  Shirt, Tent, Trash2, User, Users, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -56,17 +56,19 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EMPTY_PERMS: MenuPermissionMap = {
   employees: false,
   sites: false,
+  camps: false,
   attendance: false,
   leave_requests: false,
   cancellation_requests: false,
   notifications: false,
 };
 
-/** Friendly metadata for the six permission keys defined in MENU_KEYS. */
+/** Friendly metadata for the permission keys defined in MENU_KEYS. */
 const MENU_META: Record<MenuKey, { label: string; hint: string; icon: LucideIcon }> = {
   employees: { label: 'Employees', hint: 'Directory, records & ratings', icon: Users },
   sites: { label: 'Sites', hint: 'Work sites & client projects', icon: Building2 },
-  attendance: { label: 'Attendance', hint: 'Daily marking & overtime', icon: CalendarCheck },
+  camps: { label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent },
+  attendance: { label: 'Attendance', hint: 'Excel-style hours marking', icon: CalendarCheck },
   leave_requests: { label: 'Leave Requests', hint: 'Leave applications & review', icon: FileText },
   cancellation_requests: { label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban },
   notifications: { label: 'Notifications', hint: 'Alerts & announcements', icon: Bell },

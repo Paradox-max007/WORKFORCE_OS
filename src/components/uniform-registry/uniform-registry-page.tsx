@@ -76,6 +76,7 @@ const toEmployeeInput = (e: EmployeeVM): EmployeeInput => ({
   id_number: e.id_number,
   id_status: e.id_status,
   current_site_id: e.current_site_id,
+  camp_id: e.camp_id,
   photo: e.photo,
   is_team_leader: e.is_team_leader,
   team_leader_site_id: e.team_leader_site_id,

@@ -29,6 +29,21 @@ export interface SiteWithCount extends Site {
   employee_count: number;
 }
 
+// Accommodation camp where employees stay (one employee → at most one camp)
+export interface Camp {
+  id: string;
+  name: string;
+  location: string | null;
+  capacity: number | null;
+  notes: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface CampWithCount extends Camp {
+  employee_count: number;
+}
+
 export type EmployeeStatus = 'active' | 'pending_deletion' | 'deleted';
 export type DocumentStatus = 'Valid' | 'Expired' | 'N/A';
 
@@ -50,6 +65,7 @@ export interface Employee {
   id_number: string | null;
   id_status: DocumentStatus | null;
   current_site_id: string | null;
+  camp_id: string | null;
   rating: number;
   status: EmployeeStatus;
   photo: string | null;
@@ -62,16 +78,18 @@ export interface Employee {
 export interface EmployeeVM extends Employee {
   site_name: string | null;
   leader_site_name: string | null;
+  camp_name: string | null;
 }
 
-export type AttendanceStatus = 'present' | 'absent' | 'no_site' | 'overtime' | 'not_marked';
+export type AttendanceStatus = 'present' | 'absent' | 'not_marked';
 
 export interface Attendance {
   id: string;
   employee_id: string;
   date: string; // YYYY-MM-DD
   status: AttendanceStatus;
-  overtime_hours: number | null;
+  /** Worked hours for the day (custom hours per site); null when absent/unmarked */
+  hours: number | null;
   is_hidden: boolean;
   created_at: string;
 }
@@ -193,6 +211,7 @@ export interface UniformEntry {
 export interface MenuPermissionMap {
   employees: boolean;
   sites: boolean;
+  camps: boolean;
   attendance: boolean;
   leave_requests: boolean;
   cancellation_requests: boolean;
@@ -219,6 +238,7 @@ export interface EmployeeInput {
   id_number: string | null;
   id_status: DocumentStatus | null;
   current_site_id: string | null;
+  camp_id: string | null;
   photo: string | null;
   is_team_leader: boolean;
   team_leader_site_id: string | null;
@@ -265,6 +285,7 @@ export type RealtimeTable =
   | 'profiles'
   | 'menu_permission'
   | 'site'
+  | 'camp'
   | 'employee'
   | 'attendance'
   | 'notification'
@@ -311,13 +332,12 @@ export const ATTENDANCE_STATUSES: {
 }[] = [
   { value: 'present', label: 'Present', short: 'P', color: '#22c55e' },
   { value: 'absent', label: 'Absent', short: 'A', color: '#ef4444' },
-  { value: 'overtime', label: 'Overtime', short: 'O', color: '#a855f7' },
-  { value: 'no_site', label: 'No Site', short: 'NS', color: '#f59e0b' },
 ];
 
 export const MENU_KEYS = [
   'employees',
   'sites',
+  'camps',
   'attendance',
   'leave_requests',
   'cancellation_requests',

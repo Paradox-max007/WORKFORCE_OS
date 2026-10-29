@@ -7,7 +7,7 @@
 import { motion } from 'framer-motion';
 import {
   Building2, CalendarDays, CheckCircle2, Clock, Crown, Eye, MapPin,
-  UserX, Users, XCircle, Zap,
+  UserX, Users, XCircle,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -32,8 +32,6 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 const STATUS_COLORS: Record<string, string> = {
   present: '#22c55e',
   absent: '#ef4444',
-  no_site: '#f59e0b',
-  overtime: '#a855f7',
 };
 
 interface DayOption {
@@ -122,11 +120,9 @@ export function DashboardPage() {
 
   // 6-month chart data
   const chartData = useMemo(() => {
-    const byMonth = new Map<string, { month: string; present: number; absent: number; no_site: number; overtime: number }>();
+    const byMonth = new Map<string, { month: string; present: number; absent: number }>();
     (summary ?? []).forEach((row) => {
-      const entry = byMonth.get(row.month) ?? {
-        month: row.month, present: 0, absent: 0, no_site: 0, overtime: 0,
-      };
+      const entry = byMonth.get(row.month) ?? { month: row.month, present: 0, absent: 0 };
       if (row.status in entry) {
         (entry as unknown as Record<string, number>)[row.status] = row.count;
       }
@@ -215,15 +211,14 @@ export function DashboardPage() {
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {loading ? (
-          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)
+          Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)
         ) : (
           <>
             <StatCard label="Total Employees" value={activeEmployees.length} icon={<Users size={20} />} tone="brand" hint={subtitle} />
             <StatCard label="Present" value={countBy('present')} icon={<CheckCircle2 size={20} />} tone="emerald" hint={subtitle} />
             <StatCard label="Absent" value={countBy('absent')} icon={<XCircle size={20} />} tone="rose" hint={subtitle} />
-            <StatCard label="Overtime" value={countBy('overtime')} icon={<Zap size={20} />} tone="purple" hint={subtitle} />
           </>
         )}
       </div>
@@ -281,10 +276,8 @@ export function DashboardPage() {
                     }}
                   />
                   <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="present" name="Present" stackId="a" fill={STATUS_COLORS.present} radius={[0, 0, 0, 0]} animationDuration={900} />
-                  <Bar dataKey="absent" name="Absent" stackId="a" fill={STATUS_COLORS.absent} animationDuration={900} />
-                  <Bar dataKey="no_site" name="No Site / Idle" stackId="a" fill={STATUS_COLORS.no_site} animationDuration={900} />
-                  <Bar dataKey="overtime" name="Overtime" stackId="a" fill={STATUS_COLORS.overtime} radius={[4, 4, 0, 0]} animationDuration={900} />
+                  <Bar dataKey="present" name="Present" stackId="a" fill={STATUS_COLORS.present} animationDuration={900} />
+                  <Bar dataKey="absent" name="Absent" stackId="a" fill={STATUS_COLORS.absent} radius={[4, 4, 0, 0]} animationDuration={900} />
                 </BarChart>
               </ResponsiveContainer>
             )}

@@ -10,6 +10,7 @@
 import {
   type Attendance,
   type CancellationRequest,
+  type Camp,
   type Employee,
   type Fine,
   type LeaveRequest,
@@ -29,6 +30,7 @@ export interface DemoDB {
   version: number;
   profiles: DemoProfile[];
   sites: Site[];
+  camps: Camp[];
   employees: Employee[];
   attendance: Attendance[];
   notifications: Notification[];
@@ -85,9 +87,10 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 3,
+    version: 4,
     profiles: [],
     sites: [],
+    camps: [],
     employees: [],
     attendance: [],
     notifications: [],
@@ -121,6 +124,15 @@ function seedDB(): DemoDB {
   const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', false);
   db.sites = [npc, redCoast, marina, depot];
 
+  // ---- camps (accommodation) ----------------------------------------------
+  const mkCamp = (name: string, location: string, capacity: number, notes: string | null = null, active = true): Camp =>
+    ({ id: uid(), name, location, capacity, notes, is_active: active, created_at: nowISO() });
+  const alNahda = mkCamp('Al Nahda Camp', 'Al Nahda 2, Dubai', 60);
+  const sonapur = mkCamp('Sonapur Labour Camp', 'Sonapur, Umm Al Quwain', 120, 'Central kitchen + clinic on site');
+  const muweilah = mkCamp('Muweilah Workers Village', 'Muweilah, Sharjah', 45);
+  const closed = mkCamp('Old Jebel Ali Camp', 'Jebel Ali, Dubai', 30, 'Closed for renovation', false);
+  db.camps = [alNahda, sonapur, muweilah, closed];
+
   // ---- employees -------------------------------------------------------------
   const year = new Date().getFullYear();
   const mkEmp = (
@@ -144,6 +156,7 @@ function seedDB(): DemoDB {
     id_number: `UAE-IQ-${year}${String(n).padStart(4, '0')}`,
     id_status: n === 7 ? 'Expired' : 'Valid',
     current_site_id: site?.id ?? null,
+    camp_id: null,
     rating: [5, 4.8, 4.5, 4.2, 5, 4.7, 4.1, 3.5, 4.9, 4.6, 4.4, 4.8, 4.5, 4.7, 4.2][n - 1] ?? 4.5,
     status: 'active',
     photo: null,
@@ -171,9 +184,16 @@ function seedDB(): DemoDB {
     mkEmp(14, 'Ramesh Yadav', 'India', 'General Helper', null, null),
     mkEmp(15, 'Omar Farooq', 'Pakistan', 'Store Keeper', marina, null, { status: 'pending_deletion' as Employee['status'] }),
   ];
+  // assign camps (one employee → exactly one camp; two workers left unassigned)
+  const inCamp = (camp: Camp, names: string[]): void =>
+    names.forEach((nm) => { const e = db.employees.find((x) => x.full_name === nm); if (e) e.camp_id = camp.id; });
+  inCamp(sonapur, ['Muhammad Iqbal', 'Kamal Hussain', 'Rahim Uddin', 'Sandeep Singh', 'Tharindu Perera', 'Ibrahim Toure']);
+  inCamp(alNahda, ['Arun Nair', 'Joseph Santos', 'Ahmed Hassan', 'John Mwangi']);
+  inCamp(muweilah, ['Suresh Patel', 'Dilip Shrestha', 'Ramesh Yadav', 'Omar Farooq']);
   const emp = (name: string): Employee => db.employees.find((e) => e.full_name === name)!;
 
   // ---- attendance (last 6 months incl. current, up to today) ----------------
+  // Excel-style: each worked day carries custom hours; 'A' marks an absence.
   const today = new Date();
   const absent3 = [addDaysStr(toYMD(today), -3), addDaysStr(toYMD(today), -2), addDaysStr(toYMD(today), -1)];
   for (let back = 5; back >= 0; back--) {
@@ -186,20 +206,21 @@ function seedDB(): DemoDB {
       for (let i = 0; i < db.employees.length; i++) {
         const e = db.employees[i];
         let status: Attendance['status'];
-        let overtime: number | null = null;
-        if (!e.current_site_id) status = 'no_site';
+        let hours: number | null = null;
+        if (!e.current_site_id) status = 'not_marked';
         else if (e.full_name === 'Kamal Hussain' && back === 0 && absent3.includes(dateStr)) status = 'absent';
         else {
           const r = seededRand(i, day + m * 31 + back * 377);
           if (r < 0.05) status = 'absent';
-          else if (r < 0.13) {
-            status = 'overtime';
-            overtime = 1 + Math.floor(seededRand(i + 50, day) * 4);
-          } else status = 'present';
+          else {
+            status = 'present';
+            // custom hours per day: mostly 8, sometimes shorter days or overtime
+            const hr = seededRand(i + 50, day);
+            hours = hr < 0.12 ? 4 : hr < 0.5 ? 8 : hr < 0.85 ? 9 : 10 + (hr > 0.93 ? 2 : 0);
+          }
         }
         db.attendance.push({
-          id: uid(), employee_id: e.id, date: dateStr, status,
-          overtime_hours: overtime, is_hidden: false, created_at: nowISO(),
+          id: uid(), employee_id: e.id, date: dateStr, status, hours, is_hidden: false, created_at: nowISO(),
         });
       }
     }
@@ -328,7 +349,7 @@ function seedDB(): DemoDB {
 // Persistence + cross-tab realtime sync
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'pulse_demo_db_v3';
+const STORAGE_KEY = 'pulse_demo_db_v4';
 const SESSION_KEY = 'pulse_demo_session';
 const CHANNEL = 'pulse-demo-realtime';
 
@@ -356,7 +377,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 3) return parsed;
+      if (parsed.version === 4) return parsed;
     }
   } catch {
     // corrupted → reseed

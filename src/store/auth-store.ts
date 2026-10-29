@@ -24,7 +24,7 @@ interface AuthStore {
 }
 
 const DEFAULT_PERMISSIONS: MenuPermissionMap = {
-  employees: false, sites: false, attendance: false,
+  employees: false, sites: false, camps: false, attendance: false,
   leave_requests: false, cancellation_requests: false, notifications: false,
 };
 

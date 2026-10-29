@@ -6,8 +6,8 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Crown, FileDown, ImagePlus, Loader2, MapPin, MessageCircle, Pencil, Plus,
-  Search, Trash2, UserRound, UserX, X,
+  Crown, ImagePlus, Loader2, MapPin, Pencil, Plus, Search, Tent, Trash2,
+  UserRound, UserX, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -24,10 +24,9 @@ import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { dataApi } from '@/lib/data';
-import { downloadEmployeeCv, shareEmployeeCvViaWhatsApp } from '@/lib/pdf';
-import { fmtDate, initials } from '@/lib/format';
+import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { DocumentStatus, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { CampWithCount, DocumentStatus, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -36,7 +35,8 @@ const EMPTY_FORM: EmployeeInput = {
   full_name: '', nationality: null, date_of_birth: null, phone: null, email: null,
   address: null, emergency_contact: null, position: null, join_date: null,
   company_name: null, passport_number: null, passport_status: null, id_number: null,
-  id_status: null, current_site_id: null, photo: null, is_team_leader: false, team_leader_site_id: null,
+  id_status: null, current_site_id: null, camp_id: null, photo: null,
+  is_team_leader: false, team_leader_site_id: null,
 };
 
 const DOC_STATUSES: { value: DocumentStatus; label: string; cls: string }[] = [
@@ -73,12 +73,14 @@ function compressPhoto(file: File): Promise<string> {
 
 export function EmployeePage() {
   const user = useAuthStore((s) => s.user);
-  const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
+  const navigateToEmployeeDetails = useAppStore((s) => s.navigateToEmployeeDetails);
   const consumeEmployeeFilter = useAppStore((s) => s.consumeEmployeeFilter);
-  const realtimeVersion = useRealtimeVersion(['employee', 'site']);
+  const consumePendingEditEmployeeId = useAppStore((s) => s.consumePendingEditEmployeeId);
+  const realtimeVersion = useRealtimeVersion(['employee', 'site', 'camp']);
 
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  const [camps, setCamps] = useState<CampWithCount[] | null>(null);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -91,7 +93,6 @@ export function EmployeePage() {
   const [form, setForm] = useState<EmployeeInput>(EMPTY_FORM);
   const [formTab, setFormTab] = useState('personal');
   const [saving, setSaving] = useState(false);
-  const [viewTarget, setViewTarget] = useState<EmployeeVM | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<EmployeeVM | null>(null);
   const [requestDeleteTarget, setRequestDeleteTarget] = useState<EmployeeVM | null>(null);
   const [requestReason, setRequestReason] = useState('');
@@ -100,10 +101,11 @@ export function EmployeePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // cross-page filter (e.g. dashboard "Idle" card)
+  // (pending edit is consumed in the employees-watching effect below, once data is loaded)
   useEffect(() => {
     const f = consumeEmployeeFilter();
     if (f === 'idle' || f === 'working') setStatusFilter(f);
-     
+
   }, []);
 
   // debounce search
@@ -117,17 +119,18 @@ export function EmployeePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts] = await Promise.all([dataApi.listEmployees(), dataApi.listSites()]);
-        if (!cancelled) { setEmployees(emps); setSites(sts); }
+        const [emps, sts, cps] = await Promise.all([dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps()]);
+        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
       }
     })();
     return () => { cancelled = true; };
-     
+
   }, [realtimeVersion]);
 
   const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
+  const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
 
   // filtering
   const filtered = useMemo(() => {
@@ -175,6 +178,7 @@ export function EmployeePage() {
       id_number: emp.id_number,
       id_status: emp.id_status,
       current_site_id: emp.current_site_id,
+      camp_id: emp.camp_id,
       photo: emp.photo,
       is_team_leader: emp.is_team_leader,
       team_leader_site_id: emp.team_leader_site_id,
@@ -183,6 +187,15 @@ export function EmployeePage() {
     setFormTab('personal');
     setFormOpen(true);
   };
+
+  useEffect(() => {
+    const editId = consumePendingEditEmployeeId();
+    if (editId) {
+      const emp = employees?.find((e) => e.id === editId);
+      if (emp) openEdit(emp);
+    }
+
+  }, [employees]);
 
   const submitForm = async () => {
     if (!form.full_name.trim()) {
@@ -387,6 +400,11 @@ export function EmployeePage() {
                               ) : (
                                 <span className="inline-flex items-center gap-0.5 text-amber-500"><UserX size={10} /> Idle</span>
                               )}
+                              {emp.camp_name && (
+                                <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                                  <Tent size={9} className="inline" />{emp.camp_name}
+                                </span>
+                              )}
                               {emp.nationality && <span className="ml-1">{emp.nationality}</span>}
                             </p>
                           </div>
@@ -405,7 +423,7 @@ export function EmployeePage() {
                       <td className="px-4 py-3"><EmployeeStatusBadge status={emp.status} /></td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-end gap-1">
-                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="View" onClick={() => setViewTarget(emp)}>
+                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}>
                             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
                           </Button>
                           <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="Edit" onClick={() => openEdit(emp)}>
@@ -456,12 +474,17 @@ export function EmployeePage() {
                     <EmployeeStatusBadge status={emp.status} />
                   </div>
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {emp.site_name ? <SiteBadge name={emp.site_name} /> : <SiteBadge name={null} />}
+                      {emp.camp_name && (
+                        <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                          <Tent size={9} className="inline" />{emp.camp_name}
+                        </span>
+                      )}
                       <RatingStars rating={emp.rating} size={12} />
                     </div>
                     <div className="flex gap-1">
-                      <Button variant="outline" size="icon" className="size-8" onClick={() => setViewTarget(emp)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></Button>
+                      <Button variant="outline" size="icon" className="size-8" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></Button>
                       <Button variant="outline" size="icon" className="size-8" onClick={() => openEdit(emp)}><Pencil size={13} /></Button>
                       {emp.status !== 'pending_deletion' && (
                         <Button variant="outline" size="icon" className="size-8 hover:border-rose-500/40 hover:text-rose-500" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}><Trash2 size={13} /></Button>
@@ -629,6 +652,28 @@ export function EmployeePage() {
                   </div>
                 )}
 
+                {/* Camp assignment */}
+                <div className="space-y-2 sm:col-span-2">
+                  <Label className="flex items-center gap-1.5"><Tent size={13} className="text-amber-500" /> Accommodation Camp</Label>
+                  <Select
+                    value={form.camp_id ?? 'none'}
+                    onValueChange={(v) => setForm((f) => ({ ...f, camp_id: v === 'none' ? null : v }))}
+                  >
+                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">🟡 No camp assigned</SelectItem>
+                      {activeCamps.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          {c.name}{c.employee_count != null ? ` (${c.employee_count})` : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">
+                    Where the employee stays. Each employee belongs to exactly one camp — change it anytime here or from the Camps page.
+                  </p>
+                </div>
+
                 {/* Team leader */}
                 <div className="rounded-xl border border-border/60 bg-muted/40 p-4 sm:col-span-2">
                   <div className="flex items-center justify-between gap-3">
@@ -721,88 +766,6 @@ export function EmployeePage() {
         </DialogContent>
       </Dialog>
 
-      {/* ============ Details dialog ============ */}
-      <Dialog open={!!viewTarget} onOpenChange={(o) => { if (!o) setViewTarget(null); }}>
-        <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
-          {viewTarget && (
-            <>
-              <DialogHeader>
-                <div className="flex items-center gap-3">
-                  <span className="flex size-12 items-center justify-center overflow-hidden rounded-2xl bg-brand/15 text-sm font-bold text-brand">
-                    {viewTarget.photo ? (
-                       
-                      <img src={viewTarget.photo} alt={viewTarget.full_name} className="size-full object-cover" />
-                    ) : initials(viewTarget.full_name)}
-                  </span>
-                  <div>
-                    <DialogTitle className="flex items-center gap-2">
-                      {viewTarget.full_name}
-                      {viewTarget.is_team_leader && <Crown size={14} className="fill-amber-400 text-amber-400" />}
-                    </DialogTitle>
-                    <DialogDescription className="flex items-center gap-2">
-                      <span className="font-mono">{viewTarget.employee_code}</span>
-                      <EmployeeStatusBadge status={viewTarget.status} />
-                    </DialogDescription>
-                  </div>
-                </div>
-              </DialogHeader>
-
-                <div className="space-y-4">
-                  <DetailSection title="Personal Information" rows={[
-                    ['Nationality', viewTarget.nationality],
-                    ['Date of Birth', fmtDate(viewTarget.date_of_birth)],
-                    ['Phone', viewTarget.phone],
-                    ['Email', viewTarget.email],
-                    ['Emergency Contact', viewTarget.emergency_contact],
-                    ['Address', viewTarget.address],
-                  ]} />
-                  <DetailSection title="Professional Information" rows={[
-                    ['Position', viewTarget.position],
-                    ['Join Date', fmtDate(viewTarget.join_date)],
-                    ['Company', viewTarget.company_name],
-                    ['Current Site', viewTarget.site_name ?? 'Idle — not assigned'],
-                  ]} />
-                  {viewTarget.is_team_leader && (
-                    <div className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-600 dark:text-amber-400">
-                      <Crown size={15} className="fill-amber-400 text-amber-400" />
-                      Team Leader {viewTarget.leader_site_name ? `of ${viewTarget.leader_site_name}` : ''}
-                    </div>
-                  )}
-                  <DetailSection title="Document Details" rows={[
-                    ['Passport Number', viewTarget.passport_number],
-                    ['Passport Status', viewTarget.passport_status ?? '—'],
-                    ['ID Number', viewTarget.id_number],
-                    ['ID Status', viewTarget.id_status ?? '—'],
-                  ]} />
-                  <div>
-                    <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Performance Rating</p>
-                    <div className="flex items-center gap-3 rounded-xl border bg-muted/40 px-4 py-3">
-                      <span className="text-2xl font-semibold">{viewTarget.rating.toFixed(1)}</span>
-                      <span className="text-sm text-muted-foreground">/ 5.0</span>
-                      <RatingStars rating={viewTarget.rating} size={16} />
-                    </div>
-                  </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Created {fmtDate(viewTarget.created_at)} · Updated {fmtDate(viewTarget.updated_at)}
-                  </p>
-                </div>
-
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button className="flex-1 brand-gradient font-semibold text-white" onClick={() => downloadEmployeeCv(viewTarget)}>
-                    <FileDown size={15} className="mr-1.5" /> Download CV
-                  </Button>
-                  <Button variant="outline" className="flex-1" onClick={() => shareEmployeeCvViaWhatsApp(viewTarget)}>
-                    <MessageCircle size={15} className="mr-1.5" /> Share via WhatsApp
-                  </Button>
-                  <Button variant="outline" onClick={() => { const t = viewTarget; setViewTarget(null); openEdit(t); }}>
-                    <Pencil size={15} />
-                  </Button>
-                </div>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
-
       {/* ============ Delete (super admin) ============ */}
       <AlertDialog open={!!deleteTarget} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
         <AlertDialogContent>
@@ -843,24 +806,6 @@ export function EmployeePage() {
         </DialogContent>
       </Dialog>
 
-      <button onClick={() => navigateToEmployees('idle')} className="hidden" aria-hidden />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-function DetailSection({ title, rows }: { title: string; rows: [string, string | null][] }) {
-  return (
-    <div>
-      <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p>
-      <div className="grid gap-x-6 gap-y-2 rounded-xl border bg-muted/30 px-4 py-3 sm:grid-cols-2">
-        {rows.map(([k, v]) => (
-          <div key={k} className="min-w-0">
-            <p className="text-[11px] text-muted-foreground">{k}</p>
-            <p className="truncate text-sm">{v || '—'}</p>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

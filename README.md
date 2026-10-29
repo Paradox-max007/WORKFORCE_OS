@@ -20,16 +20,17 @@ animated product identity.
 | Module | Capabilities |
 |---|---|
 | **Dashboard** | Live KPI cards, 6-month attendance analytics, site-wise breakdown, idle-employee radar — all animated & realtime |
-| **Employees** | Full profiles (passport/ID, emergency contact, rating), photo, site assignment, team-leader flag, soft-delete with cascade hide, **CV PDF export**, **WhatsApp share** |
-| **Sites** | Client/project tracking, activate/deactivate with crew impact warning, per-site crew view, add/remove crew, printable **A4 attendance sheet** (PDF / print) |
-| **Attendance** | Employee × day matrix + calendar view, 4 statuses, overtime hours, Friday & "last 7 days" highlights, auto-record defaults, rating engine (±0.2 / OT hour), **auto-warning after 3 consecutive absences** |
+| **Employees** | Full profiles (passport/ID, emergency contact, rating, camp), photo, site + camp assignment, team-leader flag, soft-delete with cascade hide, **CV PDF export**, **dedicated details page** (not a modal) with **Track Record viewer** & **WhatsApp share with lifetime / specific-month timesheets** |
+| **Sites** | Client/project tracking, activate/deactivate with crew impact warning, per-site crew view, add/remove crew, printable **A4 attendance sheet** (PDF / print, alphabetical, with hand-fill TOTAL PRESENT / ABSENT lines) |
+| **Camps** | **Accommodation management** — create/edit/deactivate/delete camps (location, capacity, notes), **one employee ↔ exactly one camp**, instant transfers between camps, bulk move/remove, capacity usage bars |
+| **Attendance** | **Excel-style marking sheet** — every cell is an always-editable input (custom hours e.g. `8`, `10.5` or `A` for absent), **TOTAL HOURS column** (row sum) + **ABSENT count** beside it, alphabetical rows, site filter narrows the crew, per-employee calendar view, rating engine (±0.2 / OT hour above 8h/day), **auto-warning after 3 consecutive absences** |
 | **Leave Requests** | 6 leave types, day math, approve/reject workflow, reviewer audit trail |
 | **Cancellation Requests** | Attendance cancellation approvals with reviewer audit trail |
 | **Warnings & Fines** | Manual + auto-generated warnings, fines with amounts, full history |
 | **Uniform Registry** | Sequential tokens & IDs, encrypted ID/passport numbers (AES-256-GCM), item checklist (uniform/shoes/helmet/bottle/safety jacket), **6-month renewal chain**, per-employee history |
 | **Notifications** | Per-user inbox, unread badges, mark-all-read, auto-notifications on requests/warnings/fines |
-| **Admin Management** | Super-admin & admin roles, **per-menu permission toggles**, create/edit/delete admins (last-super-admin protected) |
-| **Realtime** | **Supabase Realtime** on every table — changes stream into all open tabs/devices instantly |
+| **Admin Management** | Super-admin & admin roles, **per-menu permission toggles** (incl. Camps), create/edit/delete admins (last-super-admin protected) |
+| **Realtime** | **Supabase Realtime** on every table (incl. camp) — changes stream into all open tabs/devices instantly |
 
 ### What's new vs. legacy ASM
 
@@ -76,9 +77,14 @@ Open http://localhost:3000 — the app boots in **Demo Mode** with a full seeded
 1. Create a project at [database.new](https://database.new).
 2. Open **SQL Editor → New query**, paste the entire contents of
    [`supabase/schema.sql`](supabase/schema.sql) and **Run**.
-3. This single file creates everything: 11 tables, indexes, FK relationships, RLS policies,
-   triggers, 25+ RPC functions (the whole business-logic engine) and adds every table to the
-   **Supabase Realtime publication**.
+3. This single file creates everything: 12 tables (incl. the new `camp` accommodation table),
+   indexes, FK relationships, RLS policies, triggers, 30+ RPC functions (the whole
+   business-logic engine — including the Excel-style `mark_attendance` hours model) and adds
+   every table to the **Supabase Realtime publication**.
+
+> **Already ran an older version of schema.sql?** Drop the old schema first
+> (`drop schema public cascade; create schema public;`) then re-run — the attendance
+> model changed to per-day worked hours (`hours` column) and camps were added.
 
 ### 2. Point the app at it
 

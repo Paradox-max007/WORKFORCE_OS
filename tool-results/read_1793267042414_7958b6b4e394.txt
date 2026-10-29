@@ -1,0 +1,812 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Employee management module
+     5→// ============================================================================
+     6→
+     7→import { AnimatePresence, motion } from 'framer-motion';
+     8→import {
+     9→  Crown, ImagePlus, Loader2, MapPin, Pencil, Plus, Search, Tent, Trash2,
+    10→  UserRound, UserX, X,
+    11→} from 'lucide-react';
+    12→import { useEffect, useMemo, useRef, useState } from 'react';
+    13→import { toast } from 'sonner';
+    14→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    15→import { NationalitySelect } from '@/components/shared/nationality-select';
+    16→import { EmptyState, EmployeeStatusBadge, RatingStars, SiteBadge, SkeletonRows } from '@/components/shared/primitives';
+    17→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+    18→import { Button } from '@/components/ui/button';
+    19→import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    20→import { Input } from '@/components/ui/input';
+    21→import { Label } from '@/components/ui/label';
+    22→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    23→import { Switch } from '@/components/ui/switch';
+    24→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    25→import { Textarea } from '@/components/ui/textarea';
+    26→import { dataApi } from '@/lib/data';
+    27→import { initials } from '@/lib/format';
+    28→import { cn } from '@/lib/utils';
+    29→import type { CampWithCount, DocumentStatus, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+    30→import { useAppStore } from '@/store/app-store';
+    31→import { useAuthStore } from '@/store/auth-store';
+    32→import { useRealtimeVersion } from '@/store/realtime';
+    33→
+    34→const EMPTY_FORM: EmployeeInput = {
+    35→  full_name: '', nationality: null, date_of_birth: null, phone: null, email: null,
+    36→  address: null, emergency_contact: null, position: null, join_date: null,
+    37→  company_name: null, passport_number: null, passport_status: null, id_number: null,
+    38→  id_status: null, current_site_id: null, camp_id: null, photo: null,
+    39→  is_team_leader: false, team_leader_site_id: null,
+    40→};
+    41→
+    42→const DOC_STATUSES: { value: DocumentStatus; label: string; cls: string }[] = [
+    43→  { value: 'Valid', label: '✓ Valid', cls: 'text-emerald-500' },
+    44→  { value: 'Expired', label: '✗ Expired', cls: 'text-rose-500' },
+    45→  { value: 'N/A', label: 'N/A', cls: 'text-zinc-400' },
+    46→];
+    47→
+    48→const nullify = (v: string): string | null => (v.trim() === '' ? null : v.trim());
+    49→
+    50→// client-side photo compression (max 300px, JPEG 0.8)
+    51→function compressPhoto(file: File): Promise<string> {
+    52→  return new Promise((resolve, reject) => {
+    53→    const reader = new FileReader();
+    54→    reader.onload = () => {
+    55→      const img = new window.Image();
+    56→      img.onload = () => {
+    57→        const scale = Math.min(1, 300 / Math.max(img.width, img.height));
+    58→        const canvas = document.createElement('canvas');
+    59→        canvas.width = Math.round(img.width * scale);
+    60→        canvas.height = Math.round(img.height * scale);
+    61→        const ctx = canvas.getContext('2d');
+    62→        if (!ctx) return reject(new Error('Canvas unavailable'));
+    63→        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    64→        resolve(canvas.toDataURL('image/jpeg', 0.8));
+    65→      };
+    66→      img.onerror = () => reject(new Error('Invalid image'));
+    67→      img.src = reader.result as string;
+    68→    };
+    69→    reader.onerror = () => reject(new Error('Failed to read file'));
+    70→    reader.readAsDataURL(file);
+    71→  });
+    72→}
+    73→
+    74→export function EmployeePage() {
+    75→  const user = useAuthStore((s) => s.user);
+    76→  const navigateToEmployeeDetails = useAppStore((s) => s.navigateToEmployeeDetails);
+    77→  const consumeEmployeeFilter = useAppStore((s) => s.consumeEmployeeFilter);
+    78→  const consumePendingEditEmployeeId = useAppStore((s) => s.consumePendingEditEmployeeId);
+    79→  const realtimeVersion = useRealtimeVersion(['employee', 'site', 'camp']);
+    80→
+    81→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    82→  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+    83→  const [camps, setCamps] = useState<CampWithCount[] | null>(null);
+    84→  const [search, setSearch] = useState('');
+    85→  const [debouncedSearch, setDebouncedSearch] = useState('');
+    86→  const [statusFilter, setStatusFilter] = useState('all');
+    87→  const [page, setPage] = useState(1);
+    88→  const PER_PAGE = 20;
+    89→
+    90→  // form / dialogs
+    91→  const [formOpen, setFormOpen] = useState(false);
+    92→  const [editingId, setEditingId] = useState<string | null>(null);
+    93→  const [form, setForm] = useState<EmployeeInput>(EMPTY_FORM);
+    94→  const [formTab, setFormTab] = useState('personal');
+    95→  const [saving, setSaving] = useState(false);
+    96→  const [deleteTarget, setDeleteTarget] = useState<EmployeeVM | null>(null);
+    97→  const [requestDeleteTarget, setRequestDeleteTarget] = useState<EmployeeVM | null>(null);
+    98→  const [requestReason, setRequestReason] = useState('');
+    99→  const [newSiteName, setNewSiteName] = useState<string | null>(null);
+   100→  const [addingSite, setAddingSite] = useState(false);
+   101→  const fileInputRef = useRef<HTMLInputElement>(null);
+   102→
+   103→  // cross-page filter (e.g. dashboard "Idle" card)
+   104→  // (pending edit is consumed in the employees-watching effect below, once data is loaded)
+   105→  useEffect(() => {
+   106→    const f = consumeEmployeeFilter();
+   107→    if (f === 'idle' || f === 'working') setStatusFilter(f);
+   108→
+   109→  }, []);
+   110→
+   111→  // debounce search
+   112→  useEffect(() => {
+   113→    const t = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 300);
+   114→    return () => clearTimeout(t);
+   115→  }, [search]);
+   116→
+   117→  // data loading
+   118→  useEffect(() => {
+   119→    let cancelled = false;
+   120→    (async () => {
+   121→      try {
+   122→        const [emps, sts, cps] = await Promise.all([dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps()]);
+   123→        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); }
+   124→      } catch (err) {
+   125→        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
+   126→      }
+   127→    })();
+   128→    return () => { cancelled = true; };
+   129→
+   130→  }, [realtimeVersion]);
+   131→
+   132→  const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
+   133→  const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
+   134→
+   135→  // filtering
+   136→  const filtered = useMemo(() => {
+   137→    const list = employees ?? [];
+   138→    const q = debouncedSearch.toLowerCase().trim();
+   139→    return list.filter((e) => {
+   140→      if (statusFilter === 'active' && e.status !== 'active') return false;
+   141→      if (statusFilter === 'working' && (e.status !== 'active' || !e.current_site_id)) return false;
+   142→      if (statusFilter === 'idle' && (e.status !== 'active' || e.current_site_id)) return false;
+   143→      if (statusFilter === 'pending_deletion' && e.status !== 'pending_deletion') return false;
+   144→      if (q) {
+   145→        const hay = `${e.full_name} ${e.employee_code} ${e.nationality ?? ''} ${e.phone ?? ''} ${e.position ?? ''}`.toLowerCase();
+   146→        if (!hay.includes(q)) return false;
+   147→      }
+   148→      return true;
+   149→    });
+   150→  }, [employees, debouncedSearch, statusFilter]);
+   151→
+   152→  const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+   153→  const safePage = Math.min(page, totalPages);
+   154→  const pageRows = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+   155→
+   156→  // ---- actions ---------------------------------------------------------------
+   157→  const openAdd = () => {
+   158→    setForm(EMPTY_FORM);
+   159→    setEditingId(null);
+   160→    setFormTab('personal');
+   161→    setFormOpen(true);
+   162→  };
+   163→
+   164→  const openEdit = (emp: EmployeeVM) => {
+   165→    setForm({
+   166→      full_name: emp.full_name,
+   167→      nationality: emp.nationality,
+   168→      date_of_birth: emp.date_of_birth,
+   169→      phone: emp.phone,
+   170→      email: emp.email,
+   171→      address: emp.address,
+   172→      emergency_contact: emp.emergency_contact,
+   173→      position: emp.position,
+   174→      join_date: emp.join_date,
+   175→      company_name: emp.company_name,
+   176→      passport_number: emp.passport_number,
+   177→      passport_status: emp.passport_status,
+   178→      id_number: emp.id_number,
+   179→      id_status: emp.id_status,
+   180→      current_site_id: emp.current_site_id,
+   181→      camp_id: emp.camp_id,
+   182→      photo: emp.photo,
+   183→      is_team_leader: emp.is_team_leader,
+   184→      team_leader_site_id: emp.team_leader_site_id,
+   185→    });
+   186→    setEditingId(emp.id);
+   187→    setFormTab('personal');
+   188→    setFormOpen(true);
+   189→  };
+   190→
+   191→  useEffect(() => {
+   192→    const editId = consumePendingEditEmployeeId();
+   193→    if (editId) {
+   194→      const emp = employees?.find((e) => e.id === editId);
+   195→      if (emp) openEdit(emp);
+   196→    }
+   197→
+   198→  }, [employees]);
+   199→
+   200→  const submitForm = async () => {
+   201→    if (!form.full_name.trim()) {
+   202→      setFormTab('personal');
+   203→      toast.error('Full name is required');
+   204→      return;
+   205→    }
+   206→    setSaving(true);
+   207→    const payload: EmployeeInput = {
+   208→      ...form,
+   209→      full_name: form.full_name.trim(),
+   210→      nationality: form.nationality ? nullify(form.nationality) : null,
+   211→      phone: form.phone ? nullify(form.phone) : null,
+   212→      email: form.email ? nullify(form.email) : null,
+   213→      address: form.address ? nullify(form.address) : null,
+   214→      emergency_contact: form.emergency_contact ? nullify(form.emergency_contact) : null,
+   215→      position: form.position ? nullify(form.position) : null,
+   216→      company_name: form.company_name ? nullify(form.company_name) : null,
+   217→      passport_number: form.passport_number ? nullify(form.passport_number) : null,
+   218→      id_number: form.id_number ? nullify(form.id_number) : null,
+   219→    };
+   220→    try {
+   221→      if (editingId) {
+   222→        const updated = await dataApi.updateEmployee(editingId, payload);
+   223→        toast.success('Employee updated', { description: `${updated.full_name} saved.` });
+   224→      } else {
+   225→        const created = await dataApi.createEmployee(payload);
+   226→        toast.success('Employee created', { description: `${created.full_name} — ID ${created.employee_code}` });
+   227→      }
+   228→      setFormOpen(false);
+   229→    } catch (err) {
+   230→      toast.error(err instanceof Error ? err.message : 'Save failed');
+   231→    } finally {
+   232→      setSaving(false);
+   233→    }
+   234→  };
+   235→
+   236→  const handlePhoto = async (file: File | undefined) => {
+   237→    if (!file) return;
+   238→    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+   239→      toast.error('Only JPEG, PNG or WebP images are allowed');
+   240→      return;
+   241→    }
+   242→    if (file.size > 10 * 1024 * 1024) {
+   243→      toast.error('Image is too large (max 10MB)');
+   244→      return;
+   245→    }
+   246→    try {
+   247→      const photo = await compressPhoto(file);
+   248→      setForm((f) => ({ ...f, photo }));
+   249→    } catch {
+   250→      toast.error('Failed to process image');
+   251→    }
+   252→  };
+   253→
+   254→  const confirmDelete = async () => {
+   255→    if (!deleteTarget) return;
+   256→    try {
+   257→      await dataApi.deleteEmployeeCascade(deleteTarget.id);
+   258→      toast.success('Employee deleted', { description: `${deleteTarget.full_name} and related records were removed from view.` });
+   259→    } catch (err) {
+   260→      toast.error(err instanceof Error ? err.message : 'Delete failed');
+   261→    } finally {
+   262→      setDeleteTarget(null);
+   263→    }
+   264→  };
+   265→
+   266→  const confirmRequestDeletion = async () => {
+   267→    if (!requestDeleteTarget) return;
+   268→    try {
+   269→      await dataApi.requestEmployeeDeletion(requestDeleteTarget.id, requestReason.trim() || null);
+   270→      toast.success('Deletion requested', { description: 'A super admin will review this request.' });
+   271→      setRequestDeleteTarget(null);
+   272→      setRequestReason('');
+   273→    } catch (err) {
+   274→      toast.error(err instanceof Error ? err.message : 'Request failed');
+   275→    }
+   276→  };
+   277→
+   278→  const addSiteInline = async () => {
+   279→    if (!newSiteName?.trim()) return;
+   280→    setAddingSite(true);
+   281→    try {
+   282→      const site = await dataApi.createSite(newSiteName.trim(), null, null);
+   283→      toast.success('Site created', { description: site.name });
+   284→      setForm((f) => ({ ...f, current_site_id: site.id }));
+   285→      setNewSiteName(null);
+   286→    } catch (err) {
+   287→      toast.error(err instanceof Error ? err.message : 'Failed to create site');
+   288→    } finally {
+   289→      setAddingSite(false);
+   290→    }
+   291→  };
+   292→
+   293→  const isSuperAdmin = user?.role === 'super_admin';
+   294→  const loading = !employees || !sites;
+   295→
+   296→  return (
+   297→    <div className="mx-auto max-w-7xl">
+   298→      {/* header */}
+   299→      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+   300→        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+   301→          <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Employee Management</h1>
+   302→          <p className="mt-1 text-sm text-muted-foreground">
+   303→            {filtered.length} employee{filtered.length !== 1 ? 's' : ''} · full HR profiles, documents and ratings
+   304→          </p>
+   305→        </motion.div>
+   306→        <Button onClick={openAdd} className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]">
+   307→          <Plus size={16} className="mr-1.5" /> Add Employee
+   308→        </Button>
+   309→      </div>
+   310→
+   311→      {/* filters */}
+   312→      <div className="mb-4 flex flex-wrap items-center gap-2">
+   313→        <div className="relative min-w-56 flex-1 sm:max-w-xs">
+   314→          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   315→          <Input
+   316→            placeholder="Search by name, ID, nationality, phone, position…"
+   317→            className="h-10 pl-9"
+   318→            value={search}
+   319→            onChange={(e) => setSearch(e.target.value)}
+   320→          />
+   321→        </div>
+   322→        <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1); }}>
+   323→          <SelectTrigger className="h-10 w-44 bg-card"><SelectValue /></SelectTrigger>
+   324→          <SelectContent>
+   325→            <SelectItem value="all">All Statuses</SelectItem>
+   326→            <SelectItem value="active">Active</SelectItem>
+   327→            <SelectItem value="working">Currently Working</SelectItem>
+   328→            <SelectItem value="idle">Idle (No Site)</SelectItem>
+   329→            <SelectItem value="pending_deletion">Pending Deletion</SelectItem>
+   330→          </SelectContent>
+   331→        </Select>
+   332→        {(search || statusFilter !== 'all') && (
+   333→          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setPage(1); }}>
+   334→            <X size={14} className="mr-1" /> Reset
+   335→          </Button>
+   336→        )}
+   337→      </div>
+   338→
+   339→      {/* table */}
+   340→      {loading ? (
+   341→        <SkeletonRows rows={6} />
+   342→      ) : pageRows.length === 0 ? (
+   343→        <EmptyState
+   344→          icon={<UserRound size={22} />}
+   345→          title="No employees found"
+   346→          description={search || statusFilter !== 'all' ? 'Try adjusting your filters.' : 'Add your first employee to get started.'}
+   347→          action={
+   348→            !search && statusFilter === 'all' ? (
+   349→              <Button onClick={openAdd} variant="outline"><Plus size={15} className="mr-1.5" /> Add Employee</Button>
+   350→            ) : undefined
+   351→          }
+   352→        />
+   353→      ) : (
+   354→        <>
+   355→          {/* desktop */}
+   356→          <div className="hidden overflow-x-auto rounded-xl border bg-card md:block">
+   357→            <table className="w-full text-sm">
+   358→              <thead>
+   359→                <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
+   360→                  <th className="px-4 py-3 font-medium">Employee</th>
+   361→                  <th className="px-4 py-3 font-medium">ID</th>
+   362→                  <th className="px-4 py-3 font-medium">Position</th>
+   363→                  <th className="px-4 py-3 font-medium">Site</th>
+   364→                  <th className="px-4 py-3 font-medium">Rating</th>
+   365→                  <th className="px-4 py-3 font-medium">Status</th>
+   366→                  <th className="px-4 py-3 text-right font-medium">Actions</th>
+   367→                </tr>
+   368→              </thead>
+   369→              <tbody>
+   370→                <AnimatePresence>
+   371→                  {pageRows.map((emp, i) => (
+   372→                    <motion.tr
+   373→                      key={emp.id}
+   374→                      initial={{ opacity: 0, y: 8 }}
+   375→                      animate={{ opacity: 1, y: 0 }}
+   376→                      exit={{ opacity: 0 }}
+   377→                      transition={{ delay: i * 0.03 }}
+   378→                      className="border-b border-border/40 transition-colors last:border-0 hover:bg-brand/[0.03]"
+   379→                    >
+   380→                      <td className="px-4 py-3">
+   381→                        <div className="flex items-center gap-3">
+   382→                          <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
+   383→                            {emp.photo ? (
+   384→                               
+   385→                              <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+   386→                            ) : initials(emp.full_name)}
+   387→                          </span>
+   388→                          <div className="min-w-0">
+   389→                            <p className="flex items-center gap-1.5 font-medium">
+   390→                              <span className="truncate">{emp.full_name}</span>
+   391→                              {emp.is_team_leader && (
+   392→                                <span title="Team Leader" className="inline-flex">
+   393→                                  <Crown size={12} className="shrink-0 fill-amber-400 text-amber-400" />
+   394→                                </span>
+   395→                              )}
+   396→                            </p>
+   397→                            <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+   398→                              {emp.site_name ? (
+   399→                                <SiteBadge name={emp.site_name} />
+   400→                              ) : (
+   401→                                <span className="inline-flex items-center gap-0.5 text-amber-500"><UserX size={10} /> Idle</span>
+   402→                              )}
+   403→                              {emp.camp_name && (
+   404→                                <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+   405→                                  <Tent size={9} className="inline" />{emp.camp_name}
+   406→                                </span>
+   407→                              )}
+   408→                              {emp.nationality && <span className="ml-1">{emp.nationality}</span>}
+   409→                            </p>
+   410→                          </div>
+   411→                        </div>
+   412→                      </td>
+   413→                      <td className="px-4 py-3 font-mono text-xs">{emp.employee_code}</td>
+   414→                      <td className="px-4 py-3">{emp.position ?? '—'}</td>
+   415→                      <td className="px-4 py-3">
+   416→                        {emp.site_name ? (
+   417→                          <span className="inline-flex items-center gap-1"><MapPin size={12} className="text-emerald-500" />{emp.site_name}</span>
+   418→                        ) : (
+   419→                          <span className="text-xs text-muted-foreground">Unassigned</span>
+   420→                        )}
+   421→                      </td>
+   422→                      <td className="px-4 py-3"><RatingStars rating={emp.rating} /></td>
+   423→                      <td className="px-4 py-3"><EmployeeStatusBadge status={emp.status} /></td>
+   424→                      <td className="px-4 py-3">
+   425→                        <div className="flex items-center justify-end gap-1">
+   426→                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}>
+   427→                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+   428→                          </Button>
+   429→                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="Edit" onClick={() => openEdit(emp)}>
+   430→                            <Pencil size={14} />
+   431→                          </Button>
+   432→                          {emp.status !== 'pending_deletion' && (
+   433→                            <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500" title="Delete" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}>
+   434→                              <Trash2 size={14} />
+   435→                            </Button>
+   436→                          )}
+   437→                        </div>
+   438→                      </td>
+   439→                    </motion.tr>
+   440→                  ))}
+   441→                </AnimatePresence>
+   442→              </tbody>
+   443→            </table>
+   444→          </div>
+   445→
+   446→          {/* mobile cards */}
+   447→          <div className="grid gap-3 md:hidden">
+   448→            <AnimatePresence>
+   449→              {pageRows.map((emp, i) => (
+   450→                <motion.div
+   451→                  key={emp.id}
+   452→                  initial={{ opacity: 0, y: 12 }}
+   453→                  animate={{ opacity: 1, y: 0 }}
+   454→                  exit={{ opacity: 0 }}
+   455→                  transition={{ delay: i * 0.04 }}
+   456→                  className="card-glow rounded-xl border bg-card p-4"
+   457→                >
+   458→                  <div className="flex items-start justify-between gap-2">
+   459→                    <div className="flex items-center gap-3">
+   460→                      <span className="flex size-10 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
+   461→                        {emp.photo ? (
+   462→                           
+   463→                          <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+   464→                        ) : initials(emp.full_name)}
+   465→                      </span>
+   466→                      <div>
+   467→                        <p className="flex items-center gap-1 font-medium">
+   468→                          {emp.full_name}
+   469→                          {emp.is_team_leader && <Crown size={12} className="fill-amber-400 text-amber-400" />}
+   470→                        </p>
+   471→                        <p className="font-mono text-[11px] text-muted-foreground">{emp.employee_code} · {emp.position ?? '—'}</p>
+   472→                      </div>
+   473→                    </div>
+   474→                    <EmployeeStatusBadge status={emp.status} />
+   475→                  </div>
+   476→                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+   477→                    <div className="flex flex-wrap items-center gap-2">
+   478→                      {emp.site_name ? <SiteBadge name={emp.site_name} /> : <SiteBadge name={null} />}
+   479→                      {emp.camp_name && (
+   480→                        <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+   481→                          <Tent size={9} className="inline" />{emp.camp_name}
+   482→                        </span>
+   483→                      )}
+   484→                      <RatingStars rating={emp.rating} size={12} />
+   485→                    </div>
+   486→                    <div className="flex gap-1">
+   487→                      <Button variant="outline" size="icon" className="size-8" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></Button>
+   488→                      <Button variant="outline" size="icon" className="size-8" onClick={() => openEdit(emp)}><Pencil size={13} /></Button>
+   489→                      {emp.status !== 'pending_deletion' && (
+   490→                        <Button variant="outline" size="icon" className="size-8 hover:border-rose-500/40 hover:text-rose-500" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}><Trash2 size={13} /></Button>
+   491→                      )}
+   492→                    </div>
+   493→                  </div>
+   494→                </motion.div>
+   495→              ))}
+   496→            </AnimatePresence>
+   497→          </div>
+   498→
+   499→          {/* pagination */}
+   500→          {totalPages > 1 && (
+   501→            <div className="mt-4 flex flex-wrap items-center justify-center gap-1">
+   502→              {(['first', 'prev'] as const).map((k) => (
+   503→                <Button key={k} variant="outline" size="sm" disabled={k === 'first' ? safePage === 1 : safePage === 1} onClick={() => setPage(k === 'first' ? 1 : safePage - 1)}>
+   504→                  {k === 'first' ? '«' : '‹'}
+   505→                </Button>
+   506→              ))}
+   507→              {Array.from({ length: totalPages }).slice(Math.max(0, Math.min(safePage - 3, totalPages - 5)), Math.max(5, Math.min(totalPages, safePage + 2))).map((_, idx) => {
+   508→                const n = Math.max(0, Math.min(safePage - 3, totalPages - 5)) + idx + 1;
+   509→                return (
+   510→                  <Button key={n} variant={n === safePage ? 'default' : 'outline'} size="sm" className={cn(n === safePage && 'brand-gradient text-white')} onClick={() => setPage(n)}>
+   511→                    {n}
+   512→                  </Button>
+   513→                );
+   514→              })}
+   515→              {(['next', 'last'] as const).map((k) => (
+   516→                <Button key={k} variant="outline" size="sm" disabled={safePage === totalPages} onClick={() => setPage(k === 'last' ? totalPages : safePage + 1)}>
+   517→                  {k === 'next' ? '›' : '»'}
+   518→                </Button>
+   519→              ))}
+   520→            </div>
+   521→          )}
+   522→        </>
+   523→      )}
+   524→
+   525→      {/* ============ Add/Edit dialog ============ */}
+   526→      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+   527→        <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
+   528→          <DialogHeader>
+   529→            <DialogTitle>{editingId ? 'Edit Employee' : 'Add New Employee'}</DialogTitle>
+   530→            <DialogDescription>
+   531→              {editingId
+   532→                ? 'Update personal, professional and document details.'
+   533→                : 'The employee ID is auto-generated in the ASM-YYYY-NNN format on save.'}
+   534→            </DialogDescription>
+   535→          </DialogHeader>
+   536→
+   537→          <Tabs value={formTab} onValueChange={setFormTab}>
+   538→            <TabsList className="grid w-full grid-cols-2">
+   539→              <TabsTrigger value="personal">Personal</TabsTrigger>
+   540→              <TabsTrigger value="professional">Professional</TabsTrigger>
+   541→            </TabsList>
+   542→
+   543→            {/* -------- Personal tab -------- */}
+   544→            <TabsContent value="personal" className="space-y-4 pt-4">
+   545→              {/* photo */}
+   546→              <div className="flex items-center gap-4">
+   547→                <span className="flex size-20 items-center justify-center overflow-hidden rounded-2xl border-2 border-dashed border-border bg-muted text-xs font-bold text-brand">
+   548→                  {form.photo ? (
+   549→                     
+   550→                    <img src={form.photo} alt="Preview" className="size-full object-cover" />
+   551→                  ) : (
+   552→                    <ImagePlus size={20} />
+   553→                  )}
+   554→                </span>
+   555→                <div className="space-y-2">
+   556→                  <p className="text-sm font-medium">Photo</p>
+   557→                  <p className="text-xs text-muted-foreground">JPEG/PNG/WebP up to 10MB. Auto-compressed to 300px.</p>
+   558→                  <div className="flex gap-2">
+   559→                    <Button type="button" variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>Choose File</Button>
+   560→                    {form.photo && (
+   561→                      <Button type="button" variant="outline" size="sm" onClick={() => setForm((f) => ({ ...f, photo: null }))}>Remove</Button>
+   562→                    )}
+   563→                  </div>
+   564→                  <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={(e) => handlePhoto(e.target.files?.[0] ?? undefined)} />
+   565→                </div>
+   566→              </div>
+   567→
+   568→              <div className="grid gap-4 sm:grid-cols-2">
+   569→                <div className="space-y-2 sm:col-span-2">
+   570→                  <Label>Full Name *</Label>
+   571→                  <Input value={form.full_name} onChange={(e) => setForm((f) => ({ ...f, full_name: e.target.value }))} placeholder="e.g. Rajesh Kumar" className="h-11" />
+   572→                </div>
+   573→                <div className="space-y-2">
+   574→                  <Label>Employee ID</Label>
+   575→                  <Input
+   576→                    value={editingId ? (employees?.find((e) => e.id === editingId)?.employee_code ?? '—') : ''}
+   577→                    readOnly
+   578→                    disabled
+   579→                    placeholder="Auto-generated on save"
+   580→                    className="h-11 font-mono"
+   581→                  />
+   582→                  {!editingId && <p className="text-[11px] text-muted-foreground">Format: ASM-YYYY-NNN — assigned automatically</p>}
+   583→                </div>
+   584→                <div className="space-y-2">
+   585→                  <Label>Nationality</Label>
+   586→                  <NationalitySelect value={form.nationality} onChange={(v) => setForm((f) => ({ ...f, nationality: v }))} />
+   587→                </div>
+   588→                <div className="space-y-2">
+   589→                  <Label>Date of Birth</Label>
+   590→                  <Input type="date" value={form.date_of_birth ?? ''} onChange={(e) => setForm((f) => ({ ...f, date_of_birth: e.target.value || null }))} className="h-11" />
+   591→                </div>
+   592→                <div className="space-y-2">
+   593→                  <Label>Phone</Label>
+   594→                  <Input value={form.phone ?? ''} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} placeholder="+966 5xx xxx xxxx" className="h-11" />
+   595→                </div>
+   596→                <div className="space-y-2">
+   597→                  <Label>Email</Label>
+   598→                  <Input type="email" value={form.email ?? ''} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className="h-11" />
+   599→                </div>
+   600→                <div className="space-y-2">
+   601→                  <Label>Emergency Contact</Label>
+   602→                  <Input value={form.emergency_contact ?? ''} onChange={(e) => setForm((f) => ({ ...f, emergency_contact: e.target.value }))} placeholder="+966 5xx xxx xxxx" className="h-11" />
+   603→                </div>
+   604→                <div className="space-y-2 sm:col-span-2">
+   605→                  <Label>Address</Label>
+   606→                  <Textarea value={form.address ?? ''} onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} placeholder="Labour camp / accommodation address" rows={2} />
+   607→                </div>
+   608→              </div>
+   609→            </TabsContent>
+   610→
+   611→            {/* -------- Professional tab -------- */}
+   612→            <TabsContent value="professional" className="space-y-4 pt-4">
+   613→              <div className="grid gap-4 sm:grid-cols-2">
+   614→                <div className="space-y-2">
+   615→                  <Label>Position</Label>
+   616→                  <Input value={form.position ?? ''} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))} placeholder="e.g. Electrician, Plumber" className="h-11" />
+   617→                </div>
+   618→                <div className="space-y-2">
+   619→                  <Label>Join Date</Label>
+   620→                  <Input type="date" value={form.join_date ?? ''} onChange={(e) => setForm((f) => ({ ...f, join_date: e.target.value || null }))} className="h-11" />
+   621→                </div>
+   622→                <div className="space-y-2">
+   623→                  <Label>Company Name</Label>
+   624→                  <Input value={form.company_name ?? ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} className="h-11" />
+   625→                </div>
+   626→                <div className="space-y-2">
+   627→                  <Label>Current Working Site</Label>
+   628→                  <Select
+   629→                    value={form.current_site_id ?? 'none'}
+   630→                    onValueChange={(v) => setForm((f) => ({ ...f, current_site_id: v === 'none' ? null : v }))}
+   631→                  >
+   632→                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+   633→                    <SelectContent>
+   634→                      <SelectItem value="none">🟡 No site assigned (Idle)</SelectItem>
+   635→                      {activeSites.map((s) => (
+   636→                        <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+   637→                      ))}
+   638→                      <SelectItem value="__add_new" className="text-brand">+ Add New Site…</SelectItem>
+   639→                    </SelectContent>
+   640→                  </Select>
+   641→                  {form.current_site_id === '__add_new' && null}
+   642→                </div>
+   643→                {newSiteName !== null && (
+   644→                  <div className="flex items-end gap-2 sm:col-span-2">
+   645→                    <div className="flex-1 space-y-2">
+   646→                      <Label>New Site Name</Label>
+   647→                      <Input value={newSiteName} onChange={(e) => setNewSiteName(e.target.value)} placeholder="e.g. NPC – Umm Al Quwain" className="h-11" />
+   648→                    </div>
+   649→                    <Button type="button" onClick={addSiteInline} disabled={addingSite} className="brand-gradient text-white">
+   650→                      {addingSite ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
+   651→                    </Button>
+   652→                  </div>
+   653→                )}
+   654→
+   655→                {/* Camp assignment */}
+   656→                <div className="space-y-2 sm:col-span-2">
+   657→                  <Label className="flex items-center gap-1.5"><Tent size={13} className="text-amber-500" /> Accommodation Camp</Label>
+   658→                  <Select
+   659→                    value={form.camp_id ?? 'none'}
+   660→                    onValueChange={(v) => setForm((f) => ({ ...f, camp_id: v === 'none' ? null : v }))}
+   661→                  >
+   662→                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+   663→                    <SelectContent>
+   664→                      <SelectItem value="none">🟡 No camp assigned</SelectItem>
+   665→                      {activeCamps.map((c) => (
+   666→                        <SelectItem key={c.id} value={c.id}>
+   667→                          {c.name}{c.employee_count != null ? ` (${c.employee_count})` : ''}
+   668→                        </SelectItem>
+   669→                      ))}
+   670→                    </SelectContent>
+   671→                  </Select>
+   672→                  <p className="text-[11px] text-muted-foreground">
+   673→                    Where the employee stays. Each employee belongs to exactly one camp — change it anytime here or from the Camps page.
+   674→                  </p>
+   675→                </div>
+   676→
+   677→                {/* Team leader */}
+   678→                <div className="rounded-xl border border-border/60 bg-muted/40 p-4 sm:col-span-2">
+   679→                  <div className="flex items-center justify-between gap-3">
+   680→                    <div>
+   681→                      <p className="flex items-center gap-1.5 text-sm font-medium">
+   682→                        <Crown size={14} className="fill-amber-400 text-amber-400" /> Team Leader
+   683→                      </p>
+   684→                      <p className="text-xs text-muted-foreground">Only one leader per site.</p>
+   685→                    </div>
+   686→                    <Switch checked={form.is_team_leader} onCheckedChange={(v) => setForm((f) => ({ ...f, is_team_leader: v }))} />
+   687→                  </div>
+   688→                  {form.is_team_leader && (
+   689→                    <div className="mt-3 space-y-2">
+   690→                      <Label>Lead Site</Label>
+   691→                      <Select
+   692→                        value={form.team_leader_site_id ?? 'none'}
+   693→                        onValueChange={(v) => setForm((f) => ({ ...f, team_leader_site_id: v === 'none' ? null : v }))}
+   694→                      >
+   695→                        <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+   696→                        <SelectContent>
+   697→                          <SelectItem value="none">No specific site</SelectItem>
+   698→                          {activeSites.map((s) => (
+   699→                            <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+   700→                          ))}
+   701→                        </SelectContent>
+   702→                      </Select>
+   703→                    </div>
+   704→                  )}
+   705→                </div>
+   706→
+   707→                {/* Documents */}
+   708→                <div className="space-y-2">
+   709→                  <Label>Passport Number</Label>
+   710→                  <Input value={form.passport_number ?? ''} onChange={(e) => setForm((f) => ({ ...f, passport_number: e.target.value }))} placeholder="P1234567" className="h-11" />
+   711→                </div>
+   712→                <div className="space-y-2">
+   713→                  <Label>Passport Status</Label>
+   714→                  <Select value={form.passport_status ?? 'none'} onValueChange={(v) => setForm((f) => ({ ...f, passport_status: v === 'none' ? null : v as DocumentStatus }))}>
+   715→                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+   716→                    <SelectContent>
+   717→                      <SelectItem value="none">Not set</SelectItem>
+   718→                      {DOC_STATUSES.map((d) => (
+   719→                        <SelectItem key={d.value} value={d.value} className={d.cls}>{d.label}</SelectItem>
+   720→                      ))}
+   721→                    </SelectContent>
+   722→                  </Select>
+   723→                </div>
+   724→                <div className="space-y-2">
+   725→                  <Label>ID Number</Label>
+   726→                  <Input value={form.id_number ?? ''} onChange={(e) => setForm((f) => ({ ...f, id_number: e.target.value }))} placeholder="UAE-IQ-20260001" className="h-11" />
+   727→                </div>
+   728→                <div className="space-y-2">
+   729→                  <Label>ID Status</Label>
+   730→                  <Select value={form.id_status ?? 'none'} onValueChange={(v) => setForm((f) => ({ ...f, id_status: v === 'none' ? null : v as DocumentStatus }))}>
+   731→                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+   732→                    <SelectContent>
+   733→                      <SelectItem value="none">Not set</SelectItem>
+   734→                      {DOC_STATUSES.map((d) => (
+   735→                        <SelectItem key={d.value} value={d.value} className={d.cls}>{d.label}</SelectItem>
+   736→                      ))}
+   737→                    </SelectContent>
+   738→                  </Select>
+   739→                </div>
+   740→                {editingId && (
+   741→                  <div className="space-y-2 sm:col-span-2">
+   742→                    <Label>Performance Rating</Label>
+   743→                    <div className="flex h-11 items-center gap-2 rounded-xl border bg-muted/40 px-3">
+   744→                      <RatingStars rating={employees?.find((e) => e.id === editingId)?.rating ?? 5} />
+   745→                      <span className="text-xs text-muted-foreground">Auto-calculated from attendance</span>
+   746→                    </div>
+   747→                  </div>
+   748→                )}
+   749→              </div>
+   750→            </TabsContent>
+   751→          </Tabs>
+   752→
+   753→          <div className="flex items-center justify-between gap-2 pt-2">
+   754→            <Button
+   755→              type="button"
+   756→              variant="outline"
+   757→              onClick={() => setFormTab(formTab === 'personal' ? 'professional' : 'personal')}
+   758→            >
+   759→              {formTab === 'personal' ? 'Next: Professional' : 'Back: Personal'}
+   760→            </Button>
+   761→            <Button type="button" onClick={submitForm} disabled={saving} className="brand-gradient font-semibold text-white">
+   762→              {saving && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+   763→              {editingId ? 'Save Changes' : 'Create Employee'}
+   764→            </Button>
+   765→          </div>
+   766→        </DialogContent>
+   767→      </Dialog>
+   768→
+   769→      {/* ============ Delete (super admin) ============ */}
+   770→      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
+   771→        <AlertDialogContent>
+   772→          <AlertDialogHeader>
+   773→            <AlertDialogTitle>Delete Employee?</AlertDialogTitle>
+   774→            <AlertDialogDescription>
+   775→              <strong>{deleteTarget?.full_name}</strong> will be permanently removed. Their attendance, warnings, fines,
+   776→              requests and uniform records will be hidden from the system.
+   777→            </AlertDialogDescription>
+   778→          </AlertDialogHeader>
+   779→          <AlertDialogFooter>
+   780→            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   781→            <AlertDialogAction className="bg-rose-600 text-white hover:bg-rose-600/90" onClick={confirmDelete}>
+   782→              Delete
+   783→            </AlertDialogAction>
+   784→          </AlertDialogFooter>
+   785→        </AlertDialogContent>
+   786→      </AlertDialog>
+   787→
+   788→      {/* ============ Request deletion (admin) ============ */}
+   789→      <Dialog open={!!requestDeleteTarget} onOpenChange={(o) => { if (!o) setRequestDeleteTarget(null); }}>
+   790→        <DialogContent className="max-w-md">
+   791→          <DialogHeader>
+   792→            <DialogTitle>Request Employee Deletion</DialogTitle>
+   793→            <DialogDescription>
+   794→              <strong>{requestDeleteTarget?.full_name}</strong> will be marked as “Pending Deletion” until a super admin
+   795→              approves or rejects the request.
+   796→            </DialogDescription>
+   797→          </DialogHeader>
+   798→          <div className="space-y-2">
+   799→            <Label>Reason</Label>
+   800→            <Textarea value={requestReason} onChange={(e) => setRequestReason(e.target.value)} placeholder="Why should this employee be removed?" rows={3} />
+   801→          </div>
+   802→          <div className="flex justify-end gap-2 pt-1">
+   803→            <Button variant="outline" onClick={() => setRequestDeleteTarget(null)}>Cancel</Button>
+   804→            <Button className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90" onClick={confirmRequestDeletion}>Submit Request</Button>
+   805→          </div>
+   806→        </DialogContent>
+   807→      </Dialog>
+   808→
+   809→    </div>
+   810→  );
+   811→}
+   812→

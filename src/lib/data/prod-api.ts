@@ -8,7 +8,8 @@
 import { supabase } from '@/lib/supabase/client';
 import {
   type Attendance,
-  type AttendanceStatus,
+  type Camp,
+  type CampWithCount,
   type CancellationRequestVM,
   type EmployeeInput,
   type EmployeeVM,
@@ -168,7 +169,7 @@ export const prodApi = {
       .select('menu_key, allowed').eq('profile_id', profileId);
     assertOk(error);
     const map: MenuPermissionMap = {
-      employees: false, sites: false, attendance: false,
+      employees: false, sites: false, camps: false, attendance: false,
       leave_requests: false, cancellation_requests: false, notifications: false,
     };
     (data ?? []).forEach((row: { menu_key: keyof MenuPermissionMap; allowed: boolean }) => {
@@ -228,20 +229,75 @@ export const prodApi = {
     assertOk(error);
   },
 
+  // ---- camps (accommodation) ------------------------------------------------
+  async listCamps(): Promise<CampWithCount[]> {
+    const [campsRes, empRes] = await Promise.all([
+      sb().from('camp').select('*').order('created_at'),
+      sb().from('employee').select('camp_id').neq('status', 'deleted'),
+    ]);
+    assertOk(campsRes.error);
+    assertOk(empRes.error);
+    const counts = new Map<string, number>();
+    ((empRes.data ?? []) as { camp_id: string | null }[]).forEach((r) => {
+      if (r.camp_id) counts.set(r.camp_id, (counts.get(r.camp_id) ?? 0) + 1);
+    });
+    return ((campsRes.data ?? []) as Camp[]).map((c) => ({
+      ...c,
+      employee_count: counts.get(c.id) ?? 0,
+    }));
+  },
+
+  async createCamp(name: string, location: string | null, capacity: number | null, notes: string | null): Promise<Camp> {
+    const { data, error } = await sb().rpc('create_camp', {
+      p_name: name, p_location: location, p_capacity: capacity, p_notes: notes,
+    });
+    assertOk(error);
+    return data as unknown as Camp;
+  },
+
+  async updateCamp(id: string, input: { name: string; location: string | null; capacity: number | null; notes: string | null; is_active: boolean }): Promise<Camp> {
+    const { data, error } = await sb().rpc('update_camp', {
+      p_id: id, p_name: input.name, p_location: input.location,
+      p_capacity: input.capacity, p_notes: input.notes, p_is_active: input.is_active,
+    });
+    assertOk(error);
+    return data as unknown as Camp;
+  },
+
+  async deleteCamp(id: string): Promise<void> {
+    const { error } = await sb().rpc('delete_camp', { p_id: id });
+    assertOk(error);
+  },
+
+  async assignEmployeeCamp(employeeId: string, campId: string | null): Promise<EmployeeVM> {
+    const { data, error } = await sb().rpc('assign_employee_camp', {
+      p_employee_id: employeeId, p_camp_id: campId,
+    });
+    assertOk(error);
+    const updated = data as unknown as Record<string, unknown>;
+    return {
+      ...(updated as unknown as EmployeeVM),
+      site_name: null,
+      leader_site_name: null,
+      camp_name: null,
+    };
+  },
+
   // ---- employees ---------------------------------------------------------------
   async listEmployees(): Promise<EmployeeVM[]> {
     const { data, error } = await sb().from('employee')
-      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name)')
+      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name), camp:camp_id(name)')
       .neq('status', 'deleted')
       .order('created_at');
     assertOk(error);
     return ((data ?? []) as unknown as {
-      site: { name: string } | null; leader_site: { name: string } | null;
+      site: { name: string } | null; leader_site: { name: string } | null; camp: { name: string } | null;
       [k: string]: unknown;
     }[]).map((row) => ({
       ...(row as unknown as EmployeeVM),
       site_name: row.site?.name ?? null,
       leader_site_name: row.leader_site?.name ?? null,
+      camp_name: row.camp?.name ?? null,
     }));
   },
 
@@ -290,10 +346,9 @@ export const prodApi = {
     return (data ?? []) as unknown as Attendance[];
   },
 
-  async markAttendance(employeeId: string, date: string, status: AttendanceStatus, overtimeHours: number | null): Promise<void> {
+  async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const { error } = await sb().rpc('mark_attendance', {
-      p_employee_id: employeeId, p_date: date, p_status: status,
-      p_overtime_hours: overtimeHours,
+      p_employee_id: employeeId, p_date: date, p_value: value,
     });
     assertOk(error);
   },
@@ -521,7 +576,7 @@ export const prodApi = {
     const client = supabase;
     if (!client) return () => undefined;
     const tables: RealtimeTable[] = [
-      'profiles', 'menu_permission', 'site', 'employee', 'attendance', 'notification',
+      'profiles', 'menu_permission', 'site', 'camp', 'employee', 'attendance', 'notification',
       'warning', 'fine', 'leave_request', 'cancellation_request', 'uniform_registry',
     ];
     const channel = client.channel('pulse-db-changes');

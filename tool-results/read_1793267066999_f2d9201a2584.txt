@@ -1,0 +1,502 @@
+    30→    30→import { useAppStore } from '@/store/app-store';
+    31→    31→import { useAuthStore } from '@/store/auth-store';
+    32→    32→import { useRealtimeVersion } from '@/store/realtime';
+    33→    33→
+    34→    34→const EMPTY_FORM: EmployeeInput = {
+    35→    35→  full_name: '', nationality: null, date_of_birth: null, phone: null, email: null,
+    36→    36→  address: null, emergency_contact: null, position: null, join_date: null,
+    37→    37→  company_name: null, passport_number: null, passport_status: null, id_number: null,
+    38→    38→  id_status: null, current_site_id: null, camp_id: null, photo: null,
+    39→    39→  is_team_leader: false, team_leader_site_id: null,
+    40→    40→};
+    41→    41→
+    42→    42→const DOC_STATUSES: { value: DocumentStatus; label: string; cls: string }[] = [
+    43→    43→  { value: 'Valid', label: '✓ Valid', cls: 'text-emerald-500' },
+    44→    44→  { value: 'Expired', label: '✗ Expired', cls: 'text-rose-500' },
+    45→    45→  { value: 'N/A', label: 'N/A', cls: 'text-zinc-400' },
+    46→    46→];
+    47→    47→
+    48→    48→const nullify = (v: string): string | null => (v.trim() === '' ? null : v.trim());
+    49→    49→
+    50→    50→// client-side photo compression (max 300px, JPEG 0.8)
+    51→    51→function compressPhoto(file: File): Promise<string> {
+    52→    52→  return new Promise((resolve, reject) => {
+    53→    53→    const reader = new FileReader();
+    54→    54→    reader.onload = () => {
+    55→    55→      const img = new window.Image();
+    56→    56→      img.onload = () => {
+    57→    57→        const scale = Math.min(1, 300 / Math.max(img.width, img.height));
+    58→    58→        const canvas = document.createElement('canvas');
+    59→    59→        canvas.width = Math.round(img.width * scale);
+    60→    60→        canvas.height = Math.round(img.height * scale);
+    61→    61→        const ctx = canvas.getContext('2d');
+    62→    62→        if (!ctx) return reject(new Error('Canvas unavailable'));
+    63→    63→        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    64→    64→        resolve(canvas.toDataURL('image/jpeg', 0.8));
+    65→    65→      };
+    66→    66→      img.onerror = () => reject(new Error('Invalid image'));
+    67→    67→      img.src = reader.result as string;
+    68→    68→    };
+    69→    69→    reader.onerror = () => reject(new Error('Failed to read file'));
+    70→    70→    reader.readAsDataURL(file);
+    71→    71→  });
+    72→    72→}
+    73→    73→
+    74→    74→export function EmployeePage() {
+    75→    75→  const user = useAuthStore((s) => s.user);
+    76→    76→  const navigateToEmployeeDetails = useAppStore((s) => s.navigateToEmployeeDetails);
+    77→    77→  const consumeEmployeeFilter = useAppStore((s) => s.consumeEmployeeFilter);
+    78→    78→  const consumePendingEditEmployeeId = useAppStore((s) => s.consumePendingEditEmployeeId);
+    79→    79→  const realtimeVersion = useRealtimeVersion(['employee', 'site', 'camp']);
+    80→    80→
+    81→    81→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    82→    82→  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+    83→    83→  const [camps, setCamps] = useState<CampWithCount[] | null>(null);
+    84→    84→  const [search, setSearch] = useState('');
+    85→    85→  const [debouncedSearch, setDebouncedSearch] = useState('');
+    86→    86→  const [statusFilter, setStatusFilter] = useState('all');
+    87→    87→  const [page, setPage] = useState(1);
+    88→    88→  const PER_PAGE = 20;
+    89→    89→
+    90→    90→  // form / dialogs
+    91→    91→  const [formOpen, setFormOpen] = useState(false);
+    92→    92→  const [editingId, setEditingId] = useState<string | null>(null);
+    93→    93→  const [form, setForm] = useState<EmployeeInput>(EMPTY_FORM);
+    94→    94→  const [formTab, setFormTab] = useState('personal');
+    95→    95→  const [saving, setSaving] = useState(false);
+    96→    96→  const [deleteTarget, setDeleteTarget] = useState<EmployeeVM | null>(null);
+    97→    97→  const [requestDeleteTarget, setRequestDeleteTarget] = useState<EmployeeVM | null>(null);
+    98→    98→  const [requestReason, setRequestReason] = useState('');
+    99→    99→  const [newSiteName, setNewSiteName] = useState<string | null>(null);
+   100→   100→  const [addingSite, setAddingSite] = useState(false);
+   101→   101→  const fileInputRef = useRef<HTMLInputElement>(null);
+   102→   102→
+   103→   103→  // cross-page filter (e.g. dashboard "Idle" card)
+   104→   104→  // (pending edit is consumed in the employees-watching effect below, once data is loaded)
+   105→   105→  useEffect(() => {
+   106→   106→    const f = consumeEmployeeFilter();
+   107→   107→    if (f === 'idle' || f === 'working') setStatusFilter(f);
+   108→   108→
+   109→   109→  }, []);
+   110→   110→
+   111→   111→  // debounce search
+   112→   112→  useEffect(() => {
+   113→   113→    const t = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 300);
+   114→   114→    return () => clearTimeout(t);
+   115→   115→  }, [search]);
+   116→   116→
+   117→   117→  // data loading
+   118→   118→  useEffect(() => {
+   119→   119→    let cancelled = false;
+   120→   120→    (async () => {
+   121→   121→      try {
+   122→   122→        const [emps, sts, cps] = await Promise.all([dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps()]);
+   123→   123→        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); }
+   124→   124→      } catch (err) {
+   125→   125→        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
+   126→   126→      }
+   127→   127→    })();
+   128→   128→    return () => { cancelled = true; };
+   129→   129→
+   130→   130→  }, [realtimeVersion]);
+   131→   131→
+   132→   132→  const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
+   133→   133→  const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
+   134→   134→
+   135→   135→  // filtering
+   136→   136→  const filtered = useMemo(() => {
+   137→   137→    const list = employees ?? [];
+   138→   138→    const q = debouncedSearch.toLowerCase().trim();
+   139→   139→    return list.filter((e) => {
+   140→   140→      if (statusFilter === 'active' && e.status !== 'active') return false;
+   141→   141→      if (statusFilter === 'working' && (e.status !== 'active' || !e.current_site_id)) return false;
+   142→   142→      if (statusFilter === 'idle' && (e.status !== 'active' || e.current_site_id)) return false;
+   143→   143→      if (statusFilter === 'pending_deletion' && e.status !== 'pending_deletion') return false;
+   144→   144→      if (q) {
+   145→   145→        const hay = `${e.full_name} ${e.employee_code} ${e.nationality ?? ''} ${e.phone ?? ''} ${e.position ?? ''}`.toLowerCase();
+   146→   146→        if (!hay.includes(q)) return false;
+   147→   147→      }
+   148→   148→      return true;
+   149→   149→    });
+   150→   150→  }, [employees, debouncedSearch, statusFilter]);
+   151→   151→
+   152→   152→  const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+   153→   153→  const safePage = Math.min(page, totalPages);
+   154→   154→  const pageRows = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+   155→   155→
+   156→   156→  // ---- actions ---------------------------------------------------------------
+   157→   157→  const openAdd = () => {
+   158→   158→    setForm(EMPTY_FORM);
+   159→   159→    setEditingId(null);
+   160→   160→    setFormTab('personal');
+   161→   161→    setFormOpen(true);
+   162→   162→  };
+   163→   163→
+   164→   164→  const openEdit = (emp: EmployeeVM) => {
+   165→   165→    setForm({
+   166→   166→      full_name: emp.full_name,
+   167→   167→      nationality: emp.nationality,
+   168→   168→      date_of_birth: emp.date_of_birth,
+   169→   169→      phone: emp.phone,
+   170→   170→      email: emp.email,
+   171→   171→      address: emp.address,
+   172→   172→      emergency_contact: emp.emergency_contact,
+   173→   173→      position: emp.position,
+   174→   174→      join_date: emp.join_date,
+   175→   175→      company_name: emp.company_name,
+   176→   176→      passport_number: emp.passport_number,
+   177→   177→      passport_status: emp.passport_status,
+   178→   178→      id_number: emp.id_number,
+   179→   179→      id_status: emp.id_status,
+   180→   180→      current_site_id: emp.current_site_id,
+   181→   181→      camp_id: emp.camp_id,
+   182→   182→      photo: emp.photo,
+   183→   183→      is_team_leader: emp.is_team_leader,
+   184→   184→      team_leader_site_id: emp.team_leader_site_id,
+   185→   185→    });
+   186→   186→    setEditingId(emp.id);
+   187→   187→    setFormTab('personal');
+   188→   188→    setFormOpen(true);
+   189→   189→  };
+   190→   190→
+   191→   191→  useEffect(() => {
+   192→   192→    const editId = consumePendingEditEmployeeId();
+   193→   193→    if (editId) {
+   194→   194→      const emp = employees?.find((e) => e.id === editId);
+   195→   195→      if (emp) openEdit(emp);
+   196→   196→    }
+   197→   197→
+   198→   198→  }, [employees]);
+   199→   199→
+   200→   200→  const submitForm = async () => {
+   201→   201→    if (!form.full_name.trim()) {
+   202→   202→      setFormTab('personal');
+   203→   203→      toast.error('Full name is required');
+   204→   204→      return;
+   205→   205→    }
+   206→   206→    setSaving(true);
+   207→   207→    const payload: EmployeeInput = {
+   208→   208→      ...form,
+   209→   209→      full_name: form.full_name.trim(),
+   210→   210→      nationality: form.nationality ? nullify(form.nationality) : null,
+   211→   211→      phone: form.phone ? nullify(form.phone) : null,
+   212→   212→      email: form.email ? nullify(form.email) : null,
+   213→   213→      address: form.address ? nullify(form.address) : null,
+   214→   214→      emergency_contact: form.emergency_contact ? nullify(form.emergency_contact) : null,
+   215→   215→      position: form.position ? nullify(form.position) : null,
+   216→   216→      company_name: form.company_name ? nullify(form.company_name) : null,
+   217→   217→      passport_number: form.passport_number ? nullify(form.passport_number) : null,
+   218→   218→      id_number: form.id_number ? nullify(form.id_number) : null,
+   219→   219→    };
+   220→   220→    try {
+   221→   221→      if (editingId) {
+   222→   222→        const updated = await dataApi.updateEmployee(editingId, payload);
+   223→   223→        toast.success('Employee updated', { description: `${updated.full_name} saved.` });
+   224→   224→      } else {
+   225→   225→        const created = await dataApi.createEmployee(payload);
+   226→   226→        toast.success('Employee created', { description: `${created.full_name} — ID ${created.employee_code}` });
+   227→   227→      }
+   228→   228→      setFormOpen(false);
+   229→   229→    } catch (err) {
+   230→   230→      toast.error(err instanceof Error ? err.message : 'Save failed');
+   231→   231→    } finally {
+   232→   232→      setSaving(false);
+   233→   233→    }
+   234→   234→  };
+   235→   235→
+   236→   236→  const handlePhoto = async (file: File | undefined) => {
+   237→   237→    if (!file) return;
+   238→   238→    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+   239→   239→      toast.error('Only JPEG, PNG or WebP images are allowed');
+   240→   240→      return;
+   241→   241→    }
+   242→   242→    if (file.size > 10 * 1024 * 1024) {
+   243→   243→      toast.error('Image is too large (max 10MB)');
+   244→   244→      return;
+   245→   245→    }
+   246→   246→    try {
+   247→   247→      const photo = await compressPhoto(file);
+   248→   248→      setForm((f) => ({ ...f, photo }));
+   249→   249→    } catch {
+   250→   250→      toast.error('Failed to process image');
+   251→   251→    }
+   252→   252→  };
+   253→   253→
+   254→   254→  const confirmDelete = async () => {
+   255→   255→    if (!deleteTarget) return;
+   256→   256→    try {
+   257→   257→      await dataApi.deleteEmployeeCascade(deleteTarget.id);
+   258→   258→      toast.success('Employee deleted', { description: `${deleteTarget.full_name} and related records were removed from view.` });
+   259→   259→    } catch (err) {
+   260→   260→      toast.error(err instanceof Error ? err.message : 'Delete failed');
+   261→   261→    } finally {
+   262→   262→      setDeleteTarget(null);
+   263→   263→    }
+   264→   264→  };
+   265→   265→
+   266→   266→  const confirmRequestDeletion = async () => {
+   267→   267→    if (!requestDeleteTarget) return;
+   268→   268→    try {
+   269→   269→      await dataApi.requestEmployeeDeletion(requestDeleteTarget.id, requestReason.trim() || null);
+   270→   270→      toast.success('Deletion requested', { description: 'A super admin will review this request.' });
+   271→   271→      setRequestDeleteTarget(null);
+   272→   272→      setRequestReason('');
+   273→   273→    } catch (err) {
+   274→   274→      toast.error(err instanceof Error ? err.message : 'Request failed');
+   275→   275→    }
+   276→   276→  };
+   277→   277→
+   278→   278→  const addSiteInline = async () => {
+   279→   279→    if (!newSiteName?.trim()) return;
+   280→   280→    setAddingSite(true);
+   281→   281→    try {
+   282→   282→      const site = await dataApi.createSite(newSiteName.trim(), null, null);
+   283→   283→      toast.success('Site created', { description: site.name });
+   284→   284→      setForm((f) => ({ ...f, current_site_id: site.id }));
+   285→   285→      setNewSiteName(null);
+   286→   286→    } catch (err) {
+   287→   287→      toast.error(err instanceof Error ? err.message : 'Failed to create site');
+   288→   288→    } finally {
+   289→   289→      setAddingSite(false);
+   290→   290→    }
+   291→   291→  };
+   292→   292→
+   293→   293→  const isSuperAdmin = user?.role === 'super_admin';
+   294→   294→  const loading = !employees || !sites;
+   295→   295→
+   296→   296→  return (
+   297→   297→    <div className="mx-auto max-w-7xl">
+   298→   298→      {/* header */}
+   299→   299→      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+   300→   300→        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+   301→   301→          <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Employee Management</h1>
+   302→   302→          <p className="mt-1 text-sm text-muted-foreground">
+   303→   303→            {filtered.length} employee{filtered.length !== 1 ? 's' : ''} · full HR profiles, documents and ratings
+   304→   304→          </p>
+   305→   305→        </motion.div>
+   306→   306→        <Button onClick={openAdd} className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]">
+   307→   307→          <Plus size={16} className="mr-1.5" /> Add Employee
+   308→   308→        </Button>
+   309→   309→      </div>
+   310→   310→
+   311→   311→      {/* filters */}
+   312→   312→      <div className="mb-4 flex flex-wrap items-center gap-2">
+   313→   313→        <div className="relative min-w-56 flex-1 sm:max-w-xs">
+   314→   314→          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   315→   315→          <Input
+   316→   316→            placeholder="Search by name, ID, nationality, phone, position…"
+   317→   317→            className="h-10 pl-9"
+   318→   318→            value={search}
+   319→   319→            onChange={(e) => setSearch(e.target.value)}
+   320→   320→          />
+   321→   321→        </div>
+   322→   322→        <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1); }}>
+   323→   323→          <SelectTrigger className="h-10 w-44 bg-card"><SelectValue /></SelectTrigger>
+   324→   324→          <SelectContent>
+   325→   325→            <SelectItem value="all">All Statuses</SelectItem>
+   326→   326→            <SelectItem value="active">Active</SelectItem>
+   327→   327→            <SelectItem value="working">Currently Working</SelectItem>
+   328→   328→            <SelectItem value="idle">Idle (No Site)</SelectItem>
+   329→   329→            <SelectItem value="pending_deletion">Pending Deletion</SelectItem>
+   330→   330→          </SelectContent>
+   331→   331→        </Select>
+   332→   332→        {(search || statusFilter !== 'all') && (
+   333→   333→          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setPage(1); }}>
+   334→   334→            <X size={14} className="mr-1" /> Reset
+   335→   335→          </Button>
+   336→   336→        )}
+   337→   337→      </div>
+   338→   338→
+   339→   339→      {/* table */}
+   340→   340→      {loading ? (
+   341→   341→        <SkeletonRows rows={6} />
+   342→   342→      ) : pageRows.length === 0 ? (
+   343→   343→        <EmptyState
+   344→   344→          icon={<UserRound size={22} />}
+   345→   345→          title="No employees found"
+   346→   346→          description={search || statusFilter !== 'all' ? 'Try adjusting your filters.' : 'Add your first employee to get started.'}
+   347→   347→          action={
+   348→   348→            !search && statusFilter === 'all' ? (
+   349→   349→              <Button onClick={openAdd} variant="outline"><Plus size={15} className="mr-1.5" /> Add Employee</Button>
+   350→   350→            ) : undefined
+   351→   351→          }
+   352→   352→        />
+   353→   353→      ) : (
+   354→   354→        <>
+   355→   355→          {/* desktop */}
+   356→   356→          <div className="hidden overflow-x-auto rounded-xl border bg-card md:block">
+   357→   357→            <table className="w-full text-sm">
+   358→   358→              <thead>
+   359→   359→                <tr className="border-b text-left text-xs uppercase tracking-wide text-muted-foreground">
+   360→   360→                  <th className="px-4 py-3 font-medium">Employee</th>
+   361→   361→                  <th className="px-4 py-3 font-medium">ID</th>
+   362→   362→                  <th className="px-4 py-3 font-medium">Position</th>
+   363→   363→                  <th className="px-4 py-3 font-medium">Site</th>
+   364→   364→                  <th className="px-4 py-3 font-medium">Rating</th>
+   365→   365→                  <th className="px-4 py-3 font-medium">Status</th>
+   366→   366→                  <th className="px-4 py-3 text-right font-medium">Actions</th>
+   367→   367→                </tr>
+   368→   368→              </thead>
+   369→   369→              <tbody>
+   370→   370→                <AnimatePresence>
+   371→   371→                  {pageRows.map((emp, i) => (
+   372→   372→                    <motion.tr
+   373→   373→                      key={emp.id}
+   374→   374→                      initial={{ opacity: 0, y: 8 }}
+   375→   375→                      animate={{ opacity: 1, y: 0 }}
+   376→   376→                      exit={{ opacity: 0 }}
+   377→   377→                      transition={{ delay: i * 0.03 }}
+   378→   378→                      className="border-b border-border/40 transition-colors last:border-0 hover:bg-brand/[0.03]"
+   379→   379→                    >
+   380→   380→                      <td className="px-4 py-3">
+   381→   381→                        <div className="flex items-center gap-3">
+   382→   382→                          <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
+   383→   383→                            {emp.photo ? (
+   384→   384→                               
+   385→   385→                              <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+   386→   386→                            ) : initials(emp.full_name)}
+   387→   387→                          </span>
+   388→   388→                          <div className="min-w-0">
+   389→   389→                            <p className="flex items-center gap-1.5 font-medium">
+   390→   390→                              <span className="truncate">{emp.full_name}</span>
+   391→   391→                              {emp.is_team_leader && (
+   392→   392→                                <span title="Team Leader" className="inline-flex">
+   393→   393→                                  <Crown size={12} className="shrink-0 fill-amber-400 text-amber-400" />
+   394→   394→                                </span>
+   395→   395→                              )}
+   396→   396→                            </p>
+   397→   397→                            <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+   398→   398→                              {emp.site_name ? (
+   399→   399→                                <SiteBadge name={emp.site_name} />
+   400→   400→                              ) : (
+   401→   401→                                <span className="inline-flex items-center gap-0.5 text-amber-500"><UserX size={10} /> Idle</span>
+   402→   402→                              )}
+   403→   403→                              {emp.camp_name && (
+   404→   404→                                <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+   405→   405→                                  <Tent size={9} className="inline" />{emp.camp_name}
+   406→   406→                                </span>
+   407→   407→                              )}
+   408→   408→                              {emp.nationality && <span className="ml-1">{emp.nationality}</span>}
+   409→   409→                            </p>
+   410→   410→                          </div>
+   411→   411→                        </div>
+   412→   412→                      </td>
+   413→   413→                      <td className="px-4 py-3 font-mono text-xs">{emp.employee_code}</td>
+   414→   414→                      <td className="px-4 py-3">{emp.position ?? '—'}</td>
+   415→   415→                      <td className="px-4 py-3">
+   416→   416→                        {emp.site_name ? (
+   417→   417→                          <span className="inline-flex items-center gap-1"><MapPin size={12} className="text-emerald-500" />{emp.site_name}</span>
+   418→   418→                        ) : (
+   419→   419→                          <span className="text-xs text-muted-foreground">Unassigned</span>
+   420→   420→                        )}
+   421→   421→                      </td>
+   422→   422→                      <td className="px-4 py-3"><RatingStars rating={emp.rating} /></td>
+   423→   423→                      <td className="px-4 py-3"><EmployeeStatusBadge status={emp.status} /></td>
+   424→   424→                      <td className="px-4 py-3">
+   425→   425→                        <div className="flex items-center justify-end gap-1">
+   426→   426→                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}>
+   427→   427→                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+   428→   428→                          </Button>
+   429→   429→                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="Edit" onClick={() => openEdit(emp)}>
+   430→   430→                            <Pencil size={14} />
+   431→   431→                          </Button>
+   432→   432→                          {emp.status !== 'pending_deletion' && (
+   433→   433→                            <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500" title="Delete" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}>
+   434→   434→                              <Trash2 size={14} />
+   435→   435→                            </Button>
+   436→   436→                          )}
+   437→   437→                        </div>
+   438→   438→                      </td>
+   439→   439→                    </motion.tr>
+   440→   440→                  ))}
+   441→   441→                </AnimatePresence>
+   442→   442→              </tbody>
+   443→   443→            </table>
+   444→   444→          </div>
+   445→   445→
+   446→   446→          {/* mobile cards */}
+   447→   447→          <div className="grid gap-3 md:hidden">
+   448→   448→            <AnimatePresence>
+   449→   449→              {pageRows.map((emp, i) => (
+   450→   450→                <motion.div
+   451→   451→                  key={emp.id}
+   452→   452→                  initial={{ opacity: 0, y: 12 }}
+   453→   453→                  animate={{ opacity: 1, y: 0 }}
+   454→   454→                  exit={{ opacity: 0 }}
+   455→   455→                  transition={{ delay: i * 0.04 }}
+   456→   456→                  className="card-glow rounded-xl border bg-card p-4"
+   457→   457→                >
+   458→   458→                  <div className="flex items-start justify-between gap-2">
+   459→   459→                    <div className="flex items-center gap-3">
+   460→   460→                      <span className="flex size-10 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
+   461→   461→                        {emp.photo ? (
+   462→   462→                           
+   463→   463→                          <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
+   464→   464→                        ) : initials(emp.full_name)}
+   465→   465→                      </span>
+   466→   466→                      <div>
+   467→   467→                        <p className="flex items-center gap-1 font-medium">
+   468→   468→                          {emp.full_name}
+   469→   469→                          {emp.is_team_leader && <Crown size={12} className="fill-amber-400 text-amber-400" />}
+   470→   470→                        </p>
+   471→   471→                        <p className="font-mono text-[11px] text-muted-foreground">{emp.employee_code} · {emp.position ?? '—'}</p>
+   472→   472→                      </div>
+   473→   473→                    </div>
+   474→   474→                    <EmployeeStatusBadge status={emp.status} />
+   475→   475→                  </div>
+   476→   476→                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+   477→   477→                    <div className="flex flex-wrap items-center gap-2">
+   478→   478→                      {emp.site_name ? <SiteBadge name={emp.site_name} /> : <SiteBadge name={null} />}
+   479→   479→                      {emp.camp_name && (
+   480→   480→                        <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+   481→   481→                          <Tent size={9} className="inline" />{emp.camp_name}
+   482→   482→                        </span>
+   483→   483→                      )}
+   484→   484→                      <RatingStars rating={emp.rating} size={12} />
+   485→   485→                    </div>
+   486→   486→                    <div className="flex gap-1">
+   487→   487→                      <Button variant="outline" size="icon" className="size-8" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></Button>
+   488→   488→                      <Button variant="outline" size="icon" className="size-8" onClick={() => openEdit(emp)}><Pencil size={13} /></Button>
+   489→   489→                      {emp.status !== 'pending_deletion' && (
+   490→   490→                        <Button variant="outline" size="icon" className="size-8 hover:border-rose-500/40 hover:text-rose-500" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}><Trash2 size={13} /></Button>
+   491→   491→                      )}
+   492→   492→                    </div>
+   493→   493→                  </div>
+   494→   494→                </motion.div>
+   495→   495→              ))}
+   496→   496→            </AnimatePresence>
+   497→   497→          </div>
+   498→   498→
+   499→   499→          {/* pagination */}
+   500→   500→          {totalPages > 1 && (
+   501→   501→            <div className="mt-4 flex flex-wrap items-center justify-center gap-1">
+   502→   502→              {(['first', 'prev'] as const).map((k) => (
+   503→   503→                <Button key={k} variant="outline" size="sm" disabled={k === 'first' ? safePage === 1 : safePage === 1} onClick={() => setPage(k === 'first' ? 1 : safePage - 1)}>
+   504→   504→                  {k === 'first' ? '«' : '‹'}
+   505→   505→                </Button>
+   506→   506→              ))}
+   507→   507→              {Array.from({ length: totalPages }).slice(Math.max(0, Math.min(safePage - 3, totalPages - 5)), Math.max(5, Math.min(totalPages, safePage + 2))).map((_, idx) => {
+   508→   508→                const n = Math.max(0, Math.min(safePage - 3, totalPages - 5)) + idx + 1;
+   509→   509→                return (
+   510→   510→                  <Button key={n} variant={n === safePage ? 'default' : 'outline'} size="sm" className={cn(n === safePage && 'brand-gradient text-white')} onClick={() => setPage(n)}>
+   511→   511→                    {n}
+   512→   512→                  </Button>
+   513→   513→                );
+   514→   514→              })}
+   515→   515→              {(['next', 'last'] as const).map((k) => (
+   516→   516→                <Button key={k} variant="outline" size="sm" disabled={safePage === totalPages} onClick={() => setPage(k === 'last' ? totalPages : safePage + 1)}>
+   517→   517→                  {k === 'next' ? '›' : '»'}
+   518→   518→                </Button>
+   519→   519→              ))}
+   520→   520→            </div>
+   521→   521→          )}
+   522→   522→        </>
+   523→   523→      )}
+   524→   524→
+   525→   525→      {/* ============ Add/Edit dialog ============ */}
+   526→   526→      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+   527→   527→        <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
+   528→   528→          <DialogHeader>
+   529→   529→            <DialogTitle>{editingId ? 'Edit Employee' : 'Add New Employee'}</DialogTitle>
+
+[showing lines 30-529 of 812; use offset=530 with limit to continue reading]

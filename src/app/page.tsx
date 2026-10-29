@@ -11,8 +11,10 @@ import { LoginPage } from '@/components/auth/login-page';
 import { SignupPage } from '@/components/auth/signup-page';
 import { AdminPage } from '@/components/admins/admin-page';
 import { AttendancePage } from '@/components/attendance/attendance-page';
+import { CampsPage } from '@/components/camps/camps-page';
 import { CancellationRequestPage } from '@/components/cancellation-requests/cancellation-request-page';
 import { DashboardPage } from '@/components/dashboard/dashboard-page';
+import { EmployeeDetailsPage } from '@/components/employees/employee-details-page';
 import { EmployeePage } from '@/components/employees/employee-page';
 import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
@@ -60,7 +62,9 @@ function MainLayout() {
   const views: Record<AppView, React.ReactNode> = {
     dashboard: <DashboardPage />,
     employees: <EmployeePage />,
+    employee_details: <EmployeeDetailsPage />,
     sites: <SitesPage />,
+    camps: <CampsPage />,
     attendance: <AttendancePage />,
     uniform_registry: <UniformRegistryPage />,
     leave_requests: <LeaveRequestPage />,

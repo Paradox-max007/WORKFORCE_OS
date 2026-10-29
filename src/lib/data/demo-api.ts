@@ -4,7 +4,8 @@
 
 import {
   type Attendance,
-  type AttendanceStatus,
+  type Camp,
+  type CampWithCount,
   type CancellationRequestVM,
   type Employee,
   type EmployeeInput,
@@ -67,6 +68,7 @@ const attachEmployeeVM = (e: Employee): EmployeeVM => ({
   ...e,
   site_name: e.current_site_id ? db.sites.find((s) => s.id === e.current_site_id)?.name ?? null : null,
   leader_site_name: e.team_leader_site_id ? db.sites.find((s) => s.id === e.team_leader_site_id)?.name ?? null : null,
+  camp_name: e.camp_id ? db.camps.find((c) => c.id === e.camp_id)?.name ?? null : null,
 });
 
 const profileName = (id: string | null): string | null =>
@@ -237,7 +239,7 @@ export const demoApi = {
 
   async getMenuPermissions(profileId: string): Promise<MenuPermissionMap> {
     const map = {
-      employees: false, sites: false, attendance: false,
+      employees: false, sites: false, camps: false, attendance: false,
       leave_requests: false, cancellation_requests: false, notifications: false,
     };
     db.menuPermissions
@@ -304,6 +306,61 @@ export const demoApi = {
     saveAndEmit(['site', 'employee']);
   },
 
+  // ---- camps (accommodation) ------------------------------------------------
+  async listCamps(): Promise<CampWithCount[]> {
+    return db.camps.map((c) => ({
+      ...c,
+      employee_count: db.employees.filter((e) => e.camp_id === c.id && e.status !== 'deleted').length,
+    }));
+  },
+
+  async createCamp(name: string, location: string | null, capacity: number | null, notes: string | null): Promise<Camp> {
+    if (db.camps.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error('A camp with this name already exists');
+    }
+    if (capacity !== null && capacity < 0) throw new Error('Capacity cannot be negative');
+    const camp: Camp = {
+      id: uid(), name, location, capacity, notes, is_active: true, created_at: nowISO(),
+    };
+    db.camps.push(camp);
+    saveAndEmit(['camp']);
+    return camp;
+  },
+
+  async updateCamp(id: string, input: { name: string; location: string | null; capacity: number | null; notes: string | null; is_active: boolean }): Promise<Camp> {
+    if (db.camps.some((c) => c.name.toLowerCase() === input.name.toLowerCase() && c.id !== id)) {
+      throw new Error('A camp with this name already exists');
+    }
+    if (input.capacity !== null && input.capacity < 0) throw new Error('Capacity cannot be negative');
+    const camp = db.camps.find((c) => c.id === id);
+    if (!camp) throw new Error('Camp not found');
+    Object.assign(camp, {
+      name: input.name, location: input.location, capacity: input.capacity,
+      notes: input.notes, is_active: input.is_active,
+    });
+    saveAndEmit(['camp']);
+    return camp;
+  },
+
+  async deleteCamp(id: string): Promise<void> {
+    db.employees.filter((e) => e.camp_id === id).forEach((e) => { e.camp_id = null; });
+    db.camps = db.camps.filter((c) => c.id !== id);
+    saveAndEmit(['camp', 'employee']);
+  },
+
+  async assignEmployeeCamp(employeeId: string, campId: string | null): Promise<EmployeeVM> {
+    const e = db.employees.find((x) => x.id === employeeId);
+    if (!e) throw new Error('Employee not found');
+    if (campId) {
+      const camp = db.camps.find((c) => c.id === campId);
+      if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
+    }
+    e.camp_id = campId;
+    e.updated_at = nowISO();
+    saveAndEmit(['employee', 'camp']);
+    return attachEmployeeVM(e);
+  },
+
   // ---- employees ---------------------------------------------------------------
   async listEmployees(): Promise<EmployeeVM[]> {
     return db.employees.filter((e) => e.status !== 'deleted').map(attachEmployeeVM);
@@ -313,6 +370,10 @@ export const demoApi = {
     if (input.current_site_id) {
       const site = db.sites.find((s) => s.id === input.current_site_id);
       if (!site || !site.is_active) throw new Error('The selected site does not exist or is inactive');
+    }
+    if (input.camp_id) {
+      const camp = db.camps.find((c) => c.id === input.camp_id);
+      if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
     }
     if (input.is_team_leader && input.team_leader_site_id) {
       const conflict = db.employees.find(
@@ -338,6 +399,7 @@ export const demoApi = {
       id_number: input.id_number || null,
       id_status: input.id_status,
       current_site_id: input.current_site_id || null,
+      camp_id: input.camp_id || null,
       rating: 5,
       status: 'active',
       photo: input.photo || null,
@@ -357,6 +419,10 @@ export const demoApi = {
     if (input.current_site_id) {
       const site = db.sites.find((s) => s.id === input.current_site_id);
       if (!site || !site.is_active) throw new Error('The selected site does not exist or is inactive');
+    }
+    if (input.camp_id) {
+      const camp = db.camps.find((c) => c.id === input.camp_id);
+      if (!camp || !camp.is_active) throw new Error('The selected camp does not exist or is inactive');
     }
     if (input.is_team_leader && input.team_leader_site_id) {
       const conflict = db.employees.find(
@@ -380,6 +446,7 @@ export const demoApi = {
       id_number: input.id_number || null,
       id_status: input.id_status,
       current_site_id: input.current_site_id || null,
+      camp_id: input.camp_id || null,
       photo: input.photo || null,
       is_team_leader: input.is_team_leader,
       team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
@@ -453,8 +520,9 @@ export const demoApi = {
           if (!exists) {
             db.attendance.push({
               id: uid(), employee_id: e.id, date: dateStr,
-              status: e.current_site_id ? 'present' : 'no_site',
-              overtime_hours: null, is_hidden: false, created_at: nowISO(),
+              status: e.current_site_id ? 'present' : 'not_marked',
+              hours: e.current_site_id ? 8 : null,
+              is_hidden: false, created_at: nowISO(),
             });
           }
         }
@@ -469,25 +537,51 @@ export const demoApi = {
     });
   },
 
-  async markAttendance(employeeId: string, date: string, status: AttendanceStatus, overtimeHours: number | null): Promise<void> {
+  /** Excel-style marking: value is 'A' (absent), a numeric hours string ('8',
+   *  '10.5') or '' / null to clear the cell. Mirrors the Postgres RPC exactly. */
+  async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
 
+    const trimmed = (value ?? '').trim();
     const prev = db.attendance.find((a) => a.employee_id === employeeId && a.date === date);
-    const otDelta = prev ? (overtimeHours ?? 0) - (prev.overtime_hours ?? 0) : (status === 'overtime' ? overtimeHours ?? 0 : 0);
+
+    // cleared cell → remove the record
+    if (trimmed === '') {
+      if (prev) {
+        db.attendance = db.attendance.filter((a) => a.id !== prev.id);
+        saveAndEmit(['attendance']);
+      }
+      return;
+    }
+
+    let status: Attendance['status'];
+    let hours: number | null = null;
+    if (trimmed.toLowerCase() === 'a' || trimmed.toLowerCase() === 'absent') {
+      status = 'absent';
+    } else {
+      const n = Number(trimmed);
+      if (Number.isNaN(n) || !Number.isFinite(n)) throw new Error(`Invalid value "${trimmed}". Enter hours (e.g. 8, 10.5) or A for absent.`);
+      if (n < 0 || n > 24) throw new Error('Hours must be between 0 and 24');
+      status = 'present';
+      hours = Math.round(n * 100) / 100;
+    }
+
+    const otDelta = prev
+      ? Math.max(0, (hours ?? 0) - 8) - Math.max(0, (prev.hours ?? 0) - 8)
+      : Math.max(0, (hours ?? 0) - 8);
 
     if (prev) {
       prev.status = status;
-      prev.overtime_hours = status === 'overtime' ? overtimeHours : null;
+      prev.hours = hours;
     } else {
       db.attendance.push({
-        id: uid(), employee_id: employeeId, date, status,
-        overtime_hours: status === 'overtime' ? overtimeHours : null,
+        id: uid(), employee_id: employeeId, date, status, hours,
         is_hidden: false, created_at: nowISO(),
       });
     }
 
-    // rating: ±0.2 stars per overtime hour delta
+    // rating: ±0.2 stars per overtime-hour delta (hours above 8/day)
     if (otDelta !== 0) {
       e.rating = clampRating(e.rating + 0.2 * otDelta);
     }
@@ -539,7 +633,7 @@ export const demoApi = {
         counts[a.status] = (counts[a.status] ?? 0) + 1;
       }
       for (const [status, count] of Object.entries(counts)) {
-        rows.push({ month: m, status: status as AttendanceStatus, count });
+        rows.push({ month: m, status: status as Attendance['status'], count });
       }
     }
     return rows;

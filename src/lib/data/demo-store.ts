@@ -129,7 +129,7 @@ function seedDB(): DemoDB {
   ): Employee => ({
     id: uid(),
     full_name: fullName,
-    employee_code: `ASM-${year}-${String(n).padStart(3, '0')}`,
+    employee_code: `PUL-${year}-${String(n).padStart(3, '0')}`,
     nationality,
     date_of_birth: `199${(n % 9) + 1}-0${(n % 8) + 1}-1${n % 9}`,
     phone: `+966 5${n}${n} ${n}0 ${n}0${n}`,
@@ -310,11 +310,11 @@ function seedDB(): DemoDB {
     created_at: new Date(Date.now() - hrs * 3600000).toISOString(),
   });
   db.notifications = [
-    notif('Auto-Generated Warning', `Kamal Hussain (ASM-${year}-004) was absent 3+ consecutive days`, 'warning', 2),
-    notif('New Cancellation Request', `Omar Farooq (ASM-${year}-015) is pending deletion approval — Project headcount reduction`, 'request', 72),
-    notif('New Leave Request', `Rajesh Kumar (ASM-${year}-001) requested annual leave for 5 day(s)`, 'request', 26),
-    notif('New Fine Issued', `Sandeep Singh (ASM-${year}-010) was fined SAR 150: Damage to company equipment`, 'fine', 144),
-    notif('New Warning Issued', `Joseph Santos (ASM-${year}-007) received a warning: Negligence in safety procedures`, 'warning', 288, true),
+    notif('Auto-Generated Warning', `Kamal Hussain (PUL-${year}-004) was absent 3+ consecutive days`, 'warning', 2),
+    notif('New Cancellation Request', `Omar Farooq (PUL-${year}-015) is pending deletion approval — Project headcount reduction`, 'request', 72),
+    notif('New Leave Request', `Rajesh Kumar (PUL-${year}-001) requested annual leave for 5 day(s)`, 'request', 26),
+    notif('New Fine Issued', `Sandeep Singh (PUL-${year}-010) was fined SAR 150: Damage to company equipment`, 'fine', 144),
+    notif('New Warning Issued', `Joseph Santos (PUL-${year}-007) received a warning: Negligence in safety procedures`, 'warning', 288, true),
     {
       ...notif('Leave Request Rejected', 'The leave request (casual, 1 day(s)) has been rejected.', 'request', 48),
       profile_id: raviP.id,

@@ -103,7 +103,7 @@ export function EmployeePage() {
   useEffect(() => {
     const f = consumeEmployeeFilter();
     if (f === 'idle' || f === 'working') setStatusFilter(f);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, []);
 
   // debounce search
@@ -124,7 +124,7 @@ export function EmployeePage() {
       }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [realtimeVersion]);
 
   const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
@@ -368,14 +368,18 @@ export function EmployeePage() {
                         <div className="flex items-center gap-3">
                           <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
                             {emp.photo ? (
-                              // eslint-disable-next-line @next/next/no-img-element
+                               
                               <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
                             ) : initials(emp.full_name)}
                           </span>
                           <div className="min-w-0">
                             <p className="flex items-center gap-1.5 font-medium">
                               <span className="truncate">{emp.full_name}</span>
-                              {emp.is_team_leader && <Crown size={12} className="shrink-0 fill-amber-400 text-amber-400" title="Team Leader" />}
+                              {emp.is_team_leader && (
+                                <span title="Team Leader" className="inline-flex">
+                                  <Crown size={12} className="shrink-0 fill-amber-400 text-amber-400" />
+                                </span>
+                              )}
                             </p>
                             <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                               {emp.site_name ? (
@@ -437,7 +441,7 @@ export function EmployeePage() {
                     <div className="flex items-center gap-3">
                       <span className="flex size-10 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-xs font-bold text-brand">
                         {emp.photo ? (
-                          // eslint-disable-next-line @next/next/no-img-element
+                           
                           <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" />
                         ) : initials(emp.full_name)}
                       </span>
@@ -519,7 +523,7 @@ export function EmployeePage() {
               <div className="flex items-center gap-4">
                 <span className="flex size-20 items-center justify-center overflow-hidden rounded-2xl border-2 border-dashed border-border bg-muted text-xs font-bold text-brand">
                   {form.photo ? (
-                    // eslint-disable-next-line @next/next/no-img-element
+                     
                     <img src={form.photo} alt="Preview" className="size-full object-cover" />
                   ) : (
                     <ImagePlus size={20} />
@@ -726,7 +730,7 @@ export function EmployeePage() {
                 <div className="flex items-center gap-3">
                   <span className="flex size-12 items-center justify-center overflow-hidden rounded-2xl bg-brand/15 text-sm font-bold text-brand">
                     {viewTarget.photo ? (
-                      // eslint-disable-next-line @next/next/no-img-element
+                       
                       <img src={viewTarget.photo} alt={viewTarget.full_name} className="size-full object-cover" />
                     ) : initials(viewTarget.full_name)}
                   </span>

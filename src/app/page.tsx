@@ -96,9 +96,8 @@ function MainLayout() {
 // Demo banner
 // ---------------------------------------------------------------------------
 function DemoBanner() {
-  if (!isDemoMode) return null;
   const [dismissed, setDismissed] = useState(false);
-  if (dismissed) return null;
+  if (!isDemoMode || dismissed) return null;
   return (
     <div className="border-b border-amber-500/20 bg-amber-500/10 px-4 py-1.5 text-center text-[11px] text-amber-600 dark:text-amber-400">
       Demo mode — sample data, sign-ins persist locally. Connect Supabase env vars to go live.

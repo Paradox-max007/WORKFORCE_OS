@@ -35,7 +35,7 @@ export type DocumentStatus = 'Valid' | 'Expired' | 'N/A';
 export interface Employee {
   id: string;
   full_name: string;
-  employee_code: string; // ASM-YYYY-NNN
+  employee_code: string; // PUL-YYYY-NNN
   nationality: string | null;
   date_of_birth: string | null; // YYYY-MM-DD
   phone: string | null;

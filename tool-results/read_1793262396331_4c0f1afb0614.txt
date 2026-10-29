@@ -1,0 +1,774 @@
+     1→'use client';
+     2→
+     3→import React, { useState, useRef, useMemo, useCallback } from 'react';
+     4→import { ArrowLeft, Download, Printer, Calendar, Loader2 } from 'lucide-react';
+     5→import { Button } from '@/components/ui/button';
+     6→import { Input } from '@/components/ui/input';
+     7→import { cn } from '@/lib/utils';
+     8→import html2canvas from 'html2canvas-pro';
+     9→import jsPDF from 'jspdf';
+    10→
+    11→/* ───────── Types ───────── */
+    12→interface AttendanceSheetProps {
+    13→  site: {
+    14→    id: string;
+    15→    name: string;
+    16→    clientName?: string | null;
+    17→    projectName?: string | null;
+    18→  };
+    19→  employees: Array<{
+    20→    id: string;
+    21→    fullName: string;
+    22→    employeeId: string;
+    23→    position: string | null;
+    24→    isTeamLeader: boolean;
+    25→    currentSite: string | null;
+    26→  }>;
+    27→  onClose: () => void;
+    28→}
+    29→
+    30→/* ───────── Constants ───────── */
+    31→const A4_WIDTH_MM = 210;
+    32→const A4_HEIGHT_MM = 297;
+    33→const ROWS_PER_PAGE = 24;
+    34→const EXTRA_ROWS = 5;
+    35→const HEADER_BG = '#bbbcbd';
+    36→const HEADER_TEXT = '#000';
+    37→
+    38→/* ───────── Helpers ───────── */
+    39→function formatDateDisplay(date: Date): string {
+    40→  const day = String(date.getDate()).padStart(2, '0');
+    41→  const month = String(date.getMonth() + 1).padStart(2, '0');
+    42→  const year = date.getFullYear();
+    43→  return `${day}/${month}/${year}`;
+    44→}
+    45→
+    46→function parseDateInput(value: string): Date {
+    47→  const parts = value.split('/');
+    48→  if (parts.length === 3) {
+    49→    const [day, month, year] = parts.map(Number);
+    50→    if (day && month && year) return new Date(year, month - 1, day);
+    51→  }
+    52→  return new Date();
+    53→}
+    54→
+    55→function upper(val: string): string {
+    56→  return val.toUpperCase();
+    57→}
+    58→
+    59→/* ───────── Inline Editable Cell ───────── */
+    60→function EditableCell({
+    61→  value,
+    62→  onChange,
+    63→  className,
+    64→  align = 'left',
+    65→  uppercase: forceUppercase = false,
+    66→}: {
+    67→  value: string;
+    68→  onChange: (val: string) => void;
+    69→  className?: string;
+    70→  align?: 'left' | 'center';
+    71→  uppercase?: boolean;
+    72→}) {
+    73→  return (
+    74→    <input
+    75→      type="text"
+    76→      value={value}
+    77→      onChange={(e) => onChange(forceUppercase ? e.target.value.toUpperCase() : e.target.value)}
+    78→      className={cn(
+    79→        'w-full bg-transparent border-none outline-none text-inherit font-inherit',
+    80→        'hover:bg-blue-50/60 focus:bg-blue-50/80 focus:outline-1 focus:outline-blue-300',
+    81→        'transition-colors rounded px-1 -mx-1 cursor-text',
+    82→        align === 'center' && 'text-center',
+    83→        forceUppercase && 'uppercase',
+    84→        className
+    85→      )}
+    86→    />
+    87→  );
+    88→}
+    89→
+    90→/* ───────── Page Chunk Helper ───────── */
+    91→function chunkRows<T>(items: T[], perPage: number): T[][] {
+    92→  const chunks: T[][] = [];
+    93→  for (let i = 0; i < items.length; i += perPage) {
+    94→    chunks.push(items.slice(i, i + perPage));
+    95→  }
+    96→  return chunks;
+    97→}
+    98→
+    99→/* ───────── Table Header HTML (shared) ───────── */
+   100→function tableHeaderHtml(): string {
+   101→  return `
+   102→    <tr>
+   103→      <th style="width:40px;">SL. NO</th>
+   104→      <th style="text-align:left;">NAME</th>
+   105→      <th style="width:99px;">EMP. CODE</th>
+   106→      <th style="width:159px; text-align:left;">TRADE</th>
+   107→      <th style="width:140px;">SIGNATURE</th>
+   108→    </tr>
+   109→  `;
+   110→}
+   111→
+   112→/* ───────── Build page HTML (shared by Print & PDF) ───────── */
+   113→function buildPageHtml(params: {
+   114→  employeeRows: Array<{ type: string; id?: string; fullName?: string; code?: string; position?: string; isTeamLeader?: boolean; isSupervisor?: boolean }>;
+   115→  extraRows: Array<{ type: string }>;
+   116→  pageIdx: number;
+   117→  totalPages: number;
+   118→  clientName: string;
+   119→  projectName: string;
+   120→  dateInput: string;
+   121→  strengthInput: string;
+   122→  sortedEmployees: Array<{ isTeamLeader: boolean; isSupervisor?: boolean; position?: string }>;
+   123→  getDisplayTrade: (emp: { isTeamLeader: boolean; isSupervisor?: boolean; position?: string }) => string;
+   124→  contentWidth: string;
+   125→  contentPadding: string;
+   126→  isFirstPage: boolean;
+   127→  isLastPage: boolean;
+   128→  serialOffset: number;
+   129→}): string {
+   130→  const { employeeRows, extraRows, pageIdx, totalPages, clientName, projectName, dateInput, strengthInput, sortedEmployees, getDisplayTrade, contentWidth, contentPadding, isFirstPage, isLastPage, serialOffset } = params;
+   131→
+   132→  let html = `<div class="page" style="width:${contentWidth}; padding:${contentPadding};">`;
+   133→
+   134→  // Header - Light gray bordered box
+   135→  if (isFirstPage) {
+   136→    html += `
+   137→      <div style="position:relative; border:1px solid #000; background:#E8E8E8; padding:8px 12px; margin-bottom:8px; -webkit-print-color-adjust:exact; print-color-adjust:exact; display:flex; align-items:center; justify-content:space-between; min-height:52px;">
+   138→        <div style="flex:1;"></div>
+   139→        <div style="flex:0 0 auto; text-align:center;">
+   140→          <div style="font-size:16px; font-weight:bold; text-align:center; text-transform:uppercase; letter-spacing:0.08em; color:#000;">ARABIAN SHIELD MANPOWER</div>
+   141→          <div style="background:${HEADER_BG}; color:${HEADER_TEXT}; text-align:center; padding:5px; font-size:13px; font-weight:bold; letter-spacing:0.15em; text-transform:uppercase; margin-top:6px; -webkit-print-color-adjust:exact; print-color-adjust:exact;">DAILY ATTENDANCE</div>
+   142→        </div>
+   143→        <div style="flex:1; display:flex; justify-content:flex-end; align-items:center;">
+   144→          <img src="/logo_asm.png" alt="ASM" style="height:48px; width:auto;" />
+   145→        </div>
+   146→      </div>
+   147→    `;
+   148→
+   149→    // Info Section
+   150→    html += `
+   151→      <div style="font-size:12px; text-transform:uppercase; margin-bottom:8px; line-height:1.8; padding:0 4px;">
+   152→        <div style="display:flex; align-items:baseline; margin-bottom:2px;">
+   153→          <span style="font-weight:bold; width:130px; flex-shrink:0; font-family:'Times New Roman', Times, serif;">&#8226; CLIENT NAME :</span>
+   154→          <span style="flex:1; border-bottom:1px solid #555; padding:0 4px; min-height:16px; font-family:'Times New Roman', Times, serif; font-weight:bold;">${upper(clientName)}</span>
+   155→        </div>
+   156→        <div style="display:flex; align-items:baseline; margin-bottom:2px;">
+   157→          <span style="font-weight:bold; width:130px; flex-shrink:0; font-family:'Times New Roman', Times, serif;">&#8226; PROJECT NAME :</span>
+   158→          <span style="flex:1; border-bottom:1px solid #555; padding:0 4px; min-height:16px; font-family:'Times New Roman', Times, serif; font-weight:bold;">${upper(projectName)}</span>
+   159→        </div>
+   160→        <div style="display:flex; align-items:baseline; margin-bottom:2px;">
+   161→          <span style="font-weight:bold; width:130px; flex-shrink:0;">&#8226; DATE :</span>
+   162→          <span style="flex:1; border-bottom:1px solid #555; padding:0 4px; min-height:16px;">${upper(dateInput)}</span>
+   163→        </div>
+   164→        <div style="display:flex; align-items:baseline; margin-bottom:2px;">
+   165→          <span style="font-weight:bold; width:130px; flex-shrink:0;">&#8226; STRENGTH :</span>
+   166→          <span style="flex:1; border-bottom:1px solid #555; padding:0 4px; min-height:16px; font-weight:bold;">${upper(strengthInput || String(sortedEmployees.length))}</span>
+   167→        </div>
+   168→      </div>
+   169→    `;
+   170→  } else {
+   171→    html += `
+   172→      <div style="position:relative; border:1px solid #000; background:#E8E8E8; padding:6px 12px; margin-bottom:8px; -webkit-print-color-adjust:exact; print-color-adjust:exact;">
+   173→        <div style="font-size:14px; font-weight:bold; text-align:center; text-transform:uppercase; letter-spacing:0.08em; color:#000;">ARABIAN SHIELD MANPOWER</div>
+   174→        <div style="background:${HEADER_BG}; color:${HEADER_TEXT}; text-align:center; padding:4px; font-size:13px; font-weight:bold; letter-spacing:0.15em; text-transform:uppercase; margin-top:4px; -webkit-print-color-adjust:exact; print-color-adjust:exact;">DAILY ATTENDANCE</div>
+   175→      </div>
+   176→      <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:8px; text-transform:uppercase; color:#374151;">
+   177→        <span><strong style="font-family:'Times New Roman', Times, serif;">CLIENT:</strong> <span style="font-family:'Times New Roman', Times, serif; font-weight:bold;">${upper(clientName)}</span> &nbsp;&nbsp; <strong style="font-family:'Times New Roman', Times, serif;">PROJECT:</strong> <span style="font-family:'Times New Roman', Times, serif; font-weight:bold;">${upper(projectName)}</span></span>
+   178→        <span><strong>DATE:</strong> ${upper(dateInput)}</span>
+   179→      </div>
+   180→    `;
+   181→  }
+   182→
+   183→  // Main Employee Table
+   184→  html += `
+   185→    <table>
+   186→      <thead>
+   187→        ${tableHeaderHtml()}
+   188→      </thead>
+   189→      <tbody>
+   190→  `;
+   191→
+   192→  employeeRows.forEach((row, idx) => {
+   193→    const serialNo = serialOffset + idx + 1;
+   194→    const isEven = idx % 2 === 1;
+   195→
+   196→    if (row.type === 'employee') {
+   197→      const trade = getDisplayTrade(row as { isTeamLeader: boolean; isSupervisor?: boolean; position?: string });
+   198→      const rowClass = row.isTeamLeader
+   199→        ? 'team-leader'
+   200→        : row.isSupervisor
+   201→        ? 'supervisor'
+   202→        : isEven ? 'even-row' : '';
+   203→
+   204→      html += `
+   205→        <tr class="${rowClass}">
+   206→          <td style="text-align:center; font-weight:bold;">${serialNo}</td>
+   207→          <td style="font-weight:bold;">${upper(row.fullName || '')}</td>
+   208→          <td style="text-align:center; font-weight:bold;">${upper(row.code || '')}</td>
+   209→          <td style="font-weight:bold;">${upper(trade)}</td>
+   210→          <td style="text-align:center;"></td>
+   211→        </tr>
+   212→      `;
+   213→    }
+   214→  });
+   215→
+   216→  html += `</tbody></table>`;
+   217→
+   218→  // Extra Employees Table (only on last page)
+   219→  if (isLastPage && extraRows.length > 0) {
+   220→    const extraStartNo = sortedEmployees.length + 1;
+   221→    html += `
+   222→      <div style="margin-top:12px; margin-bottom:4px; font-size:12px; font-weight:bold; text-transform:uppercase; letter-spacing:0.05em; color:#000;">EXTRA EMPLOYEES(IF ANY)</div>
+   223→      <table>
+   224→        <thead>
+   225→          ${tableHeaderHtml()}
+   226→        </thead>
+   227→        <tbody>
+   228→    `;
+   229→
+   230→    extraRows.forEach((_, idx) => {
+   231→      const serialNo = extraStartNo + idx;
+   232→      html += `
+   233→        <tr>
+   234→          <td style="text-align:center; color:#9ca3af; font-weight:bold;">${serialNo}</td>
+   235→          <td style="font-weight:bold;"></td>
+   236→          <td style="text-align:center; font-weight:bold;"></td>
+   237→          <td style="font-weight:bold;"></td>
+   238→          <td style="text-align:center;"></td>
+   239→        </tr>
+   240→      `;
+   241→    });
+   242→
+   243→    html += `</tbody></table>`;
+   244→  }
+   245→
+   246→  html += `<div class="page-info">PAGE ${pageIdx + 1} OF ${totalPages}</div>`;
+   247→  html += `</div>`;
+   248→
+   249→  return html;
+   250→}
+   251→
+   252→/* ───────── Shared CSS for print/iframe ───────── */
+   253→function getPrintCSS(): string {
+   254→  return `
+   255→    @page {
+   256→      size: A4 portrait;
+   257→      margin: 0;
+   258→    }
+   259→    * { margin: 0; padding: 0; box-sizing: border-box; }
+   260→    body { font-family: Arial, Helvetica, sans-serif; background: white; }
+   261→    .page {
+   262→      page-break-after: always;
+   263→      page-break-inside: avoid;
+   264→      position: relative;
+   265→      width: 794px;
+   266→      min-height: 1123px;
+   267→      padding: 38px;
+   268→      box-sizing: border-box;
+   269→    }
+   270→    .page:last-child {
+   271→      page-break-after: auto;
+   272→    }
+   273→    table {
+   274→      width: 100%;
+   275→      border-collapse: collapse;
+   276→      font-size: 13px;
+   277→      text-transform: uppercase;
+   278→    }
+   279→    thead tr {
+   280→      background: ${HEADER_BG} !important;
+   281→      color: ${HEADER_TEXT} !important;
+   282→      -webkit-print-color-adjust: exact;
+   283→      print-color-adjust: exact;
+   284→    }
+   285→    th, td {
+   286→      border: 1px solid #000;
+   287→      padding: 8px 6px;
+   288→    }
+   289→    th {
+   290→      font-weight: bold;
+   291→      text-align: center;
+   292→      font-size: 14px;
+   293→    }
+   294→    td {
+   295→      font-weight: bold;
+   296→    }
+   297→    .even-row { background: #f3f4f6; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+   298→    .team-leader { background: #fffbeb !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+   299→    .supervisor { background: #eff6ff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+   300→
+   301→    .page-info { text-align: right; font-size: 10px; color: #6b7280; margin-top: 4px; }
+   302→    @media print {
+   303→      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+   304→    }
+   305→  `;
+   306→}
+   307→
+   308→/* ───────── Main Component ───────── */
+   309→export function AttendanceSheet({ site, employees, onClose }: AttendanceSheetProps) {
+   310→  const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
+   311→  const [date, setDate] = useState<Date>(new Date());
+   312→  const [dateInput, setDateInput] = useState(formatDateDisplay(new Date()));
+   313→  const [isGenerating, setIsGenerating] = useState(false);
+   314→
+   315→  // Editable info fields
+   316→  const [clientName, setClientName] = useState(site.clientName || '');
+   317→  const [projectName, setProjectName] = useState(site.projectName || site.name);
+   318→  const [strengthInput, setStrengthInput] = useState(String(employees.length));
+   319→
+   320→  // Editable employee data
+   321→  const [employeeData, setEmployeeData] = useState(() =>
+   322→    employees.map((emp) => ({
+   323→      id: emp.id,
+   324→      fullName: emp.fullName,
+   325→      code: '',
+   326→      position: emp.position || '',
+   327→      isTeamLeader: emp.isTeamLeader,
+   328→      isSupervisor: emp.position?.toLowerCase().includes('supervisor') ?? false,
+   329→    }))
+   330→  );
+   331→
+   332→  // Sort
+   333→  const sortedEmployees = useMemo(() => {
+   334→    return [...employeeData].sort((a, b) => {
+   335→      if (a.isTeamLeader && !b.isTeamLeader) return -1;
+   336→      if (!a.isTeamLeader && b.isTeamLeader) return 1;
+   337→      if (a.isSupervisor && !b.isSupervisor) return -1;
+   338→      if (!a.isSupervisor && b.isSupervisor) return 1;
+   339→      return a.fullName.localeCompare(b.fullName);
+   340→    });
+   341→  }, [employeeData]);
+   342→
+   343→  const updateEmployee = useCallback(
+   344→    (id: string, field: 'fullName' | 'code' | 'position' | 'serialNo', value: string) => {
+   345→      setEmployeeData((prev) =>
+   346→        prev.map((emp) =>
+   347→          emp.id === id
+   348→            ? { ...emp, [field]: value, isSupervisor: field === 'position' ? value.toLowerCase().includes('supervisor') : emp.isSupervisor }
+   349→            : emp
+   350→        )
+   351→      );
+   352→    },
+   353→    []
+   354→  );
+   355→
+   356→  const handleDateChange = useCallback((value: string) => {
+   357→    setDateInput(value);
+   358→    const parsed = parseDateInput(value);
+   359→    if (!isNaN(parsed.getTime())) setDate(parsed);
+   360→  }, []);
+   361→
+   362→  const getDisplayTrade = useCallback((emp: { isTeamLeader: boolean; isSupervisor?: boolean; position?: string }) => {
+   363→    const pos = emp.position || '';
+   364→    if (emp.isTeamLeader) return pos ? `${pos} / TL` : 'TL';
+   365→    if (emp.isSupervisor) return pos ? `${pos} / SUPERVISOR` : 'SUPERVISOR';
+   366→    return pos;
+   367→  }, []);
+   368→
+   369→  // Build rows: only employees (extras are separate table now)
+   370→  const employeeRows = useMemo(() => {
+   371→    return sortedEmployees.map((emp) => ({
+   372→      type: 'employee' as const,
+   373→      ...emp,
+   374→    }));
+   375→  }, [sortedEmployees]);
+   376→
+   377→  const extraRowItems = useMemo(() => {
+   378→    return Array.from({ length: EXTRA_ROWS }, () => ({ type: 'extra' as const }));
+   379→  }, []);
+   380→
+   381→  // Chunk employee rows into pages
+   382→  const FIRST_PAGE_ROWS = ROWS_PER_PAGE - 6;
+   383→  const pages = useMemo(() => {
+   384→    if (employeeRows.length <= FIRST_PAGE_ROWS) return [employeeRows];
+   385→    const result: typeof employeeRows[] = [employeeRows.slice(0, FIRST_PAGE_ROWS)];
+   386→    const remaining = employeeRows.slice(FIRST_PAGE_ROWS);
+   387→    result.push(...chunkRows(remaining, ROWS_PER_PAGE));
+   388→    return result;
+   389→  }, [employeeRows]);
+   390→
+   391→  // Generate HTML for all pages (shared by PDF and Print)
+   392→  const generateAllPagesHtml = useCallback(() => {
+   393→    let allHtml = '';
+   394→    pages.forEach((pageEmployeeRows, pageIdx) => {
+   395→      const isFirstPage = pageIdx === 0;
+   396→      const isLastPage = pageIdx === pages.length - 1;
+   397→      const serialOffset = pageIdx === 0 ? 0 : pages.slice(0, pageIdx).flat().length;
+   398→
+   399→      allHtml += buildPageHtml({
+   400→        employeeRows: pageEmployeeRows,
+   401→        extraRows: isLastPage ? extraRowItems : [],
+   402→        pageIdx,
+   403→        totalPages: pages.length,
+   404→        clientName,
+   405→        projectName,
+   406→        dateInput,
+   407→        strengthInput,
+   408→        sortedEmployees,
+   409→        getDisplayTrade,
+   410→        contentWidth: '794px',
+   411→        contentPadding: '38px',
+   412→        isFirstPage,
+   413→        isLastPage,
+   414→        serialOffset,
+   415→      });
+   416→    });
+   417→    return allHtml;
+   418→  }, [pages, extraRowItems, clientName, projectName, dateInput, strengthInput, sortedEmployees, getDisplayTrade]);
+   419→
+   420→  /* ── Download PDF directly (jsPDF + html2canvas) ── */
+   421→  const handleDownloadPDF = useCallback(async () => {
+   422→    if (isGenerating) return;
+   423→    setIsGenerating(true);
+   424→
+   425→    try {
+   426→      const iframe = document.createElement('iframe');
+   427→      iframe.style.position = 'fixed';
+   428→      iframe.style.left = '-9999px';
+   429→      iframe.style.top = '-9999px';
+   430→      iframe.style.width = '794px';
+   431→      iframe.style.height = '1123px';
+   432→      document.body.appendChild(iframe);
+   433→
+   434→      const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+   435→      if (!iframeDoc) {
+   436→        document.body.removeChild(iframe);
+   437→        setIsGenerating(false);
+   438→        return;
+   439→      }
+   440→
+   441→      iframeDoc.open();
+   442→      iframeDoc.write(`<!DOCTYPE html><html><head><style>${getPrintCSS()}</style></head><body>`);
+   443→      iframeDoc.write(generateAllPagesHtml());
+   444→      iframeDoc.write(`</body></html>`);
+   445→      iframeDoc.close();
+   446→
+   447→      await new Promise((resolve) => setTimeout(resolve, 600));
+   448→
+   449→      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+   450→      const pageWidth = pdf.internal.pageSize.getWidth();
+   451→      const pageHeight = pdf.internal.pageSize.getHeight();
+   452→
+   453→      const pageDivs = iframeDoc.querySelectorAll('.page');
+   454→
+   455→      for (let i = 0; i < pageDivs.length; i++) {
+   456→        if (i > 0) pdf.addPage();
+   457→
+   458→        const canvas = await html2canvas(pageDivs[i] as HTMLElement, {
+   459→          scale: 2,
+   460→          useCORS: true,
+   461→          allowTaint: true,
+   462→          backgroundColor: '#ffffff',
+   463→          logging: false,
+   464→        });
+   465→
+   466→        const imgData = canvas.toDataURL('image/png');
+   467→        pdf.addImage(imgData, 'PNG', 0, 0, pageWidth, pageHeight);
+   468→      }
+   469→
+   470→      const fileName = `attendance-${site.name.replace(/\s+/g, '-')}-${date.toISOString().split('T')[0]}.pdf`;
+   471→      pdf.save(fileName);
+   472→
+   473→      document.body.removeChild(iframe);
+   474→    } catch (error) {
+   475→      console.error('Error generating PDF:', error);
+   476→    } finally {
+   477→      setIsGenerating(false);
+   478→    }
+   479→  }, [isGenerating, site.name, date, generateAllPagesHtml]);
+   480→
+   481→  /* ── Print with @page margin:0 to suppress browser headers/footers ── */
+   482→  const handlePrint = useCallback(() => {
+   483→    const iframe = document.createElement('iframe');
+   484→    iframe.style.position = 'fixed';
+   485→    iframe.style.left = '-9999px';
+   486→    iframe.style.top = '-9999px';
+   487→    iframe.style.width = '794px';
+   488→    iframe.style.height = '1123px';
+   489→    document.body.appendChild(iframe);
+   490→
+   491→    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+   492→    if (!iframeDoc) {
+   493→      document.body.removeChild(iframe);
+   494→      return;
+   495→    }
+   496→
+   497→    iframeDoc.open();
+   498→    iframeDoc.write(`<!DOCTYPE html><html><head><style>${getPrintCSS()}</style></head><body>`);
+   499→    iframeDoc.write(generateAllPagesHtml());
+   500→    iframeDoc.write(`</body></html>`);
+   501→    iframeDoc.close();
+   502→
+   503→    setTimeout(() => {
+   504→      iframe.contentWindow?.focus();
+   505→      iframe.contentWindow?.print();
+   506→      setTimeout(() => {
+   507→        document.body.removeChild(iframe);
+   508→      }, 2000);
+   509→    }, 600);
+   510→  }, [generateAllPagesHtml]);
+   511→
+   512→  return (
+   513→    <>
+   514→      {/* Global print styles */}
+   515→      <style jsx global>{`
+   516→        @media print {
+   517→          @page {
+   518→            size: A4 portrait;
+   519→            margin: 0;
+   520→          }
+   521→          body * {
+   522→            visibility: hidden;
+   523→          }
+   524→          #attendance-sheet-printable,
+   525→          #attendance-sheet-printable * {
+   526→            visibility: visible;
+   527→          }
+   528→          #attendance-sheet-printable {
+   529→            position: absolute;
+   530→            left: 0;
+   531→            top: 0;
+   532→            width: 100%;
+   533→            padding: 10mm;
+   534→            margin: 0;
+   535→            background: white;
+   536→            box-sizing: border-box;
+   537→          }
+   538→          #attendance-toolbar {
+   539→            display: none !important;
+   540→          }
+   541→        }
+   542→      `}</style>
+   543→
+   544→      <div className="fixed inset-0 z-50 bg-gray-200 flex flex-col overflow-hidden">
+   545→        {/* Toolbar */}
+   546→        <div
+   547→          id="attendance-toolbar"
+   548→          className="flex items-center gap-2 px-4 py-2 bg-white border-b border-gray-300 shadow-sm shrink-0 print:hidden"
+   549→        >
+   550→          <Button
+   551→            variant="default"
+   552→            size="sm"
+   553→            onClick={onClose}
+   554→            className="gap-1.5 bg-black text-white hover:bg-gray-800 border-none shadow-md font-semibold"
+   555→          >
+   556→            <ArrowLeft className="h-4 w-4" />
+   557→            <span>Back</span>
+   558→          </Button>
+   559→
+   560→          <div className="h-5 w-px bg-gray-300 mx-1" />
+   561→
+   562→          <div className="flex items-center gap-2">
+   563→            <Calendar className="h-4 w-4 text-gray-500" />
+   564→            <Input
+   565→              type="text"
+   566→              value={dateInput}
+   567→              onChange={(e) => handleDateChange(e.target.value)}
+   568→              className="h-8 w-32 text-sm font-mono uppercase"
+   569→              placeholder="DD/MM/YYYY"
+   570→            />
+   571→          </div>
+   572→
+   573→          <div className="ml-auto flex items-center gap-2">
+   574→            <Button
+   575→              variant="outline"
+   576→              size="sm"
+   577→              onClick={handleDownloadPDF}
+   578→              disabled={isGenerating}
+   579→              className="gap-1.5"
+   580→            >
+   581→              {isGenerating ? (
+   582→                <Loader2 className="h-4 w-4 animate-spin" />
+   583→              ) : (
+   584→                <Download className="h-4 w-4" />
+   585→              )}
+   586→              <span className="hidden sm:inline">Download PDF</span>
+   587→            </Button>
+   588→
+   589→            <Button variant="outline" size="sm" onClick={handlePrint} className="gap-1.5">
+   590→              <Printer className="h-4 w-4" />
+   591→              <span className="hidden sm:inline">Print</span>
+   592→            </Button>
+   593→          </div>
+   594→        </div>
+   595→
+   596→        {/* Sheet Container - scrollable preview */}
+   597→        <div className="flex-1 overflow-auto flex flex-col items-center py-6 px-4 gap-6">
+   598→          {pages.map((pageEmployeeRows, pageIdx) => {
+   599→            const isLastPage = pageIdx === pages.length - 1;
+   600→            const isFirstPage = pageIdx === 0;
+   601→            const serialOffset = pageIdx === 0 ? 0 : pages.slice(0, pageIdx).flat().length;
+   602→
+   603→            return (
+   604→              <div
+   605→                key={pageIdx}
+   606→                id={pageIdx === 0 ? 'attendance-sheet-printable' : undefined}
+   607→                ref={(el) => { pageRefs.current[pageIdx] = el; }}
+   608→                className="bg-white shadow-xl border border-gray-300 w-full p-[10mm]"
+   609→                style={{ maxWidth: `${A4_WIDTH_MM}mm`, minHeight: `${A4_HEIGHT_MM}mm`, boxSizing: 'border-box' }}
+   610→              >
+   611→                {/* Header Section */}
+   612→                {isFirstPage ? (
+   613→                  <>
+   614→                    <div className="relative border border-black bg-gray-200 px-3 py-2 flex items-center justify-between" style={{ minHeight: '52px' }}>
+   615→                      {/* Left spacer for centering */}
+   616→                      <div className="flex-1" />
+   617→                      {/* Center content */}
+   618→                      <div className="flex-1 text-center">
+   619→                        <h1 className="text-[16px] font-bold text-black tracking-[0.08em] uppercase">
+   620→                          ARABIAN SHIELD MANPOWER
+   621→                        </h1>
+   622→                        <div className="mt-1.5 text-center py-1.5 text-[13px] font-bold tracking-[0.15em] uppercase" style={{ background: HEADER_BG, color: HEADER_TEXT }}>
+   623→                          DAILY ATTENDANCE
+   624→                        </div>
+   625→                      </div>
+   626→                      {/* Right logo */}
+   627→                      <div className="flex-1 flex justify-end items-center">
+   628→                        <img
+   629→                          src="/logo_asm.png"
+   630→                          alt="ASM Logo"
+   631→                          className="h-12 w-auto object-contain"
+   632→                          crossOrigin="anonymous"
+   633→                        />
+   634→                      </div>
+   635→                    </div>
+   636→
+   637→                    {/* Info Section */}
+   638→                    <div className="mt-4 text-[12px] uppercase">
+   639→                      <div className="flex items-baseline mb-1.5">
+   640→                        <span className="font-bold text-gray-900 w-36 shrink-0" style={{ fontFamily: "'Times New Roman', Times, serif" }}>&#8226; CLIENT NAME :</span>
+   641→                        <span className="flex-1 border-b border-gray-500" style={{ fontFamily: "'Times New Roman', Times, serif", fontWeight: 'bold' }}>
+   642→                          <input type="text" value={clientName} onChange={(e) => setClientName(e.target.value.toUpperCase())} className="w-full bg-transparent border-none outline-none text-gray-800 text-[12px] uppercase hover:bg-blue-50/60 focus:bg-blue-50/80 focus:outline-1 focus:outline-blue-300 transition-colors rounded px-1 -mx-1 cursor-text py-0.5" style={{ fontFamily: "'Times New Roman', Times, serif", fontWeight: 'bold' }} />
+   643→                        </span>
+   644→                      </div>
+   645→                      <div className="flex items-baseline mb-1.5">
+   646→                        <span className="font-bold text-gray-900 w-36 shrink-0" style={{ fontFamily: "'Times New Roman', Times, serif" }}>&#8226; PROJECT NAME :</span>
+   647→                        <span className="flex-1 border-b border-gray-500" style={{ fontFamily: "'Times New Roman', Times, serif", fontWeight: 'bold' }}>
+   648→                          <input type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.toUpperCase())} className="w-full bg-transparent border-none outline-none text-gray-800 text-[12px] uppercase hover:bg-blue-50/60 focus:bg-blue-50/80 focus:outline-1 focus:outline-blue-300 transition-colors rounded px-1 -mx-1 cursor-text py-0.5" style={{ fontFamily: "'Times New Roman', Times, serif", fontWeight: 'bold' }} />
+   649→                        </span>
+   650→                      </div>
+   651→                      <div className="flex items-baseline mb-1.5">
+   652→                        <span className="font-bold text-gray-900 w-36 shrink-0">&#8226; DATE :</span>
+   653→                        <span className="flex-1 border-b border-gray-500">
+   654→                          <input type="text" value={dateInput} onChange={(e) => handleDateChange(e.target.value.toUpperCase())} className="w-full bg-transparent border-none outline-none text-gray-800 text-[12px] font-mono uppercase hover:bg-blue-50/60 focus:bg-blue-50/80 focus:outline-1 focus:outline-blue-300 transition-colors rounded px-1 -mx-1 cursor-text py-0.5" />
+   655→                        </span>
+   656→                      </div>
+   657→                      <div className="flex items-baseline mb-1.5">
+   658→                        <span className="font-bold text-gray-900 w-36 shrink-0">&#8226; STRENGTH :</span>
+   659→                        <span className="flex-1 border-b border-gray-500">
+   660→                          <input type="text" value={strengthInput} onChange={(e) => setStrengthInput(e.target.value.toUpperCase())} className="w-full bg-transparent border-none outline-none text-gray-800 text-[12px] font-semibold uppercase hover:bg-blue-50/60 focus:bg-blue-50/80 focus:outline-1 focus:outline-blue-300 transition-colors rounded px-1 -mx-1 cursor-text py-0.5" />
+   661→                        </span>
+   662→                      </div>
+   663→                    </div>
+   664→                  </>
+   665→                ) : (
+   666→                  <>
+   667→                    <div className="relative border border-black bg-gray-200 p-2">
+   668→                      <h1 className="text-[14px] font-bold text-center text-black tracking-[0.08em] uppercase">
+   669→                        ARABIAN SHIELD MANPOWER
+   670→                      </h1>
+   671→                      <div className="mt-1 text-center py-1 text-[13px] font-bold tracking-[0.15em] uppercase" style={{ background: HEADER_BG, color: HEADER_TEXT }}>
+   672→                        DAILY ATTENDANCE
+   673→                      </div>
+   674→                    </div>
+   675→                    <div className="mt-3 flex justify-between text-[12px] uppercase text-gray-600">
+   676→                      <span><strong style={{ fontFamily: "'Times New Roman', Times, serif" }}>CLIENT:</strong> <span style={{ fontFamily: "'Times New Roman', Times, serif", fontWeight: 'bold' }}>{upper(clientName)}</span> &nbsp;&nbsp; <strong style={{ fontFamily: "'Times New Roman', Times, serif" }}>PROJECT:</strong> <span style={{ fontFamily: "'Times New Roman', Times, serif", fontWeight: 'bold' }}>{upper(projectName)}</span></span>
+   677→                      <span><strong>DATE:</strong> {upper(dateInput)}</span>
+   678→                    </div>
+   679→                  </>
+   680→                )}
+   681→
+   682→                {/* Main Employee Table */}
+   683→                <div className="mt-4 pb-2">
+   684→                  <table className="w-full border-collapse text-[13px] uppercase">
+   685→                    <thead>
+   686→                      <tr style={{ background: HEADER_BG, color: HEADER_TEXT }}>
+   687→                        <th className="border border-black px-2 py-2 text-center font-bold w-12 text-[14px] uppercase">SL. NO</th>
+   688→                        <th className="border border-black px-2 py-2 text-left font-bold text-[14px] uppercase">NAME</th>
+   689→                        <th className="border border-black px-2 py-2 text-center font-bold w-[115px] text-[14px] uppercase">EMP. CODE</th>
+   690→                        <th className="border border-black px-2 py-2 text-left font-bold w-[179px] text-[14px] uppercase">TRADE</th>
+   691→                        <th className="border border-black px-2 py-2 text-center font-bold w-40 text-[14px] uppercase">SIGNATURE</th>
+   692→                      </tr>
+   693→                    </thead>
+   694→                    <tbody>
+   695→                      {pageEmployeeRows.map((row, idx) => {
+   696→                        const serialNo = serialOffset + idx + 1;
+   697→                        const isEven = idx % 2 === 1;
+   698→
+   699→                        return (
+   700→                          <tr
+   701→                            key={row.id || `emp-${idx}`}
+   702→                            className={cn(
+   703→                              isEven ? 'bg-gray-50' : 'bg-white',
+   704→                              row.isTeamLeader && 'bg-amber-50',
+   705→                              row.isSupervisor && !row.isTeamLeader && 'bg-blue-50'
+   706→                            )}
+   707→                          >
+   708→                            <td className="border border-black px-2 py-1.5 text-center text-gray-700 font-bold">{serialNo}</td>
+   709→                            <td className="border border-black px-1 py-1">
+   710→                              <EditableCell value={upper(row.fullName || '')} onChange={(val) => updateEmployee(row.id!, 'fullName', val)} className="py-0.5 text-gray-900 font-bold text-[13px] uppercase" uppercase />
+   711→                            </td>
+   712→                            <td className="border border-black px-1 py-1 text-center">
+   713→                              <EditableCell value={upper(row.code || '')} onChange={(val) => updateEmployee(row.id!, 'code', val)} className="py-0.5 text-gray-700 text-center font-mono font-bold text-[13px] uppercase" align="center" uppercase />
+   714→                            </td>
+   715→                            <td className="border border-black px-1 py-1">
+   716→                              <EditableCell value={upper(getDisplayTrade(row as typeof sortedEmployees[0] & { type: string }))} onChange={(val) => { const baseVal = val.replace(/ \/ (TL|SUPERVISOR)$/i, ''); updateEmployee(row.id!, 'position', baseVal); }} className="py-0.5 text-gray-700 uppercase font-bold text-[13px]" uppercase />
+   717→                            </td>
+   718→                            <td className="border border-black px-2 py-1.5 text-center">
+   719→                              <EditableCell value="" onChange={() => {}} className="py-0.5 text-[13px]" align="center" />
+   720→                            </td>
+   721→                          </tr>
+   722→                        );
+   723→                      })}
+   724→                    </tbody>
+   725→
+   726→                  </table>
+   727→                </div>
+   728→
+   729→                {/* Extra Employees Table (only on last page) */}
+   730→                {isLastPage && (
+   731→                  <div className="mt-3 pb-4">
+   732→                    <div className="text-[13px] font-bold uppercase tracking-[0.05em] text-black mb-1">
+   733→                      EXTRA EMPLOYEES(IF ANY)
+   734→                    </div>
+   735→                    <table className="w-full border-collapse text-[13px] uppercase">
+   736→                      <thead>
+   737→                        <tr style={{ background: HEADER_BG, color: HEADER_TEXT }}>
+   738→                          <th className="border border-black px-2 py-2 text-center font-bold w-12 text-[14px] uppercase">SL. NO</th>
+   739→                          <th className="border border-black px-2 py-2 text-left font-bold text-[14px] uppercase">NAME</th>
+   740→                          <th className="border border-black px-2 py-2 text-center font-bold w-[115px] text-[14px] uppercase">EMP. CODE</th>
+   741→                          <th className="border border-black px-2 py-2 text-left font-bold w-[179px] text-[14px] uppercase">TRADE</th>
+   742→                          <th className="border border-black px-2 py-2 text-center font-bold w-40 text-[14px] uppercase">SIGNATURE</th>
+   743→                        </tr>
+   744→                      </thead>
+   745→                      <tbody>
+   746→                        {extraRowItems.map((_, idx) => {
+   747→                          const serialNo = sortedEmployees.length + idx + 1;
+   748→                          return (
+   749→                            <tr key={`extra-${idx}`} className="bg-white">
+   750→                              <td className="border border-black px-2 py-1.5 text-center text-gray-400 text-[13px] font-bold">{serialNo}</td>
+   751→                              <td className="border border-black px-1 py-1"><EditableCell value="" onChange={() => {}} className="py-0.5 text-[13px] font-bold" /></td>
+   752→                              <td className="border border-black px-1 py-1 text-center"><EditableCell value="" onChange={() => {}} className="py-0.5 text-[13px] font-bold" align="center" /></td>
+   753→                              <td className="border border-black px-1 py-1"><EditableCell value="" onChange={() => {}} className="py-0.5 text-[13px] font-bold" /></td>
+   754→                              <td className="border border-black px-2 py-1.5 text-center"><EditableCell value="" onChange={() => {}} className="py-0.5 text-[13px]" align="center" /></td>
+   755→                            </tr>
+   756→                          );
+   757→                        })}
+   758→                      </tbody>
+   759→                    </table>
+   760→                  </div>
+   761→                )}
+   762→
+   763→                <div className="text-right text-[10px] text-gray-400 mt-2 pb-4 uppercase">
+   764→                  PAGE {pageIdx + 1} OF {pages.length}
+   765→                </div>
+   766→              </div>
+   767→            );
+   768→          })}
+   769→        </div>
+   770→      </div>
+   771→    </>
+   772→  );
+   773→}
+   774→

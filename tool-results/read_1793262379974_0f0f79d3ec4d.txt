@@ -1,0 +1,702 @@
+     1→'use client';
+     2→
+     3→import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+     4→import {
+     5→  Calendar,
+     6→  List,
+     7→  ChevronLeft,
+     8→  ChevronRight,
+     9→  Check,
+    10→  Clock,
+    11→  Search,
+    12→  MapPin,
+    13→  X,
+    14→} from 'lucide-react';
+    15→import { Card, CardContent } from '@/components/ui/card';
+    16→import { Button } from '@/components/ui/button';
+    17→import { Badge } from '@/components/ui/badge';
+    18→import { Skeleton } from '@/components/ui/skeleton';
+    19→import { Input } from '@/components/ui/input';
+    20→import {
+    21→  Select,
+    22→  SelectContent,
+    23→  SelectItem,
+    24→  SelectTrigger,
+    25→  SelectValue,
+    26→} from '@/components/ui/select';
+    27→import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
+    28→import { toast } from '@/hooks/use-toast';
+    29→import { cn } from '@/lib/utils';
+    30→import { useAuthStore } from '@/store/auth-store';
+    31→
+    32→/* ───────── types ───────── */
+    33→interface Employee {
+    34→  id: string;
+    35→  fullName: string;
+    36→  employeeId: string;
+    37→  currentSite: string | null;
+    38→  status: string;
+    39→}
+    40→
+    41→interface SiteOption {
+    42→  id: string;
+    43→  name: string;
+    44→}
+    45→
+    46→interface AttendanceRecord {
+    47→  id: string;
+    48→  employeeId: string;
+    49→  date: string;
+    50→  status: 'present' | 'absent' | 'no_site' | 'overtime' | 'not_marked';
+    51→  overtimeHours: number | null;
+    52→  employee?: { id: string; fullName: string; employeeId: string };
+    53→}
+    54→
+    55→type StatusOption = AttendanceRecord['status'];
+    56→type ViewMode = 'list' | 'calendar';
+    57→
+    58→/* ───────── helpers ───────── */
+    59→const MONTHS = [
+    60→  { value: '01', label: 'January' },
+    61→  { value: '02', label: 'February' },
+    62→  { value: '03', label: 'March' },
+    63→  { value: '04', label: 'April' },
+    64→  { value: '05', label: 'May' },
+    65→  { value: '06', label: 'June' },
+    66→  { value: '07', label: 'July' },
+    67→  { value: '08', label: 'August' },
+    68→  { value: '09', label: 'September' },
+    69→  { value: '10', label: 'October' },
+    70→  { value: '11', label: 'November' },
+    71→  { value: '12', label: 'December' },
+    72→];
+    73→
+    74→const currentYear = new Date().getFullYear();
+    75→const currentMonth = new Date().getMonth() + 1;
+    76→const YEARS = Array.from({ length: 5 }, (_, i) => String(currentYear - 2 + i));
+    77→
+    78→function getDaysInMonth(year: number, month: number) {
+    79→  return new Date(year, month, 0).getDate();
+    80→}
+    81→
+    82→function formatDate(day: number, monthStr: string, yearStr: string): string {
+    83→  return `${yearStr}-${monthStr}-${String(day).padStart(2, '0')}`;
+    84→}
+    85→
+    86→function isFutureDate(day: number, month: number, year: number): boolean {
+    87→  const today = new Date();
+    88→  today.setHours(0, 0, 0, 0);
+    89→  const check = new Date(year, month - 1, day);
+    90→  return check > today;
+    91→}
+    92→
+    93→function isFriday(year: number, month: number, day: number): boolean {
+    94→  return new Date(year, month - 1, day).getDay() === 5;
+    95→}
+    96→
+    97→function getRelativeDateLabel(day: number, month: number, year: number): string | null {
+    98→  const today = new Date();
+    99→  today.setHours(0, 0, 0, 0);
+   100→  const target = new Date(year, month - 1, day);
+   101→  target.setHours(0, 0, 0, 0);
+   102→  const diffMs = today.getTime() - target.getTime();
+   103→  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+   104→
+   105→  if (diffDays === 0) return 'Today';
+   106→  if (diffDays === 1) return 'Yesterday';
+   107→  if (diffDays === 2) return '2 days ago';
+   108→  if (diffDays === 3) return '3 days ago';
+   109→  if (diffDays === 4) return '4 days ago';
+   110→  if (diffDays === 5) return '5 days ago';
+   111→  if (diffDays === 6) return '6 days ago';
+   112→  return null; // older than 6 days — just show day number
+   113→}
+   114→
+   115→const STATUS_CONFIG: Record<StatusOption, { label: string; short: string; color: string; dotColor: string }> = {
+   116→  present: { label: 'Present', short: 'P', color: 'bg-green-500/20 text-green-400', dotColor: 'bg-green-500' },
+   117→  absent: { label: 'Absent', short: 'A', color: 'bg-red-500/20 text-red-400', dotColor: 'bg-red-500' },
+   118→  overtime: { label: 'Overtime', short: 'O', color: 'bg-white/15 text-white border border-white/20', dotColor: 'bg-white' },
+   119→  no_site: { label: 'No Site', short: 'NS', color: 'bg-slate-500/20 text-slate-300', dotColor: 'bg-slate-400' },
+   120→};
+   121→
+   122→const STATUS_OPTIONS: StatusOption[] = ['present', 'absent', 'overtime', 'no_site'];
+   123→
+   124→/* ───────── Status Dropdown ───────── */
+   125→interface StatusDropdownProps {
+   126→  employeeId: string;
+   127→  date: string;
+   128→  currentStatus: StatusOption;
+   129→  currentOvertimeHours: number | null;
+   130→  onClose: () => void;
+   131→  onStatusChange: (employeeId: string, date: string, status: StatusOption, overtimeHours?: number | null) => void;
+   132→  position: { top: number; left: number };
+   133→}
+   134→
+   135→function StatusDropdown({
+   136→  employeeId,
+   137→  date,
+   138→  currentStatus,
+   139→  currentOvertimeHours,
+   140→  onClose,
+   141→  onStatusChange,
+   142→  position,
+   143→}: StatusDropdownProps) {
+   144→  const [selectedStatus, setSelectedStatus] = useState<StatusOption>(currentStatus);
+   145→  const [overtimeHours, setOvertimeHours] = useState<string>(
+   146→    currentOvertimeHours ? String(currentOvertimeHours) : '2'
+   147→  );
+   148→  const ref = useRef<HTMLDivElement>(null);
+   149→
+   150→  useEffect(() => {
+   151→    function handleClickOutside(e: MouseEvent) {
+   152→      if (ref.current && !ref.current.contains(e.target as Node)) {
+   153→        onClose();
+   154→      }
+   155→    }
+   156→    document.addEventListener('mousedown', handleClickOutside);
+   157→    return () => document.removeEventListener('mousedown', handleClickOutside);
+   158→  }, [onClose]);
+   159→
+   160→  const handleConfirm = () => {
+   161→    const hours = selectedStatus === 'overtime' ? parseFloat(overtimeHours) || 0 : null;
+   162→    onStatusChange(employeeId, date, selectedStatus, hours);
+   163→    onClose();
+   164→  };
+   165→
+   166→  return (
+   167→    <div
+   168→      ref={ref}
+   169→      className="fixed z-[100] w-52 rounded-xl border border-slate-600 bg-slate-800 p-2 shadow-xl shadow-black/40"
+   170→      style={{ top: Math.max(8, position.top - 240), left: Math.min(position.left, window.innerWidth - 220) }}
+   171→    >
+   172→      <div className="mb-2 px-2 py-1.5 text-xs font-medium text-slate-400 border-b border-slate-700">
+   173→        {date}
+   174→      </div>
+   175→      <div className="flex flex-col gap-0.5">
+   176→        {STATUS_OPTIONS.map((status) => {
+   177→          const cfg = STATUS_CONFIG[status];
+   178→          return (
+   179→            <button
+   180→              key={status}
+   181→              onClick={() => setSelectedStatus(status)}
+   182→              className={cn(
+   183→                'flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors text-left w-full',
+   184→                selectedStatus === status ? 'bg-slate-700/80 text-white' : 'text-slate-300 hover:bg-slate-700/50'
+   185→              )}
+   186→            >
+   187→              <span className={cn('h-2.5 w-2.5 rounded-full shrink-0', cfg.dotColor)} />
+   188→              <span>{cfg.label}</span>
+   189→              {selectedStatus === status && (
+   190→                <Check className="ml-auto h-3.5 w-3.5 text-white" />
+   191→              )}
+   192→            </button>
+   193→          );
+   194→        })}
+   195→      </div>
+   196→      {selectedStatus === 'overtime' && (
+   197→        <div className="mt-2 px-2">
+   198→          <label className="text-xs text-slate-400 mb-1 block">Overtime Hours</label>
+   199→          <Input
+   200→            type="number"
+   201→            min="0"
+   202→            max="24"
+   203→            step="0.5"
+   204→            value={overtimeHours}
+   205→            onChange={(e) => setOvertimeHours(e.target.value)}
+   206→            className="h-8 bg-slate-900 border-slate-600 text-white text-sm"
+   207→          />
+   208→        </div>
+   209→      )}
+   210→      <div className="mt-2 pt-2 border-t border-slate-700">
+   211→        <Button
+   212→          onClick={handleConfirm}
+   213→          size="sm"
+   214→          className="w-full h-8 bg-white hover:bg-gray-200 text-black text-xs font-medium"
+   215→        >
+   216→          Save
+   217→        </Button>
+   218→      </div>
+   219→    </div>
+   220→  );
+   221→}
+   222→
+   223→/* ───────── Searchable Employee Dropdown (for Calendar view) ───────── */
+   224→interface SearchableEmployeeSelectProps {
+   225→  employees: Employee[];
+   226→  selectedEmployeeId: string;
+   227→  onSelect: (id: string) => void;
+   228→}
+   229→
+   230→function SearchableEmployeeSelect({
+   231→  employees,
+   232→  selectedEmployeeId,
+   233→  onSelect,
+   234→}: SearchableEmployeeSelectProps) {
+   235→  const [open, setOpen] = useState(false);
+   236→  const [search, setSearch] = useState('');
+   237→  const containerRef = useRef<HTMLDivElement>(null);
+   238→  const inputRef = useRef<HTMLInputElement>(null);
+   239→
+   240→  const selectedEmployee = employees.find((e) => e.id === selectedEmployeeId);
+   241→
+   242→  const filtered = search
+   243→    ? employees.filter(
+   244→        (e) =>
+   245→          e.fullName.toLowerCase().includes(search.toLowerCase()) ||
+   246→          e.employeeId.toLowerCase().includes(search.toLowerCase()) ||
+   247→          (e.currentSite || '').toLowerCase().includes(search.toLowerCase())
+   248→      )
+   249→    : employees;
+   250→
+   251→  useEffect(() => {
+   252→    function handleClickOutside(e: MouseEvent) {
+   253→      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+   254→        setOpen(false);
+   255→        setSearch('');
+   256→      }
+   257→    }
+   258→    document.addEventListener('mousedown', handleClickOutside);
+   259→    return () => document.removeEventListener('mousedown', handleClickOutside);
+   260→  }, []);
+   261→
+   262→  useEffect(() => {
+   263→    if (open && inputRef.current) {
+   264→      setTimeout(() => inputRef.current?.focus(), 50);
+   265→    }
+   266→  }, [open]);
+   267→
+   268→  return (
+   269→    <div ref={containerRef} className="relative w-full max-w-md">
+   270→      <label className="text-sm text-slate-400 mb-2 block font-medium">Select Employee</label>
+   271→      <button
+   272→        type="button"
+   273→        onClick={() => setOpen(!open)}
+   274→        className="flex items-center gap-2 w-full h-10 rounded-lg border border-slate-600 bg-slate-900 px-3 text-sm text-white hover:bg-slate-800 transition-colors text-left"
+   275→      >
+   276→        {selectedEmployee ? (
+   277→          <div className="flex items-center gap-2 min-w-0 flex-1">
+   278→            <span className="truncate">{selectedEmployee.fullName}</span>
+   279→            <span className="text-slate-500 text-xs">({selectedEmployee.employeeId})</span>
+   280→            {selectedEmployee.currentSite ? (
+   281→              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-emerald-500/15 text-emerald-400 border-emerald-500/30 shrink-0">
+   282→                {selectedEmployee.currentSite}
+   283→              </Badge>
+   284→            ) : (
+   285→              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-slate-500/15 text-slate-400 border-slate-500/25 shrink-0">
+   286→                No Site
+   287→              </Badge>
+   288→            )}
+   289→          </div>
+   290→        ) : (
+   291→          <span className="text-slate-500">Select employee...</span>
+   292→        )}
+   293→      </button>
+   294→
+   295→      {open && (
+   296→        <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-slate-800 border border-slate-600 rounded-lg shadow-xl shadow-black/40 overflow-hidden">
+   297→          <div className="p-2 border-b border-slate-700">
+   298→            <div className="relative">
+   299→              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
+   300→              <input
+   301→                ref={inputRef}
+   302→                type="text"
+   303→                value={search}
+   304→                onChange={(e) => setSearch(e.target.value)}
+   305→                placeholder="Search by name, ID, or site..."
+   306→                className="w-full h-8 pl-8 pr-3 bg-slate-900 border border-slate-600 rounded-md text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50"
+   307→              />
+   308→              {search && (
+   309→                <button
+   310→                  type="button"
+   311→                  onClick={() => setSearch('')}
+   312→                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+   313→                >
+   314→                  <X className="h-3.5 w-3.5" />
+   315→                </button>
+   316→              )}
+   317→            </div>
+   318→          </div>
+   319→          <div className="max-h-64 overflow-y-auto">
+   320→            {filtered.length === 0 ? (
+   321→              <div className="px-3 py-6 text-center text-sm text-slate-500">No employees found</div>
+   322→            ) : (
+   323→              filtered.map((emp) => (
+   324→                <button
+   325→                  key={emp.id}
+   326→                  type="button"
+   327→                  onClick={() => {
+   328→                    onSelect(emp.id);
+   329→                    setOpen(false);
+   330→                    setSearch('');
+   331→                  }}
+   332→                  className={cn(
+   333→                    'flex items-center gap-2 w-full px-3 py-2 text-sm text-left transition-colors hover:bg-slate-700/50',
+   334→                    emp.id === selectedEmployeeId ? 'bg-slate-700/70 text-white' : 'text-slate-300'
+   335→                  )}
+   336→                >
+   337→                  <span className="truncate flex-1">{emp.fullName}</span>
+   338→                  <span className="text-slate-500 text-xs shrink-0">({emp.employeeId})</span>
+   339→                  {emp.currentSite ? (
+   340→                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-emerald-500/15 text-emerald-400 border-emerald-500/30 shrink-0">
+   341→                      {emp.currentSite}
+   342→                    </Badge>
+   343→                  ) : (
+   344→                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-slate-500/15 text-slate-400 border-slate-500/25 shrink-0">
+   345→                      No Site
+   346→                    </Badge>
+   347→                  )}
+   348→                </button>
+   349→              ))
+   350→            )}
+   351→          </div>
+   352→        </div>
+   353→      )}
+   354→    </div>
+   355→  );
+   356→}
+   357→
+   358→/* ───────── List View ───────── */
+   359→interface ListViewProps {
+   360→  employees: Employee[];
+   361→  attendanceMap: Map<string, AttendanceRecord>;
+   362→  daysInMonth: number;
+   363→  monthStr: string;
+   364→  yearStr: string;
+   365→  month: number;
+   366→  year: number;
+   367→  loading: boolean;
+   368→  isCurrentMonthView: boolean;
+   369→  onStatusChange: (employeeId: string, date: string, status: StatusOption, overtimeHours?: number | null) => void;
+   370→}
+   371→
+   372→function ListView({
+   373→  employees,
+   374→  attendanceMap,
+   375→  daysInMonth,
+   376→  monthStr,
+   377→  yearStr,
+   378→  month,
+   379→  year,
+   380→  loading,
+   381→  isCurrentMonthView,
+   382→  onStatusChange,
+   383→}: ListViewProps) {
+   384→  const [dropdown, setDropdown] = useState<{
+   385→    employeeId: string;
+   386→    date: string;
+   387→    status: StatusOption;
+   388→    overtimeHours: number | null;
+   389→    position: { top: number; left: number };
+   390→  } | null>(null);
+   391→
+   392→  // For current month: today on the left, all previous dates to the right (no future dates)
+   393→  // For past months: normal order (1, 2, 3... last day)
+   394→  const displayDays = useMemo(() => {
+   395→    if (isCurrentMonthView) {
+   396→      const today = new Date();
+   397→      const currentDay = today.getDate();
+   398→      // Only show days from 1 up to today, reversed: today on left, 1st on right
+   399→      const days = Array.from({ length: currentDay }, (_, i) => currentDay - i);
+   400→      return days;
+   401→    }
+   402→    return Array.from({ length: daysInMonth }, (_, i) => i + 1);
+   403→  }, [daysInMonth, isCurrentMonthView]);
+   404→
+   405→  // Get label for each day column header
+   406→  const getDayLabel = useCallback(
+   407→    (day: number): string => {
+   408→      if (!isCurrentMonthView) return String(day);
+   409→      const relLabel = getRelativeDateLabel(day, month, year);
+   410→      return relLabel || String(day);
+   411→    },
+   412→    [isCurrentMonthView, month, year]
+   413→  );
+   414→
+   415→  // Check if a day is within the "relative label" zone (last 7 days for current month)
+   416→  const isRecentDay = useCallback(
+   417→    (day: number): boolean => {
+   418→      if (!isCurrentMonthView) return false;
+   419→      return getRelativeDateLabel(day, month, year) !== null;
+   420→    },
+   421→    [isCurrentMonthView, month, year]
+   422→  );
+   423→
+   424→  if (loading) {
+   425→    return (
+   426→      <Card className="bg-slate-800/50 border-slate-700/50">
+   427→        <CardContent className="p-4">
+   428→          <div className="space-y-3">
+   429→            {Array.from({ length: 5 }).map((_, i) => (
+   430→              <Skeleton key={i} className="h-10 w-full bg-slate-700/50" />
+   431→            ))}
+   432→          </div>
+   433→        </CardContent>
+   434→      </Card>
+   435→    );
+   436→  }
+   437→
+   438→  if (employees.length === 0) {
+   439→    return (
+   440→      <Card className="bg-slate-800/50 border-slate-700/50">
+   441→        <CardContent className="py-16 text-center">
+   442→          <p className="text-sm text-slate-400">No active employees found</p>
+   443→        </CardContent>
+   444→      </Card>
+   445→    );
+   446→  }
+   447→
+   448→  return (
+   449→    <Card className="bg-slate-800/50 border-slate-700/50 overflow-hidden">
+   450→      <ScrollArea className="w-full">
+   451→        <div className="min-w-[1000px]">
+   452→          {/* Header row */}
+   453→          <div className="flex items-center bg-slate-900/80 border-b border-slate-700 text-xs font-medium text-slate-400 sticky top-0 z-10">
+   454→            <div className="w-52 shrink-0 px-4 py-3">Employee</div>
+   455→            <div className="w-28 shrink-0 px-3 py-3">ID</div>
+   456→            <div className="w-36 shrink-0 px-3 py-3">Site</div>
+   457→            <div className="flex-1 flex">
+   458→              {displayDays.map((day) => {
+   459→                const isFri = isFriday(year, month, day);
+   460→                const label = getDayLabel(day);
+   461→                const recent = isRecentDay(day);
+   462→                return (
+   463→                  <div
+   464→                    key={day}
+   465→                    className={cn(
+   466→                      'w-16 shrink-0 text-center py-3 leading-tight',
+   467→                      isFri && 'text-red-400/50',
+   468→                      recent && 'text-emerald-400 font-semibold'
+   469→                    )}
+   470→                  >
+   471→                    <span className={cn(recent && 'text-[10px] block')}>{label}</span>
+   472→                  </div>
+   473→                );
+   474→              })}
+   475→            </div>
+   476→            <div className="w-16 shrink-0 text-center py-3 px-2">OT</div>
+   477→          </div>
+   478→
+   479→          {/* Employee rows */}
+   480→          <div className="divide-y divide-slate-700/50">
+   481→            {employees.map((emp) => {
+   482→              const totalOT = Array.from(attendanceMap.values())
+   483→                .filter((r) => r.employeeId === emp.id && r.status === 'overtime')
+   484→                .reduce((sum, r) => sum + (r.overtimeHours || 0), 0);
+   485→
+   486→              return (
+   487→                <div
+   488→                  key={emp.id}
+   489→                  className="flex items-center hover:bg-slate-700/20 transition-colors"
+   490→                >
+   491→                  <div className="w-52 shrink-0 px-4 py-2.5">
+   492→                    <span className="text-sm text-white font-medium truncate block">
+   493→                      {emp.fullName}
+   494→                    </span>
+   495→                  </div>
+   496→                  <div className="w-28 shrink-0 px-3 py-2.5">
+   497→                    <span className="text-xs text-slate-400 font-mono">{emp.employeeId}</span>
+   498→                  </div>
+   499→                  <div className="w-36 shrink-0 px-3 py-2.5">
+   500→                    {emp.currentSite ? (
+   501→                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-emerald-500/15 text-emerald-400 border-emerald-500/30 truncate max-w-full block">
+   502→                        {emp.currentSite}
+   503→                      </Badge>
+   504→                    ) : (
+   505→                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-slate-500/15 text-slate-400 border-slate-500/25">
+   506→                        No Site
+   507→                      </Badge>
+   508→                    )}
+   509→                  </div>
+   510→                  <div className="flex-1 flex">
+   511→                    {displayDays.map((day) => {
+   512→                      const dateStr = formatDate(day, monthStr, yearStr);
+   513→                      const record = attendanceMap.get(`${emp.id}-${dateStr}`);
+   514→                      const status = record?.status || (emp.currentSite ? 'present' : 'no_site');
+   515→                      const cfg = STATUS_CONFIG[status];
+   516→                      const isFri = isFriday(year, month, day);
+   517→                      const recent = isRecentDay(day);
+   518→
+   519→                      return (
+   520→                        <div
+   521→                          key={day}
+   522→                          className={cn(
+   523→                            'w-16 shrink-0 flex items-center justify-center py-1.5',
+   524→                            isFri && 'bg-red-500/5',
+   525→                            recent && 'bg-emerald-500/5'
+   526→                          )}
+   527→                        >
+   528→                          <button
+   529→                            onClick={(e) => {
+   530→                              const rect = e.currentTarget.getBoundingClientRect();
+   531→                              setDropdown({
+   532→                                employeeId: emp.id,
+   533→                                date: dateStr,
+   534→                                status: record?.status || (emp.currentSite ? 'present' : 'no_site'),
+   535→                                overtimeHours: record?.overtimeHours || null,
+   536→                                position: { top: rect.top, left: rect.left },
+   537→                              });
+   538→                            }}
+   539→                            className={cn(
+   540→                              'h-6 w-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-all hover:ring-2 hover:ring-slate-500/50',
+   541→                              cfg.color
+   542→                            )}
+   543→                            title={`${cfg.label}${status === 'overtime' && record?.overtimeHours ? ` (${record.overtimeHours}h)` : ''}`}
+   544→                          >
+   545→                            {cfg.short}
+   546→                          </button>
+   547→                        </div>
+   548→                      );
+   549→                    })}
+   550→                  </div>
+   551→                  <div className="w-16 shrink-0 text-center py-2.5 px-2">
+   552→                    {totalOT > 0 ? (
+   553→                      <span className="text-xs font-medium text-white">{totalOT}h</span>
+   554→                    ) : (
+   555→                      <span className="text-xs text-slate-600">&mdash;</span>
+   556→                    )}
+   557→                  </div>
+   558→                </div>
+   559→              );
+   560→            })}
+   561→          </div>
+   562→        </div>
+   563→        <ScrollBar orientation="horizontal" />
+   564→      </ScrollArea>
+   565→
+   566→      {/* Legend */}
+   567→      <div className="flex flex-wrap gap-3 px-4 py-3 border-t border-slate-700/50">
+   568→        {STATUS_OPTIONS.map((s) => {
+   569→          const cfg = STATUS_CONFIG[s];
+   570→          return (
+   571→            <div key={s} className="flex items-center gap-1.5">
+   572→              <span className={cn('h-2 w-2 rounded-full', cfg.dotColor)} />
+   573→              <span className="text-[11px] text-slate-400">{cfg.label}</span>
+   574→            </div>
+   575→          );
+   576→        })}
+   577→        <div className="flex items-center gap-1.5">
+   578→          <span className="h-2 w-2 rounded-full bg-red-400/40" />
+   579→          <span className="text-[11px] text-slate-400">Friday</span>
+   580→        </div>
+   581→      </div>
+   582→
+   583→      {/* Status Dropdown */}
+   584→      {dropdown && (
+   585→        <StatusDropdown
+   586→          employeeId={dropdown.employeeId}
+   587→          date={dropdown.date}
+   588→          currentStatus={dropdown.status}
+   589→          currentOvertimeHours={dropdown.overtimeHours}
+   590→          onStatusChange={onStatusChange}
+   591→          onClose={() => setDropdown(null)}
+   592→          position={dropdown.position}
+   593→        />
+   594→      )}
+   595→    </Card>
+   596→  );
+   597→}
+   598→
+   599→/* ───────── Calendar View ───────── */
+   600→interface CalendarViewProps {
+   601→  employees: Employee[];
+   602→  attendanceMap: Map<string, AttendanceRecord>;
+   603→  monthStr: string;
+   604→  yearStr: string;
+   605→  month: number;
+   606→  year: number;
+   607→  loading: boolean;
+   608→  selectedEmployeeId: string;
+   609→  onSelectedEmployeeChange: (id: string) => void;
+   610→  onStatusChange: (employeeId: string, date: string, status: StatusOption, overtimeHours?: number | null) => void;
+   611→}
+   612→
+   613→function CalendarView({
+   614→  employees,
+   615→  attendanceMap,
+   616→  monthStr,
+   617→  yearStr,
+   618→  month,
+   619→  year,
+   620→  loading,
+   621→  selectedEmployeeId,
+   622→  onSelectedEmployeeChange,
+   623→  onStatusChange,
+   624→}: CalendarViewProps) {
+   625→  const daysInMonth = getDaysInMonth(year, month);
+   626→  const firstDayOfWeek = new Date(year, month - 1, 1).getDay(); // 0=Sunday
+   627→  const [dropdown, setDropdown] = useState<{
+   628→    employeeId: string;
+   629→    date: string;
+   630→    status: StatusOption;
+   631→    overtimeHours: number | null;
+   632→    position: { top: number; left: number };
+   633→  } | null>(null);
+   634→
+   635→  const selectedEmployee = employees.find((e) => e.id === selectedEmployeeId);
+   636→
+   637→  const calendarDays = useMemo(() => {
+   638→    const days: (number | null)[] = [];
+   639→    // Pad start
+   640→    for (let i = 0; i < firstDayOfWeek; i++) {
+   641→      days.push(null);
+   642→    }
+   643→    for (let d = 1; d <= daysInMonth; d++) {
+   644→      days.push(d);
+   645→    }
+   646→    return days;
+   647→  }, [firstDayOfWeek, daysInMonth]);
+   648→
+   649→  const weekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+   650→
+   651→  const getStatusForDay = useCallback(
+   652→    (day: number) => {
+   653→      const dateStr = formatDate(day, monthStr, yearStr);
+   654→      const record = attendanceMap.get(`${selectedEmployeeId}-${dateStr}`);
+   655→      if (record) return record.status;
+   656→      // Default: present for employees with site, no_site for idle employees
+   657→      const emp = employees.find(e => e.id === selectedEmployeeId);
+   658→      return emp?.currentSite ? 'present' : 'no_site';
+   659→    },
+   660→    [attendanceMap, selectedEmployeeId, monthStr, yearStr, employees]
+   661→  );
+   662→
+   663→  if (loading) {
+   664→    return (
+   665→      <Card className="bg-slate-800/50 border-slate-700/50">
+   666→        <CardContent className="p-6">
+   667→          <Skeleton className="h-10 w-64 mb-6 bg-slate-700/50" />
+   668→          <div className="grid grid-cols-7 gap-2">
+   669→            {Array.from({ length: 35 }).map((_, i) => (
+   670→              <Skeleton key={i} className="h-16 rounded-lg bg-slate-700/50" />
+   671→            ))}
+   672→          </div>
+   673→        </CardContent>
+   674→      </Card>
+   675→    );
+   676→  }
+   677→
+   678→  return (
+   679→    <Card className="bg-slate-800/50 border-slate-700/50">
+   680→      <CardContent className="p-4 md:p-6">
+   681→        {/* Searchable Employee selector */}
+   682→        <div className="mb-6">
+   683→          <SearchableEmployeeSelect
+   684→            employees={employees}
+   685→            selectedEmployeeId={selectedEmployeeId}
+   686→            onSelect={onSelectedEmployeeChange}
+   687→          />
+   688→        </div>
+   689→
+   690→        {selectedEmployee && (
+   691→          <>
+   692→            {/* Employee info + Summary */}
+   693→            <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-6">
+   694→              <div className="flex items-center gap-2">
+   695→                <span className="text-sm text-white font-medium">{selectedEmployee.fullName}</span>
+   696→                <span className="text-xs text-slate-500">({selectedEmployee.employeeId})</span>
+   697→                {selectedEmployee.currentSite ? (
+   698→                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-emerald-500/15 text-emerald-400 border-emerald-500/30">
+   699→                    <MapPin className="h-2.5 w-2.5 mr-0.5" />
+   700→                    {selectedEmployee.currentSite}
+
+[showing lines 1-700 of 1383; use offset=701 with limit to continue reading]

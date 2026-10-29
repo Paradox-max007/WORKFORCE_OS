@@ -77,7 +77,7 @@ export function DashboardPage() {
       }
     })().catch(() => undefined);
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [realtimeVersion]);
 
   useEffect(() => {
@@ -105,14 +105,11 @@ export function DashboardPage() {
       });
     }
     return opts;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [year, month, daysInMonth]);
 
-  useEffect(() => {
-    if (day > daysInMonth) setDay(daysInMonth);
-  }, [daysInMonth, day]);
-
-  const selectedDate = `${monthStr}-${String(day).padStart(2, '0')}`;
+  const effectiveDay = Math.min(day, daysInMonth);
+  const selectedDate = `${monthStr}-${String(effectiveDay).padStart(2, '0')}`;
 
   // ---- derived metrics --------------------------------------------------------
   const activeEmployees = employees ?? [];
@@ -172,7 +169,7 @@ export function DashboardPage() {
   const yearOptions = [now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
   const loading = !employees || !attendance || !sites || !summary;
   const subtitle = dayRecords.length
-    ? `${MONTH_NAMES[month]} ${day}, ${year}`
+    ? `${MONTH_NAMES[month]} ${effectiveDay}, ${year}`
     : `${MONTH_NAMES[month]} ${year}`;
 
   return (
@@ -184,15 +181,15 @@ export function DashboardPage() {
             Dashboard
           </h1>
           <p className="mt-1 text-sm text-emerald-500">
-            {new Date(year, month, day).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+            {new Date(year, month, effectiveDay).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Select value={selectedDate} onValueChange={setDay as unknown as (v: string) => void}  >
+          <Select value={selectedDate} onValueChange={(v) => setDay(parseInt(v.slice(8), 10))}>
             <SelectTrigger className="h-10 w-40 bg-card"><CalendarDays className="mr-2 size-4 text-brand" /><SelectValue /></SelectTrigger>
             <SelectContent className="max-h-72">
               {dayOptions.map((d) => (
-                <SelectItem key={d.value} value={String(day)} disabled={d.upcoming}>
+                <SelectItem key={d.value} value={d.value} disabled={d.upcoming}>
                   {d.label}
                 </SelectItem>
               ))}

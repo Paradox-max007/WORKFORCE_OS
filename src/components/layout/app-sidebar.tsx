@@ -60,7 +60,7 @@ function useUnreadCount(user: Profile | null): number {
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [user?.id, version]);
   return count;
 }
@@ -99,7 +99,7 @@ function SidebarContent({
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [user?.id, version]);
 
   const allowed = (id: AppView): boolean => {

@@ -1,0 +1,1411 @@
+     1→'use client';
+     2→
+     3→import React, { useEffect, useState, useCallback, useMemo } from 'react';
+     4→import {
+     5→  Building2,
+     6→  Users,
+     7→  Eye,
+     8→  Trash2,
+     9→  UserMinus,
+    10→  Plus,
+    11→  Search,
+    12→  Star,
+    13→  AlertTriangle,
+    14→  ChevronLeft,
+    15→  Pencil,
+    16→  UserPlus,
+    17→  MapPin,
+    18→  X,
+    19→  Loader2,
+    20→  Crown,
+    21→  FileSpreadsheet,
+    22→  Power,
+    23→  PowerOff,
+    24→} from 'lucide-react';
+    25→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    26→import { Button } from '@/components/ui/button';
+    27→import { Input } from '@/components/ui/input';
+    28→import { Badge } from '@/components/ui/badge';
+    29→import { Skeleton } from '@/components/ui/skeleton';
+    30→import { Checkbox } from '@/components/ui/checkbox';
+    31→import { Separator } from '@/components/ui/separator';
+    32→import { Textarea } from '@/components/ui/textarea';
+    33→import { Label } from '@/components/ui/label';
+    34→import { Switch } from '@/components/ui/switch';
+    35→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    36→import {
+    37→  Table,
+    38→  TableBody,
+    39→  TableCell,
+    40→  TableHead,
+    41→  TableHeader,
+    42→  TableRow,
+    43→} from '@/components/ui/table';
+    44→import {
+    45→  Dialog,
+    46→  DialogContent,
+    47→  DialogDescription,
+    48→  DialogFooter,
+    49→  DialogHeader,
+    50→  DialogTitle,
+    51→} from '@/components/ui/dialog';
+    52→import {
+    53→  Popover,
+    54→  PopoverContent,
+    55→  PopoverTrigger,
+    56→} from '@/components/ui/popover';
+    57→import {
+    58→  Command,
+    59→  CommandEmpty,
+    60→  CommandGroup,
+    61→  CommandInput,
+    62→  CommandItem,
+    63→  CommandList,
+    64→} from '@/components/ui/command';
+    65→import { toast } from '@/hooks/use-toast';
+    66→import { cn } from '@/lib/utils';
+    67→import { AttendanceSheet } from '@/components/attendance/attendance-sheet';
+    68→
+    69→/* ───────── types ───────── */
+    70→interface Site {
+    71→  id: string;
+    72→  name: string;
+    73→  clientName?: string | null;
+    74→  projectName?: string | null;
+    75→  isActive: boolean;
+    76→  createdAt: string;
+    77→  employeeCount: number;
+    78→}
+    79→
+    80→interface SiteEmployee {
+    81→  id: string;
+    82→  fullName: string;
+    83→  employeeId: string;
+    84→  position: string | null;
+    85→  nationality: string | null;
+    86→  rating: number;
+    87→  currentSite: string | null;
+    88→  status: string;
+    89→  photo: string | null;
+    90→  isTeamLeader: boolean;
+    91→  teamLeaderSiteId: string | null;
+    92→}
+    93→
+    94→interface AllEmployee {
+    95→  id: string;
+    96→  fullName: string;
+    97→  employeeId: string;
+    98→  position: string | null;
+    99→  nationality: string | null;
+   100→  currentSite: string | null;
+   101→  status: string;
+   102→}
+   103→
+   104→type SubView = 'list' | 'employees';
+   105→
+   106→/* ───────── Star Rating ───────── */
+   107→function StarRating({ rating }: { rating: number }) {
+   108→  const fullStars = Math.floor(rating);
+   109→  const hasHalf = rating - fullStars >= 0.25 && rating - fullStars < 0.75;
+   110→  const emptyStars = 5 - fullStars - (hasHalf ? 1 : 0);
+   111→  const isFull5 = rating >= 4.75;
+   112→
+   113→  return (
+   114→    <div className="flex items-center gap-0.5">
+   115→      {isFull5 ? (
+   116→        Array.from({ length: 5 }).map((_, i) => (
+   117→          <Star key={i} className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />
+   118→        ))
+   119→      ) : (
+   120→        <>
+   121→          {Array.from({ length: fullStars }).map((_, i) => (
+   122→            <Star key={`full-${i}`} className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />
+   123→          ))}
+   124→          {hasHalf && (
+   125→            <div className="relative">
+   126→              <Star className="h-3.5 w-3.5 text-slate-600" />
+   127→              <div className="absolute inset-0 overflow-hidden w-1/2">
+   128→                <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />
+   129→              </div>
+   130→            </div>
+   131→          )}
+   132→          {Array.from({ length: emptyStars }).map((_, i) => (
+   133→            <Star key={`empty-${i}`} className="h-3.5 w-3.5 text-slate-600" />
+   134→          ))}
+   135→        </>
+   136→      )}
+   137→      <span className="text-xs text-slate-400 ml-1 font-medium">{rating.toFixed(1)}</span>
+   138→    </div>
+   139→  );
+   140→}
+   141→
+   142→/* ───────── Site Cards Grid ───────── */
+   143→function SiteCardsGrid({
+   144→  sites,
+   145→  search,
+   146→  loading,
+   147→  onSearchChange,
+   148→  onViewEmployees,
+   149→  onDeleteSite,
+   150→  onEditSite,
+   151→  onToggleActive,
+   152→  onAttendanceSheet,
+   153→}: {
+   154→  sites: Site[];
+   155→  search: string;
+   156→  loading: boolean;
+   157→  onSearchChange: (s: string) => void;
+   158→  onViewEmployees: (site: Site) => void;
+   159→  onDeleteSite: (site: Site) => void;
+   160→  onEditSite: (site: Site) => void;
+   161→  onToggleActive: (site: Site) => void;
+   162→  onAttendanceSheet: (site: Site) => void;
+   163→}) {
+   164→  const filteredSites = sites.filter((s) =>
+   165→    s.name.toLowerCase().includes(search.toLowerCase()) ||
+   166→    (s.clientName && s.clientName.toLowerCase().includes(search.toLowerCase())) ||
+   167→    (s.projectName && s.projectName.toLowerCase().includes(search.toLowerCase()))
+   168→  );
+   169→
+   170→  const formatDate = (dateStr: string) => {
+   171→    try {
+   172→      return new Date(dateStr).toLocaleDateString('en-US', {
+   173→        year: 'numeric',
+   174→        month: 'short',
+   175→        day: 'numeric',
+   176→      });
+   177→    } catch {
+   178→      return dateStr;
+   179→    }
+   180→  };
+   181→
+   182→  if (loading) {
+   183→    return (
+   184→      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+   185→        {[1, 2, 3].map((i) => (
+   186→          <Skeleton key={i} className="h-52 bg-slate-800 rounded-xl" />
+   187→        ))}
+   188→      </div>
+   189→    );
+   190→  }
+   191→
+   192→  if (filteredSites.length === 0) {
+   193→    return (
+   194→      <div className="flex flex-col items-center justify-center py-16 text-center">
+   195→        <Building2 className="h-12 w-12 text-slate-600 mb-3" />
+   196→        <p className="text-slate-400 text-lg font-medium">No sites found</p>
+   197→        <p className="text-slate-500 text-sm mt-1">
+   198→          {search ? 'Try a different search term.' : 'No sites in this category.'}
+   199→        </p>
+   200→      </div>
+   201→    );
+   202→  }
+   203→
+   204→  return (
+   205→    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+   206→      {filteredSites.map((site) => (
+   207→        <Card
+   208→          key={site.id}
+   209→          className={cn(
+   210→            "border-slate-700/50 hover:border-slate-600/50 transition-all group",
+   211→            site.isActive ? "bg-slate-800/50" : "bg-slate-800/30 opacity-80"
+   212→          )}
+   213→        >
+   214→          <CardHeader className="pb-3">
+   215→            <div className="flex items-start justify-between">
+   216→              <div className="flex items-center gap-3">
+   217→                <div className={cn(
+   218→                  "flex h-10 w-10 items-center justify-center rounded-lg transition-colors",
+   219→                  site.isActive
+   220→                    ? "bg-emerald-500/10 group-hover:bg-emerald-500/20"
+   221→                    : "bg-slate-600/20 group-hover:bg-slate-600/30"
+   222→                )}>
+   223→                  <Building2 className={cn(
+   224→                    "h-5 w-5",
+   225→                    site.isActive ? "text-emerald-400" : "text-slate-500"
+   226→                  )} />
+   227→                </div>
+   228→                <div className="min-w-0">
+   229→                  <CardTitle className="text-base text-white truncate">
+   230→                    {site.name}
+   231→                  </CardTitle>
+   232→                  <p className="text-[11px] text-slate-500 mt-0.5">
+   233→                    Created {formatDate(site.createdAt)}
+   234→                  </p>
+   235→                </div>
+   236→              </div>
+   237→              <div className="flex items-center gap-0.5">
+   238→                {/* Active/Inactive Toggle */}
+   239→                <Button
+   240→                  variant="ghost"
+   241→                  size="icon"
+   242→                  className={cn(
+   243→                    "h-8 w-8 shrink-0",
+   244→                    site.isActive
+   245→                      ? "text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10"
+   246→                      : "text-slate-500 hover:text-slate-400 hover:bg-slate-500/10"
+   247→                  )}
+   248→                  onClick={() => onToggleActive(site)}
+   249→                  title={site.isActive ? 'Deactivate site' : 'Activate site'}
+   250→                >
+   251→                  {site.isActive ? <Power className="h-3.5 w-3.5" /> : <PowerOff className="h-3.5 w-3.5" />}
+   252→                </Button>
+   253→                <Button
+   254→                  variant="ghost"
+   255→                  size="icon"
+   256→                  className="h-8 w-8 text-slate-500 hover:text-white hover:bg-slate-500/10 shrink-0"
+   257→                  onClick={() => onEditSite(site)}
+   258→                >
+   259→                  <Pencil className="h-3.5 w-3.5" />
+   260→                </Button>
+   261→                <Button
+   262→                  variant="ghost"
+   263→                  size="icon"
+   264→                  className="h-8 w-8 text-slate-500 hover:text-red-400 hover:bg-red-500/10 shrink-0"
+   265→                  onClick={() => onDeleteSite(site)}
+   266→                >
+   267→                  <Trash2 className="h-4 w-4" />
+   268→                </Button>
+   269→              </div>
+   270→            </div>
+   271→          </CardHeader>
+   272→          <CardContent className="pt-0 space-y-3">
+   273→            {/* Client & Project info */}
+   274→            {(site.clientName || site.projectName) && (
+   275→              <div className="space-y-0.5">
+   276→                {site.clientName && (
+   277→                  <p className="text-xs text-slate-400 truncate">
+   278→                    <span className="text-slate-500">Client:</span> {site.clientName}
+   279→                  </p>
+   280→                )}
+   281→                {site.projectName && (
+   282→                  <p className="text-xs text-slate-400 truncate">
+   283→                    <span className="text-slate-500">Project:</span> {site.projectName}
+   284→                  </p>
+   285→                )}
+   286→              </div>
+   287→            )}
+   288→
+   289→            <div className="flex items-center gap-2 text-sm text-slate-400">
+   290→              <Users className="h-4 w-4" />
+   291→              <span>
+   292→                <span className="text-white font-semibold">{site.employeeCount}</span>{' '}
+   293→                {site.employeeCount === 1 ? 'employee' : 'employees'}
+   294→              </span>
+   295→            </div>
+   296→
+   297→            {/* Action Buttons */}
+   298→            <div className="flex flex-col gap-2">
+   299→              <div className="flex gap-2">
+   300→                <Button
+   301→                  variant="outline"
+   302→                  className="flex-1 bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-emerald-600 hover:text-white hover:border-emerald-600 gap-2 transition-all"
+   303→                  onClick={() => onViewEmployees(site)}
+   304→                >
+   305→                  <Eye className="h-4 w-4" />
+   306→                  View Employees
+   307→                </Button>
+   308→                <Button
+   309→                  variant="outline"
+   310→                  className="bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-white hover:text-black hover:border-white gap-2 transition-all shrink-0"
+   311→                  onClick={() => onAttendanceSheet(site)}
+   312→                  title="Attendance Sheet"
+   313→                >
+   314→                  <FileSpreadsheet className="h-4 w-4" />
+   315→                </Button>
+   316→              </div>
+   317→            </div>
+   318→          </CardContent>
+   319→        </Card>
+   320→      ))}
+   321→    </div>
+   322→  );
+   323→}
+   324→
+   325→/* ───────── Add Employee Combobox ───────── */
+   326→function AddEmployeeCombobox({
+   327→  allEmployees,
+   328→  currentSiteName,
+   329→  currentSiteEmployeeIds,
+   330→  onAdd,
+   331→  loading,
+   332→}: {
+   333→  allEmployees: AllEmployee[];
+   334→  currentSiteName: string;
+   335→  currentSiteEmployeeIds: Set<string>;
+   336→  onAdd: (employee: AllEmployee) => void;
+   337→  loading: boolean;
+   338→}) {
+   339→  const [open, setOpen] = useState(false);
+   340→  const [filter, setFilter] = useState('');
+   341→
+   342→  const filtered = useMemo(() => {
+   343→    if (!filter) return allEmployees;
+   344→    const q = filter.toLowerCase();
+   345→    return allEmployees.filter(
+   346→      (e) =>
+   347→        e.fullName.toLowerCase().includes(q) ||
+   348→        e.employeeId.toLowerCase().includes(q) ||
+   349→        (e.position && e.position.toLowerCase().includes(q))
+   350→    );
+   351→  }, [allEmployees, filter]);
+   352→
+   353→  return (
+   354→    <Popover open={open} onOpenChange={setOpen}>
+   355→      <PopoverTrigger asChild>
+   356→        <Button
+   357→          variant="outline"
+   358→          disabled={loading}
+   359→          className="bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-emerald-600 hover:text-white hover:border-emerald-600 gap-2 transition-all"
+   360→        >
+   361→          {loading ? (
+   362→            <Loader2 className="h-4 w-4 animate-spin" />
+   363→          ) : (
+   364→            <UserPlus className="h-4 w-4" />
+   365→          )}
+   366→          Add Employee
+   367→        </Button>
+   368→      </PopoverTrigger>
+   369→      <PopoverContent className="w-80 p-0 bg-slate-800 border-slate-600" align="start">
+   370→        <Command className="bg-slate-800">
+   371→          <CommandInput
+   372→            placeholder="Search employees..."
+   373→            value={filter}
+   374→            onValueChange={setFilter}
+   375→            className="text-white"
+   376→          />
+   377→          <CommandList className="max-h-64">
+   378→            <CommandEmpty className="text-slate-400">No employees found.</CommandEmpty>
+   379→            <CommandGroup>
+   380→              {filtered.map((emp) => {
+   381→                const isAlreadyInSite = currentSiteEmployeeIds.has(emp.id);
+   382→                const isFromAnotherSite = emp.currentSite && emp.currentSite !== currentSiteName;
+   383→                const isIdle = !emp.currentSite;
+   384→
+   385→                return (
+   386→                  <CommandItem
+   387→                    key={emp.id}
+   388→                    value={`${emp.fullName} ${emp.employeeId}`}
+   389→                    onSelect={() => {
+   390→                      if (!isAlreadyInSite) {
+   391→                        onAdd(emp);
+   392→                        setOpen(false);
+   393→                        setFilter('');
+   394→                      }
+   395→                    }}
+   396→                    className={cn(
+   397→                      'text-slate-200 data-[selected=true]:bg-slate-700 data-[selected=true]:text-white py-2.5',
+   398→                      isAlreadyInSite && 'opacity-50 cursor-not-allowed'
+   399→                    )}
+   400→                  >
+   401→                    <div className="flex flex-col flex-1 min-w-0">
+   402→                      <div className="flex items-center gap-2">
+   403→                        <span className="text-sm truncate">{emp.fullName}</span>
+   404→                        {isAlreadyInSite && (
+   405→                          <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px] px-1.5 py-0 shrink-0">
+   406→                            Current
+   407→                          </Badge>
+   408→                        )}
+   409→                        {isFromAnotherSite && (
+   410→                          <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-[10px] px-1.5 py-0 shrink-0 flex items-center gap-0.5">
+   411→                            <MapPin className="h-2.5 w-2.5" />
+   412→                            {emp.currentSite}
+   413→                          </Badge>
+   414→                        )}
+   415→                        {isIdle && (
+   416→                          <Badge className="bg-slate-500/20 text-slate-400 border-slate-500/30 text-[10px] px-1.5 py-0 shrink-0">
+   417→                            Idle
+   418→                          </Badge>
+   419→                        )}
+   420→                      </div>
+   421→                      <span className="text-[11px] text-slate-500">
+   422→                        {emp.employeeId}
+   423→                        {emp.position ? ` · ${emp.position}` : ''}
+   424→                      </span>
+   425→                    </div>
+   426→                  </CommandItem>
+   427→                );
+   428→              })}
+   429→            </CommandGroup>
+   430→          </CommandList>
+   431→        </Command>
+   432→      </PopoverContent>
+   433→    </Popover>
+   434→  );
+   435→}
+   436→
+   437→/* ───────── Main Component ───────── */
+   438→export function SitesPage() {
+   439→  // Sub view management
+   440→  const [subView, setSubView] = useState<SubView>('list');
+   441→  const [viewSite, setViewSite] = useState<Site | null>(null);
+   442→
+   443→  // Sites list state
+   444→  const [sites, setSites] = useState<Site[]>([]);
+   445→  const [loading, setLoading] = useState(true);
+   446→  const [search, setSearch] = useState('');
+   447→  const [activeTab, setActiveTab] = useState<string>('active');
+   448→
+   449→  // Add/Edit/Delete site dialogs
+   450→  const [addSiteName, setAddSiteName] = useState('');
+   451→  const [addSiteClientName, setAddSiteClientName] = useState('');
+   452→  const [addSiteProjectName, setAddSiteProjectName] = useState('');
+   453→  const [showAddDialog, setShowAddDialog] = useState(false);
+   454→  const [addLoading, setAddLoading] = useState(false);
+   455→
+   456→  const [editSiteTarget, setEditSiteTarget] = useState<Site | null>(null);
+   457→  const [editSiteName, setEditSiteName] = useState('');
+   458→  const [editSiteClientName, setEditSiteClientName] = useState('');
+   459→  const [editSiteProjectName, setEditSiteProjectName] = useState('');
+   460→  const [editLoading, setEditLoading] = useState(false);
+   461→
+   462→  const [deleteSiteTarget, setDeleteSiteTarget] = useState<Site | null>(null);
+   463→  const [deleteLoading, setDeleteLoading] = useState(false);
+   464→
+   465→  // Deactivate confirmation dialog
+   466→  const [deactivateSiteTarget, setDeactivateSiteTarget] = useState<Site | null>(null);
+   467→  const [deactivateLoading, setDeactivateLoading] = useState(false);
+   468→
+   469→  // Employee list state
+   470→  const [siteEmployees, setSiteEmployees] = useState<SiteEmployee[]>([]);
+   471→  const [loadingEmployees, setLoadingEmployees] = useState(false);
+   472→  const [empSearch, setEmpSearch] = useState('');
+   473→  const [selectedEmps, setSelectedEmps] = useState<Set<string>>(new Set());
+   474→
+   475→  // Remove employees state
+   476→  const [showRemoveEmpDialog, setShowRemoveEmpDialog] = useState(false);
+   477→  const [removeEmpLoading, setRemoveEmpLoading] = useState(false);
+   478→
+   479→  // Add employee state
+   480→  const [allEmployees, setAllEmployees] = useState<AllEmployee[]>([]);
+   481→  const [loadingAllEmployees, setLoadingAllEmployees] = useState(false);
+   482→  const [addingEmployee, setAddingEmployee] = useState(false);
+   483→
+   484→  // Attendance sheet state
+   485→  const [attendanceSite, setAttendanceSite] = useState<Site | null>(null);
+   486→
+   487→  /* ── Fetch sites ── */
+   488→  const fetchSites = useCallback(async () => {
+   489→    try {
+   490→      setLoading(true);
+   491→      const res = await fetch('/api/sites');
+   492→      const json = await res.json();
+   493→      if (json.success) {
+   494→        setSites(json.data.sites || []);
+   495→      }
+   496→    } catch {
+   497→      setSites([]);
+   498→    } finally {
+   499→      setLoading(false);
+   500→    }
+   501→  }, []);
+   502→
+   503→  useEffect(() => {
+   504→    fetchSites();
+   505→  }, [fetchSites]);
+   506→
+   507→  /* ── Split sites by active status ── */
+   508→  const activeSites = useMemo(() => sites.filter((s) => s.isActive), [sites]);
+   509→  const inactiveSites = useMemo(() => sites.filter((s) => !s.isActive), [sites]);
+   510→
+   511→  /* ── Fetch site employees ── */
+   512→  const fetchSiteEmployees = useCallback(async (siteName: string) => {
+   513→    try {
+   514→      setLoadingEmployees(true);
+   515→      const res = await fetch('/api/employees?limit=1000&status=all');
+   516→      const json = await res.json();
+   517→      if (json.success) {
+   518→        const emps = (json.data.employees || []).filter(
+   519→          (e: SiteEmployee) => e.currentSite === siteName && e.status !== 'deleted'
+   520→        );
+   521→        setSiteEmployees(emps);
+   522→      }
+   523→    } catch {
+   524→      setSiteEmployees([]);
+   525→    } finally {
+   526→      setLoadingEmployees(false);
+   527→    }
+   528→  }, []);
+   529→
+   530→  /* ── Fetch all employees (for add dropdown) ── */
+   531→  const fetchAllEmployees = useCallback(async () => {
+   532→    try {
+   533→      setLoadingAllEmployees(true);
+   534→      const res = await fetch('/api/employees?limit=1000&status=active');
+   535→      const json = await res.json();
+   536→      if (json.success) {
+   537→        setAllEmployees(
+   538→          (json.data.employees || []).map((e: AllEmployee) => ({
+   539→            id: e.id,
+   540→            fullName: e.fullName,
+   541→            employeeId: e.employeeId,
+   542→            position: e.position,
+   543→            nationality: e.nationality,
+   544→            currentSite: e.currentSite,
+   545→            status: e.status,
+   546→          }))
+   547→        );
+   548→      }
+   549→    } catch {
+   550→      setAllEmployees([]);
+   551→    } finally {
+   552→      setLoadingAllEmployees(false);
+   553→    }
+   554→  }, []);
+   555→
+   556→  /* ── View employees (switch to sub-view) ── */
+   557→  const handleViewEmployees = useCallback((site: Site) => {
+   558→    setViewSite(site);
+   559→    setSelectedEmps(new Set());
+   560→    setEmpSearch('');
+   561→    setSubView('employees');
+   562→    fetchSiteEmployees(site.name);
+   563→    fetchAllEmployees();
+   564→  }, [fetchSiteEmployees, fetchAllEmployees]);
+   565→
+   566→  /* ── Back to sites list ── */
+   567→  const handleBackToList = useCallback(() => {
+   568→    setSubView('list');
+   569→    setViewSite(null);
+   570→    setSiteEmployees([]);
+   571→    setSelectedEmps(new Set());
+   572→    setEmpSearch('');
+   573→    fetchSites();
+   574→  }, [fetchSites]);
+   575→
+   576→  /* ── Toggle site active status ── */
+   577→  const handleToggleActive = useCallback(async (site: Site) => {
+   578→    // If deactivating, show confirmation dialog
+   579→    if (site.isActive) {
+   580→      setDeactivateSiteTarget(site);
+   581→      return;
+   582→    }
+   583→    // If activating, just do it directly
+   584→    try {
+   585→      const res = await fetch('/api/sites', {
+   586→        method: 'PUT',
+   587→        headers: { 'Content-Type': 'application/json' },
+   588→        body: JSON.stringify({
+   589→          id: site.id,
+   590→          name: site.name,
+   591→          clientName: site.clientName,
+   592→          projectName: site.projectName,
+   593→          isActive: true,
+   594→        }),
+   595→      });
+   596→      const json = await res.json();
+   597→      if (json.success) {
+   598→        fetchSites();
+   599→        toast({
+   600→          title: 'Site Activated',
+   601→          description: `"${site.name}" has been activated.`,
+   602→        });
+   603→      } else {
+   604→        toast({ title: 'Error', description: json.error || 'Failed to update site', variant: 'destructive' });
+   605→      }
+   606→    } catch {
+   607→      toast({ title: 'Error', description: 'Failed to update site', variant: 'destructive' });
+   608→    }
+   609→  }, [fetchSites]);
+   610→
+   611→  /* ── Confirm Deactivate site ── */
+   612→  const handleConfirmDeactivate = useCallback(async () => {
+   613→    if (!deactivateSiteTarget) return;
+   614→    setDeactivateLoading(true);
+   615→    try {
+   616→      const res = await fetch('/api/sites', {
+   617→        method: 'PUT',
+   618→        headers: { 'Content-Type': 'application/json' },
+   619→        body: JSON.stringify({
+   620→          id: deactivateSiteTarget.id,
+   621→          name: deactivateSiteTarget.name,
+   622→          clientName: deactivateSiteTarget.clientName,
+   623→          projectName: deactivateSiteTarget.projectName,
+   624→          isActive: false,
+   625→        }),
+   626→      });
+   627→      const json = await res.json();
+   628→      if (json.success) {
+   629→        const unassignedCount = json.data?.unassignedCount || 0;
+   630→        fetchSites();
+   631→        toast({
+   632→          title: 'Site Deactivated',
+   633→          description: `"${deactivateSiteTarget.name}" has been deactivated.${unassignedCount > 0 ? ` ${unassignedCount} employee(s) have been set to idle/unassigned.` : ''}`,
+   634→        });
+   635→      } else {
+   636→        toast({ title: 'Error', description: json.error || 'Failed to update site', variant: 'destructive' });
+   637→      }
+   638→    } catch {
+   639→      toast({ title: 'Error', description: 'Failed to update site', variant: 'destructive' });
+   640→    } finally {
+   641→      setDeactivateLoading(false);
+   642→      setDeactivateSiteTarget(null);
+   643→    }
+   644→  }, [deactivateSiteTarget, fetchSites]);
+   645→
+   646→  /* ── Add site ── */
+   647→  const handleAddSite = useCallback(async () => {
+   648→    if (!addSiteName.trim()) return;
+   649→    try {
+   650→      setAddLoading(true);
+   651→      const res = await fetch('/api/sites', {
+   652→        method: 'POST',
+   653→        headers: { 'Content-Type': 'application/json' },
+   654→        body: JSON.stringify({
+   655→          name: addSiteName.trim(),
+   656→          clientName: addSiteClientName.trim() || undefined,
+   657→          projectName: addSiteProjectName.trim() || undefined,
+   658→        }),
+   659→      });
+   660→      const json = await res.json();
+   661→      if (json.success) {
+   662→        setAddSiteName('');
+   663→        setAddSiteClientName('');
+   664→        setAddSiteProjectName('');
+   665→        setShowAddDialog(false);
+   666→        fetchSites();
+   667→        toast({ title: 'Site Created', description: `"${addSiteName.trim()}" has been added.` });
+   668→      } else {
+   669→        toast({ title: 'Error', description: json.error || 'Failed to create site', variant: 'destructive' });
+   670→      }
+   671→    } catch {
+   672→      toast({ title: 'Error', description: 'Failed to create site', variant: 'destructive' });
+   673→    } finally {
+   674→      setAddLoading(false);
+   675→    }
+   676→  }, [addSiteName, addSiteClientName, addSiteProjectName, fetchSites]);
+   677→
+   678→  /* ── Edit site ── */
+   679→  const handleEditSite = useCallback(async () => {
+   680→    if (!editSiteTarget || !editSiteName.trim()) return;
+   681→    try {
+   682→      setEditLoading(true);
+   683→      const res = await fetch('/api/sites', {
+   684→        method: 'PUT',
+   685→        headers: { 'Content-Type': 'application/json' },
+   686→        body: JSON.stringify({
+   687→          id: editSiteTarget.id,
+   688→          name: editSiteName.trim(),
+   689→          clientName: editSiteClientName.trim(),
+   690→          projectName: editSiteProjectName.trim(),
+   691→        }),
+   692→      });
+   693→      const json = await res.json();
+   694→      if (json.success) {
+   695→        setEditSiteTarget(null);
+   696→        setEditSiteName('');
+   697→        setEditSiteClientName('');
+   698→        setEditSiteProjectName('');
+   699→        fetchSites();
+   700→        // Update viewSite name if we're viewing this site's employees
+   701→        if (viewSite && viewSite.id === editSiteTarget.id) {
+   702→          setViewSite((prev) => prev ? { ...prev, name: editSiteName.trim(), clientName: editSiteClientName.trim(), projectName: editSiteProjectName.trim() } : null);
+   703→        }
+   704→        toast({ title: 'Site Updated', description: `Site details updated successfully.` });
+   705→      } else {
+   706→        toast({ title: 'Error', description: json.error || 'Failed to update site', variant: 'destructive' });
+   707→      }
+   708→    } catch {
+   709→      toast({ title: 'Error', description: 'Failed to update site', variant: 'destructive' });
+   710→    } finally {
+   711→      setEditLoading(false);
+   712→    }
+   713→  }, [editSiteTarget, editSiteName, editSiteClientName, editSiteProjectName, fetchSites, viewSite]);
+   714→
+   715→  /* ── Delete site ── */
+   716→  const handleDeleteSite = useCallback(async () => {
+   717→    if (!deleteSiteTarget) return;
+   718→    try {
+   719→      setDeleteLoading(true);
+   720→      const res = await fetch('/api/sites', {
+   721→        method: 'DELETE',
+   722→        headers: { 'Content-Type': 'application/json' },
+   723→        body: JSON.stringify({ id: deleteSiteTarget.id }),
+   724→      });
+   725→      const json = await res.json();
+   726→      if (json.success) {
+   727→        setDeleteSiteTarget(null);
+   728→        fetchSites();
+   729→        toast({ title: 'Site Deleted', description: `"${deleteSiteTarget.name}" has been removed.` });
+   730→      } else {
+   731→        toast({ title: 'Error', description: json.error || 'Failed to delete site', variant: 'destructive' });
+   732→      }
+   733→    } catch {
+   734→      toast({ title: 'Error', description: 'Failed to delete site', variant: 'destructive' });
+   735→    } finally {
+   736→      setDeleteLoading(false);
+   737→    }
+   738→  }, [deleteSiteTarget, fetchSites]);
+   739→
+   740→  /* ── Remove selected employees from site ── */
+   741→  const handleRemoveEmployees = useCallback(async () => {
+   742→    if (selectedEmps.size === 0) return;
+   743→    try {
+   744→      setRemoveEmpLoading(true);
+   745→      // Remove from site by setting currentSite to null (not deleting from database)
+   746→      await Promise.all(
+   747→        Array.from(selectedEmps).map(async (id) => {
+   748→          const emp = siteEmployees.find(e => e.id === id);
+   749→          const isTeamLeaderOfSite = emp?.isTeamLeader && emp?.currentSite === viewSite?.name;
+   750→          await fetch(`/api/employees/${id}`, {
+   751→            method: 'PUT',
+   752→            headers: { 'Content-Type': 'application/json' },
+   753→            body: JSON.stringify({
+   754→              currentSite: null,
+   755→              ...(isTeamLeaderOfSite ? { isTeamLeader: false, teamLeaderSiteId: null } : {}),
+   756→            }),
+   757→          });
+   758→        })
+   759→      );
+   760→      setShowRemoveEmpDialog(false);
+   761→      setSelectedEmps(new Set());
+   762→      if (viewSite) {
+   763→        fetchSiteEmployees(viewSite.name);
+   764→        fetchAllEmployees();
+   765→      }
+   766→      fetchSites();
+   767→      toast({ title: 'Removed', description: `${selectedEmps.size} employee(s) removed from site and set to idle.` });
+   768→    } catch {
+   769→      toast({ title: 'Error', description: 'Failed to remove employees', variant: 'destructive' });
+   770→    } finally {
+   771→      setRemoveEmpLoading(false);
+   772→    }
+   773→  }, [selectedEmps, viewSite, siteEmployees, fetchSiteEmployees, fetchAllEmployees, fetchSites]);
+   774→
+   775→  /* ── Add employee to site ── */
+   776→  const handleAddEmployee = useCallback(async (employee: AllEmployee) => {
+   777→    if (!viewSite) return;
+   778→    try {
+   779→      setAddingEmployee(true);
+   780→      const res = await fetch(`/api/employees/${employee.id}`, {
+   781→        method: 'PUT',
+   782→        headers: { 'Content-Type': 'application/json' },
+   783→        body: JSON.stringify({ currentSite: viewSite.name }),
+   784→      });
+   785→      const json = await res.json();
+   786→      if (json.success) {
+   787→        const transferred = employee.currentSite && employee.currentSite !== viewSite.name;
+   788→        toast({
+   789→          title: 'Employee Added',
+   790→          description: transferred
+   791→            ? `${employee.fullName} has been transferred from "${employee.currentSite}" to "${viewSite.name}"`
+   792→            : `${employee.fullName} has been added to "${viewSite.name}"`,
+   793→        });
+   794→        fetchSiteEmployees(viewSite.name);
+   795→        fetchAllEmployees();
+   796→        fetchSites();
+   797→      } else {
+   798→        toast({ title: 'Error', description: json.error || 'Failed to add employee', variant: 'destructive' });
+   799→      }
+   800→    } catch {
+   801→      toast({ title: 'Error', description: 'Failed to add employee', variant: 'destructive' });
+   802→    } finally {
+   803→      setAddingEmployee(false);
+   804→    }
+   805→  }, [viewSite, fetchSiteEmployees, fetchAllEmployees, fetchSites]);
+   806→
+   807→  /* ── Toggle select ── */
+   808→  const toggleSelectEmp = useCallback((id: string) => {
+   809→    setSelectedEmps((prev) => {
+   810→      const next = new Set(prev);
+   811→      if (next.has(id)) next.delete(id);
+   812→      else next.add(id);
+   813→      return next;
+   814→    });
+   815→  }, []);
+   816→
+   817→  /* ── Filter employees ── */
+   818→  const filteredEmployees = useMemo(() => {
+   819→    const filtered = siteEmployees.filter((e) => {
+   820→      if (!empSearch) return true;
+   821→      const q = empSearch.toLowerCase();
+   822→      return (
+   823→        e.fullName.toLowerCase().includes(q) ||
+   824→        e.employeeId.toLowerCase().includes(q) ||
+   825→        (e.position && e.position.toLowerCase().includes(q)) ||
+   826→        (e.nationality && e.nationality.toLowerCase().includes(q))
+   827→      );
+   828→    });
+   829→    // Sort: team leaders of the current site first
+   830→    const siteName = viewSite?.name;
+   831→    return filtered.sort((a, b) => {
+   832→      const aIsLeader = a.isTeamLeader && a.currentSite === siteName;
+   833→      const bIsLeader = b.isTeamLeader && b.currentSite === siteName;
+   834→      if (aIsLeader && !bIsLeader) return -1;
+   835→      if (!aIsLeader && bIsLeader) return 1;
+   836→      return 0;
+   837→    });
+   838→  }, [siteEmployees, empSearch, viewSite]);
+   839→
+   840→  const toggleSelectAll = useCallback(() => {
+   841→    if (selectedEmps.size === filteredEmployees.length) {
+   842→      setSelectedEmps(new Set());
+   843→    } else {
+   844→      setSelectedEmps(new Set(filteredEmployees.map((e) => e.id)));
+   845→    }
+   846→  }, [selectedEmps, filteredEmployees]);
+   847→
+   848→  const currentSiteEmployeeIds = useMemo(() => {
+   849→    return new Set(siteEmployees.map((e) => e.id));
+   850→  }, [siteEmployees]);
+   851→
+   852→  // Attendance sheet employees (fetched separately for direct attendance access)
+   853→  const [attendanceEmployees, setAttendanceEmployees] = useState<SiteEmployee[]>([]);
+   854→  const [loadingAttendanceEmps, setLoadingAttendanceEmps] = useState(false);
+   855→
+   856→  /* ── Attendance sheet handler ── */
+   857→  const handleAttendanceSheet = useCallback(async (site: Site) => {
+   858→    setAttendanceSite(site);
+   859→    // Fetch employees for this site
+   860→    setLoadingAttendanceEmps(true);
+   861→    try {
+   862→      const res = await fetch('/api/employees?limit=1000&status=all');
+   863→      const json = await res.json();
+   864→      if (json.success) {
+   865→        const emps = (json.data.employees || []).filter(
+   866→          (e: SiteEmployee) => e.currentSite === site.name && e.status !== 'deleted'
+   867→        );
+   868→        setAttendanceEmployees(emps);
+   869→      }
+   870→    } catch {
+   871→      setAttendanceEmployees([]);
+   872→    } finally {
+   873→      setLoadingAttendanceEmps(false);
+   874→    }
+   875→  }, []);
+   876→
+   877→  // If attendance sheet is open, render it
+   878→  if (attendanceSite) {
+   879→    if (loadingAttendanceEmps) {
+   880→      return (
+   881→        <div className="flex items-center justify-center min-h-[400px]">
+   882→          <Loader2 className="h-8 w-8 animate-spin text-emerald-400" />
+   883→          <span className="ml-3 text-slate-400">Loading attendance data...</span>
+   884→        </div>
+   885→      );
+   886→    }
+   887→    return (
+   888→      <AttendanceSheet
+   889→        site={attendanceSite}
+   890→        employees={attendanceEmployees}
+   891→        onClose={() => {
+   892→          setAttendanceSite(null);
+   893→          setAttendanceEmployees([]);
+   894→        }}
+   895→      />
+   896→    );
+   897→  }
+   898→
+   899→  /* ───────── RENDER ───────── */
+   900→  return (
+   901→    <div className="flex flex-col gap-6">
+   902→      {/* Sites List View */}
+   903→      {subView === 'list' && (
+   904→        <div className="flex flex-col gap-6">
+   905→          {/* Page Header */}
+   906→          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+   907→            <div>
+   908→              <h2 className="text-2xl font-bold text-white">Sites</h2>
+   909→              <p className="text-slate-400 mt-1">
+   910→                Manage work sites and view employees assigned to each site.
+   911→              </p>
+   912→            </div>
+   913→            <Button onClick={() => setShowAddDialog(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2">
+   914→              <Plus className="h-4 w-4" />
+   915→              Add Site
+   916→            </Button>
+   917→          </div>
+   918→
+   919→          {/* Tabs: Active / Inactive */}
+   920→          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+   921→            <TabsList className="bg-slate-800 border border-slate-700">
+   922→              <TabsTrigger value="active" className="data-[state=active]:bg-emerald-600 data-[state=active]:text-white gap-1.5">
+   923→                <Power className="h-3.5 w-3.5" />
+   924→                Active
+   925→                <Badge variant="secondary" className="ml-1 bg-slate-700 text-slate-300 text-[10px] px-1.5 py-0 h-4 min-w-[20px] flex items-center justify-center">
+   926→                  {activeSites.length}
+   927→                </Badge>
+   928→              </TabsTrigger>
+   929→              <TabsTrigger value="inactive" className="data-[state=active]:bg-slate-600 data-[state=active]:text-white gap-1.5">
+   930→                <PowerOff className="h-3.5 w-3.5" />
+   931→                Inactive
+   932→                <Badge variant="secondary" className="ml-1 bg-slate-700 text-slate-300 text-[10px] px-1.5 py-0 h-4 min-w-[20px] flex items-center justify-center">
+   933→                  {inactiveSites.length}
+   934→                </Badge>
+   935→              </TabsTrigger>
+   936→            </TabsList>
+   937→
+   938→            {/* Search - shared between tabs */}
+   939→            <div className="relative max-w-sm mt-4">
+   940→              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+   941→              <Input
+   942→                placeholder="Search sites..."
+   943→                value={search}
+   944→                onChange={(e) => setSearch(e.target.value)}
+   945→                className="pl-10 bg-slate-800 border-slate-700 text-slate-200 placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+   946→              />
+   947→            </div>
+   948→
+   949→            <TabsContent value="active" className="mt-4">
+   950→              <SiteCardsGrid
+   951→                sites={activeSites}
+   952→                search={search}
+   953→                loading={loading}
+   954→                onSearchChange={setSearch}
+   955→                onViewEmployees={handleViewEmployees}
+   956→                onDeleteSite={setDeleteSiteTarget}
+   957→                onEditSite={(site) => {
+   958→                  setEditSiteTarget(site);
+   959→                  setEditSiteName(site.name);
+   960→                  setEditSiteClientName(site.clientName || '');
+   961→                  setEditSiteProjectName(site.projectName || '');
+   962→                }}
+   963→                onToggleActive={handleToggleActive}
+   964→                onAttendanceSheet={handleAttendanceSheet}
+   965→              />
+   966→            </TabsContent>
+   967→
+   968→            <TabsContent value="inactive" className="mt-4">
+   969→              <SiteCardsGrid
+   970→                sites={inactiveSites}
+   971→                search={search}
+   972→                loading={loading}
+   973→                onSearchChange={setSearch}
+   974→                onViewEmployees={handleViewEmployees}
+   975→                onDeleteSite={setDeleteSiteTarget}
+   976→                onEditSite={(site) => {
+   977→                  setEditSiteTarget(site);
+   978→                  setEditSiteName(site.name);
+   979→                  setEditSiteClientName(site.clientName || '');
+   980→                  setEditSiteProjectName(site.projectName || '');
+   981→                }}
+   982→                onToggleActive={handleToggleActive}
+   983→                onAttendanceSheet={handleAttendanceSheet}
+   984→              />
+   985→            </TabsContent>
+   986→          </Tabs>
+   987→        </div>
+   988→      )}
+   989→
+   990→      {/* Employee Full Page View */}
+   991→      {subView === 'employees' && viewSite && (
+   992→        <div className="flex flex-col gap-6">
+   993→          {/* Header */}
+   994→          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+   995→            <div className="flex items-center gap-3">
+   996→              <Button
+   997→                variant="ghost"
+   998→                size="icon"
+   999→                onClick={handleBackToList}
+  1000→                className="h-9 w-9 text-slate-400 hover:text-white hover:bg-slate-700"
+  1001→              >
+  1002→                <ChevronLeft className="h-5 w-5" />
+  1003→              </Button>
+  1004→              <div>
+  1005→                <div className="flex items-center gap-2">
+  1006→                  <Building2 className="h-5 w-5 text-emerald-400" />
+  1007→                  <h2 className="text-xl font-bold text-white">{viewSite.name}</h2>
+  1008→                  <Badge variant="outline" className="text-xs border-slate-600 text-slate-400">
+  1009→                    {siteEmployees.length} {siteEmployees.length === 1 ? 'employee' : 'employees'}
+  1010→                  </Badge>
+  1011→                </div>
+  1012→                {(() => {
+  1013→                  const leader = siteEmployees.find(
+  1014→                    (e) => e.isTeamLeader && e.currentSite === viewSite.name
+  1015→                  );
+  1016→                  return leader ? (
+  1017→                    <div className="flex items-center gap-1.5 mt-1">
+  1018→                      <Crown className="h-3.5 w-3.5 text-amber-400" />
+  1019→                      <span className="text-sm text-amber-400 font-medium">Team Leader: {leader.fullName}</span>
+  1020→                    </div>
+  1021→                  ) : (
+  1022→                    <p className="text-sm text-slate-500 mt-0.5">
+  1023→                      Created {new Date(viewSite.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+  1024→                    </p>
+  1025→                  );
+  1026→                })()}
+  1027→              </div>
+  1028→            </div>
+  1029→            <div className="flex items-center gap-2">
+  1030→              <AddEmployeeCombobox
+  1031→                allEmployees={allEmployees}
+  1032→                currentSiteName={viewSite.name}
+  1033→                currentSiteEmployeeIds={currentSiteEmployeeIds}
+  1034→                onAdd={handleAddEmployee}
+  1035→                loading={addingEmployee || loadingAllEmployees}
+  1036→              />
+  1037→              {selectedEmps.size > 0 && (
+  1038→                <Button
+  1039→                  variant="destructive"
+  1040→                  className="gap-2"
+  1041→                  onClick={() => setShowRemoveEmpDialog(true)}
+  1042→                >
+  1043→                  <UserMinus className="h-4 w-4" />
+  1044→                  Remove ({selectedEmps.size})
+  1045→                </Button>
+  1046→              )}
+  1047→            </div>
+  1048→          </div>
+  1049→
+  1050→          {/* Search */}
+  1051→          <div className="relative max-w-sm">
+  1052→            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+  1053→            <Input
+  1054→              placeholder="Search employees..."
+  1055→              value={empSearch}
+  1056→              onChange={(e) => setEmpSearch(e.target.value)}
+  1057→              className="pl-10 bg-slate-800 border-slate-700 text-slate-200 placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1058→            />
+  1059→          </div>
+  1060→
+  1061→          <Separator className="bg-slate-700/50" />
+  1062→
+  1063→          {/* Employee Table */}
+  1064→          <Card className="bg-slate-800/50 border-slate-700/50">
+  1065→            <CardContent className="p-0">
+  1066→              {loadingEmployees ? (
+  1067→                <div className="space-y-3 p-6">
+  1068→                  {[1, 2, 3, 4].map((i) => (
+  1069→                    <Skeleton key={i} className="h-14 w-full bg-slate-700/50" />
+  1070→                  ))}
+  1071→                </div>
+  1072→              ) : filteredEmployees.length === 0 ? (
+  1073→                <div className="flex flex-col items-center justify-center py-16 text-center">
+  1074→                  <Users className="h-10 w-10 text-slate-600 mb-3" />
+  1075→                  <p className="text-sm text-slate-400">
+  1076→                    {empSearch ? 'No employees match your search.' : 'No employees assigned to this site yet.'}
+  1077→                  </p>
+  1078→                  {!empSearch && (
+  1079→                    <p className="text-xs text-slate-500 mt-1">
+  1080→                      Click &quot;Add Employee&quot; to assign employees.
+  1081→                    </p>
+  1082→                  )}
+  1083→                </div>
+  1084→              ) : (
+  1085→                <div className="overflow-x-auto">
+  1086→                  <Table>
+  1087→                    <TableHeader>
+  1088→                      <TableRow className="border-slate-700 hover:bg-transparent">
+  1089→                        <TableHead className="w-10">
+  1090→                          <Checkbox
+  1091→                            checked={selectedEmps.size === filteredEmployees.length && filteredEmployees.length > 0}
+  1092→                            onCheckedChange={toggleSelectAll}
+  1093→                            className="border-slate-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+  1094→                          />
+  1095→                        </TableHead>
+  1096→                        <TableHead className="text-slate-400 font-semibold">Employee</TableHead>
+  1097→                        <TableHead className="text-slate-400 font-semibold">ID</TableHead>
+  1098→                        <TableHead className="text-slate-400 font-semibold">Position</TableHead>
+  1099→                        <TableHead className="text-slate-400 font-semibold">Rating</TableHead>
+  1100→                        <TableHead className="text-slate-400 font-semibold text-center">Status</TableHead>
+  1101→                      </TableRow>
+  1102→                    </TableHeader>
+  1103→                    <TableBody>
+  1104→                      {filteredEmployees.map((emp) => (
+  1105→                        <TableRow
+  1106→                          key={emp.id}
+  1107→                          className="border-slate-700/50 hover:bg-slate-700/30"
+  1108→                        >
+  1109→                          <TableCell>
+  1110→                            <Checkbox
+  1111→                              checked={selectedEmps.has(emp.id)}
+  1112→                              onCheckedChange={() => toggleSelectEmp(emp.id)}
+  1113→                              className="border-slate-600 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+  1114→                            />
+  1115→                          </TableCell>
+  1116→                          <TableCell>
+  1117→                            <div className="flex items-center gap-3">
+  1118→                              {emp.photo ? (
+  1119→                                <img
+  1120→                                  src={emp.photo}
+  1121→                                  alt={emp.fullName}
+  1122→                                  className="h-8 w-8 rounded-full object-cover border border-slate-600"
+  1123→                                />
+  1124→                              ) : (
+  1125→                                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-700 text-xs font-medium text-slate-300 border border-slate-600">
+  1126→                                  {emp.fullName.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2)}
+  1127→                                </div>
+  1128→                              )}
+  1129→                              <div className="min-w-0">
+  1130→                                <div className="flex items-center gap-1.5">
+  1131→                                  <p className="text-sm font-medium text-white truncate">{emp.fullName}</p>
+  1132→                                  {emp.isTeamLeader && emp.currentSite === viewSite.name && (
+  1133→                                    <Badge className="bg-amber-500/15 text-amber-400 border-amber-500/25 text-[10px] px-1.5 py-0 shrink-0 gap-0.5"><Crown className="h-2.5 w-2.5" /> Team Leader</Badge>
+  1134→                                  )}
+  1135→                                </div>
+  1136→                                {emp.nationality && (
+  1137→                                  <p className="text-xs text-slate-500">{emp.nationality}</p>
+  1138→                                )}
+  1139→                              </div>
+  1140→                            </div>
+  1141→                          </TableCell>
+  1142→                          <TableCell className="text-slate-300 text-sm font-mono">{emp.employeeId}</TableCell>
+  1143→                          <TableCell className="text-slate-300 text-sm">
+  1144→                            {emp.position || <span className="text-slate-600">—</span>}
+  1145→                          </TableCell>
+  1146→                          <TableCell>
+  1147→                            <StarRating rating={emp.rating} />
+  1148→                          </TableCell>
+  1149→                          <TableCell className="text-center">
+  1150→                            <Badge
+  1151→                              className={`text-xs ${
+  1152→                                emp.status === 'active'
+  1153→                                  ? 'bg-green-500/10 text-green-400 border-green-500/20'
+  1154→                                  : emp.status === 'pending_deletion'
+  1155→                                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+  1156→                                  : 'bg-slate-500/10 text-slate-400 border-slate-500/20'
+  1157→                              }`}
+  1158→                            >
+  1159→                              {emp.status === 'pending_deletion' ? 'Pending' : emp.status}
+  1160→                            </Badge>
+  1161→                          </TableCell>
+  1162→                        </TableRow>
+  1163→                      ))}
+  1164→                    </TableBody>
+  1165→                  </Table>
+  1166→                </div>
+  1167→              )}
+  1168→            </CardContent>
+  1169→          </Card>
+  1170→        </div>
+  1171→      )}
+  1172→
+  1173→      {/* Add Site Dialog */}
+  1174→      <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+  1175→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200">
+  1176→          <DialogHeader>
+  1177→            <DialogTitle>Add New Site</DialogTitle>
+  1178→            <DialogDescription className="text-slate-400">
+  1179→              Enter details for the new work site.
+  1180→            </DialogDescription>
+  1181→          </DialogHeader>
+  1182→          <div className="space-y-4">
+  1183→            <div className="space-y-2">
+  1184→              <Label className="text-slate-300">Site Name *</Label>
+  1185→              <Input
+  1186→                placeholder="e.g. NPC-Umm Al Quwain"
+  1187→                value={addSiteName}
+  1188→                onChange={(e) => setAddSiteName(e.target.value)}
+  1189→                className="bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1190→                onKeyDown={(e) => e.key === 'Enter' && handleAddSite()}
+  1191→              />
+  1192→            </div>
+  1193→            <div className="space-y-2">
+  1194→              <Label className="text-slate-300">Client Name</Label>
+  1195→              <Input
+  1196→                placeholder="e.g. NPC"
+  1197→                value={addSiteClientName}
+  1198→                onChange={(e) => setAddSiteClientName(e.target.value)}
+  1199→                className="bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1200→              />
+  1201→            </div>
+  1202→            <div className="space-y-2">
+  1203→              <Label className="text-slate-300">Project Name</Label>
+  1204→              <Input
+  1205→                placeholder="e.g. NPC-Umm Al Quwain"
+  1206→                value={addSiteProjectName}
+  1207→                onChange={(e) => setAddSiteProjectName(e.target.value)}
+  1208→                className="bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1209→                onKeyDown={(e) => e.key === 'Enter' && handleAddSite()}
+  1210→              />
+  1211→            </div>
+  1212→          </div>
+  1213→          <DialogFooter>
+  1214→            <Button variant="ghost" onClick={() => { setShowAddDialog(false); setAddSiteName(''); setAddSiteClientName(''); setAddSiteProjectName(''); }} className="text-slate-400 hover:text-white">
+  1215→              Cancel
+  1216→            </Button>
+  1217→            <Button
+  1218→              onClick={handleAddSite}
+  1219→              disabled={!addSiteName.trim() || addLoading}
+  1220→              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+  1221→            >
+  1222→              {addLoading ? 'Adding...' : 'Add Site'}
+  1223→            </Button>
+  1224→          </DialogFooter>
+  1225→        </DialogContent>
+  1226→      </Dialog>
+  1227→
+  1228→      {/* Edit Site Dialog */}
+  1229→      <Dialog
+  1230→        open={!!editSiteTarget}
+  1231→        onOpenChange={(open) => {
+  1232→          if (!open) {
+  1233→            setEditSiteTarget(null);
+  1234→            setEditSiteName('');
+  1235→            setEditSiteClientName('');
+  1236→            setEditSiteProjectName('');
+  1237→          }
+  1238→        }}
+  1239→      >
+  1240→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200">
+  1241→          <DialogHeader>
+  1242→            <DialogTitle>Edit Site</DialogTitle>
+  1243→            <DialogDescription className="text-slate-400">
+  1244→              Update details for &ldquo;{editSiteTarget?.name}&rdquo;. All employees assigned to this site will be updated if the name changes.
+  1245→            </DialogDescription>
+  1246→          </DialogHeader>
+  1247→          <div className="space-y-4">
+  1248→            <div className="space-y-2">
+  1249→              <Label className="text-slate-300">Site Name *</Label>
+  1250→              <Input
+  1251→                placeholder="Site name"
+  1252→                value={editSiteName}
+  1253→                onChange={(e) => setEditSiteName(e.target.value)}
+  1254→                className="bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1255→                onKeyDown={(e) => e.key === 'Enter' && handleEditSite()}
+  1256→              />
+  1257→            </div>
+  1258→            <div className="space-y-2">
+  1259→              <Label className="text-slate-300">Client Name</Label>
+  1260→              <Input
+  1261→                placeholder="Client name"
+  1262→                value={editSiteClientName}
+  1263→                onChange={(e) => setEditSiteClientName(e.target.value)}
+  1264→                className="bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1265→              />
+  1266→            </div>
+  1267→            <div className="space-y-2">
+  1268→              <Label className="text-slate-300">Project Name</Label>
+  1269→              <Input
+  1270→                placeholder="Project name"
+  1271→                value={editSiteProjectName}
+  1272→                onChange={(e) => setEditSiteProjectName(e.target.value)}
+  1273→                className="bg-slate-900 border-slate-600 text-white placeholder:text-slate-500 focus:ring-emerald-500/20 focus:border-emerald-500/50"
+  1274→                onKeyDown={(e) => e.key === 'Enter' && handleEditSite()}
+  1275→              />
+  1276→            </div>
+  1277→          </div>
+  1278→          <DialogFooter>
+  1279→            <Button
+  1280→              variant="ghost"
+  1281→              onClick={() => {
+  1282→                setEditSiteTarget(null);
+  1283→                setEditSiteName('');
+  1284→                setEditSiteClientName('');
+  1285→                setEditSiteProjectName('');
+  1286→              }}
+  1287→              className="text-slate-400 hover:text-white"
+  1288→            >
+  1289→              Cancel
+  1290→            </Button>
+  1291→            <Button
+  1292→              onClick={handleEditSite}
+  1293→              disabled={!editSiteName.trim() || (editSiteName === editSiteTarget?.name && editSiteClientName === (editSiteTarget?.clientName || '') && editSiteProjectName === (editSiteTarget?.projectName || '')) || editLoading}
+  1294→              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+  1295→            >
+  1296→              {editLoading ? 'Saving...' : 'Save Changes'}
+  1297→            </Button>
+  1298→          </DialogFooter>
+  1299→        </DialogContent>
+  1300→      </Dialog>
+  1301→
+  1302→      {/* Delete Site Confirmation */}
+  1303→      <Dialog open={!!deleteSiteTarget} onOpenChange={(open) => !open && setDeleteSiteTarget(null)}>
+  1304→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200">
+  1305→          <DialogHeader>
+  1306→            <DialogTitle className="text-white">Delete Site</DialogTitle>
+  1307→            <DialogDescription className="text-slate-400">
+  1308→              Are you sure you want to delete{' '}
+  1309→              <span className="text-white font-semibold">{deleteSiteTarget?.name}</span>?
+  1310→              All employees assigned to this site will be unassigned, but they won&apos;t be deleted.
+  1311→            </DialogDescription>
+  1312→          </DialogHeader>
+  1313→          <DialogFooter>
+  1314→            <Button
+  1315→              variant="outline"
+  1316→              onClick={() => setDeleteSiteTarget(null)}
+  1317→              className="bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600"
+  1318→            >
+  1319→              Cancel
+  1320→            </Button>
+  1321→            <Button variant="destructive" onClick={handleDeleteSite} disabled={deleteLoading}>
+  1322→              {deleteLoading ? 'Deleting...' : 'Delete Site'}
+  1323→            </Button>
+  1324→          </DialogFooter>
+  1325→        </DialogContent>
+  1326→      </Dialog>
+  1327→
+  1328→      {/* Remove Selected Employees Confirmation */}
+  1329→      <Dialog open={showRemoveEmpDialog} onOpenChange={setShowRemoveEmpDialog}>
+  1330→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200">
+  1331→          <DialogHeader>
+  1332→            <DialogTitle className="flex items-center gap-2 text-white">
+  1333→              <AlertTriangle className="h-5 w-5 text-amber-400" />
+  1334→              Remove {selectedEmps.size} {selectedEmps.size === 1 ? 'Employee' : 'Employees'}
+  1335→            </DialogTitle>
+  1336→            <DialogDescription className="text-slate-400">
+  1337→              Are you sure you want to remove {selectedEmps.size}{' '}
+  1338→              {selectedEmps.size === 1 ? 'employee' : 'employees'} from this site? They will be removed from the site and set to idle status. They will not be deleted from the database.
+  1339→            </DialogDescription>
+  1340→          </DialogHeader>
+  1341→          <DialogFooter>
+  1342→            <Button
+  1343→              variant="outline"
+  1344→              onClick={() => setShowRemoveEmpDialog(false)}
+  1345→              className="bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600"
+  1346→            >
+  1347→              Cancel
+  1348→            </Button>
+  1349→            <Button variant="destructive" onClick={handleRemoveEmployees} disabled={removeEmpLoading}>
+  1350→              {removeEmpLoading ? 'Removing...' : 'Remove'}
+  1351→            </Button>
+  1352→          </DialogFooter>
+  1353→        </DialogContent>
+  1354→      </Dialog>
+  1355→
+  1356→      {/* Deactivate Site Confirmation Dialog */}
+  1357→      <Dialog open={!!deactivateSiteTarget} onOpenChange={(open) => !open && setDeactivateSiteTarget(null)}>
+  1358→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200">
+  1359→          <DialogHeader>
+  1360→            <DialogTitle className="text-white flex items-center gap-2">
+  1361→              <AlertTriangle className="h-5 w-5 text-amber-400" />
+  1362→              Deactivate Site
+  1363→            </DialogTitle>
+  1364→            <DialogDescription className="text-slate-400">
+  1365→              Are you sure you want to deactivate <span className="text-white font-semibold">{deactivateSiteTarget?.name}</span>?
+  1366→            </DialogDescription>
+  1367→          </DialogHeader>
+  1368→          <div className="py-3 px-1">
+  1369→            <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 space-y-2">
+  1370→              <p className="text-amber-400 text-sm font-medium">This will affect employees:</p>
+  1371→              <ul className="text-xs text-slate-300 space-y-1 list-disc list-inside">
+  1372→                <li>All <span className="text-white font-medium">{deactivateSiteTarget?.employeeCount || 0}</span> employee(s) assigned to this site will be set to <span className="text-amber-400 font-medium">idle/unassigned</span></li>
+  1373→                <li>Team leaders of this site will lose their team leader status</li>
+  1374→                <li>The site will be moved to the Inactive tab</li>
+  1375→              </ul>
+  1376→            </div>
+  1377→          </div>
+  1378→          <DialogFooter>
+  1379→            <Button
+  1380→              variant="outline"
+  1381→              onClick={() => setDeactivateSiteTarget(null)}
+  1382→              className="bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600"
+  1383→              disabled={deactivateLoading}
+  1384→            >
+  1385→              Cancel
+  1386→            </Button>
+  1387→            <Button
+  1388→              variant="destructive"
+  1389→              onClick={handleConfirmDeactivate}
+  1390→              disabled={deactivateLoading}
+  1391→              className="gap-2"
+  1392→            >
+  1393→              {deactivateLoading ? (
+  1394→                <>
+  1395→                  <Loader2 className="h-4 w-4 animate-spin" />
+  1396→                  Deactivating...
+  1397→                </>
+  1398→              ) : (
+  1399→                <>
+  1400→                  <PowerOff className="h-4 w-4" />
+  1401→                  Deactivate Site
+  1402→                </>
+  1403→              )}
+  1404→            </Button>
+  1405→          </DialogFooter>
+  1406→        </DialogContent>
+  1407→      </Dialog>
+  1408→    </div>
+  1409→  );
+  1410→}
+  1411→

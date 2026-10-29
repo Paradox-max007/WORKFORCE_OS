@@ -1,0 +1,702 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→// ============================================================================
+     4→     4→// PULSE Workforce OS — Leave Requests module (list, create, review, documents)
+     5→     5→// ============================================================================
+     6→     6→
+     7→     7→import { motion } from 'framer-motion';
+     8→     8→import {
+     9→     9→  CalendarPlus, Check, CheckCircle2, Clock, Download, FileText, Loader2,
+    10→    10→  MessageCircle, Printer, Search, X, XCircle,
+    11→    11→} from 'lucide-react';
+    12→    12→import { useEffect, useMemo, useState } from 'react';
+    13→    13→import { toast } from 'sonner';
+    14→    14→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    15→    15→import {
+    16→    16→  EmptyState, PageHeader, RequestStatusBadge, SkeletonRows, StatCard,
+    17→    17→} from '@/components/shared/primitives';
+    18→    18→import {
+    19→    19→  AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+    20→    20→  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    21→    21→} from '@/components/ui/alert-dialog';
+    22→    22→import { Button } from '@/components/ui/button';
+    23→    23→import {
+    24→    24→  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+    25→    25→} from '@/components/ui/dialog';
+    26→    26→import { Input } from '@/components/ui/input';
+    27→    27→import { Label } from '@/components/ui/label';
+    28→    28→import {
+    29→    29→  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+    30→    30→} from '@/components/ui/select';
+    31→    31→import { Skeleton } from '@/components/ui/skeleton';
+    32→    32→import {
+    33→    33→  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+    34→    34→} from '@/components/ui/table';
+    35→    35→import { Textarea } from '@/components/ui/textarea';
+    36→    36→import { dataApi } from '@/lib/data';
+    37→    37→import { fmtDate, initials } from '@/lib/format';
+    38→    38→import { downloadLeavePdf, openLeavePrintWindow, shareLeaveViaWhatsApp } from '@/lib/pdf';
+    39→    39→import { LEAVE_TYPES, type EmployeeVM, type LeaveRequestVM, type LeaveType } from '@/lib/types';
+    40→    40→import { cn } from '@/lib/utils';
+    41→    41→import { useAuthStore } from '@/store/auth-store';
+    42→    42→import { useRealtimeVersion } from '@/store/realtime';
+    43→    43→
+    44→    44→type StatusFilter = 'all' | 'pending' | 'approved' | 'rejected';
+    45→    45→
+    46→    46→/** Colored chip per leave type (brand + semantic accents, no blue/indigo) */
+    47→    47→const LEAVE_TYPE_CHIP: Record<LeaveType, string> = {
+    48→    48→  casual: 'border-brand/25 bg-brand/10 text-brand',
+    49→    49→  sick: 'border-rose-500/25 bg-rose-500/10 text-rose-500',
+    50→    50→  annual: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-500',
+    51→    51→  emergency: 'border-amber-500/25 bg-amber-500/10 text-amber-500',
+    52→    52→  marriage: 'border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-500',
+    53→    53→  other: 'border-zinc-500/25 bg-zinc-500/10 text-zinc-400',
+    54→    54→};
+    55→    55→
+    56→    56→const leaveTypeLabel = (req: LeaveRequestVM): string =>
+    57→    57→  req.leave_type === 'other' && req.other_type_text
+    58→    58→    ? req.other_type_text
+    59→    59→    : LEAVE_TYPES.find((t) => t.value === req.leave_type)?.label ?? req.leave_type;
+    60→    60→
+    61→    61→const DOC_BTN = 'size-8 text-muted-foreground transition-colors hover:bg-brand/10 hover:text-brand';
+    62→    62→
+    63→    63→// ---------------------------------------------------------------------------
+    64→    64→// Main page
+    65→    65→// ---------------------------------------------------------------------------
+    66→    66→export function LeaveRequestPage() {
+    67→    67→  const user = useAuthStore((s) => s.user);
+    68→    68→  const isSuperAdmin = user?.role === 'super_admin';
+    69→    69→  const version = useRealtimeVersion(['leave_request']);
+    70→    70→
+    71→    71→  const [requests, setRequests] = useState<LeaveRequestVM[] | null>(null);
+    72→    72→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    73→    73→
+    74→    74→  const [search, setSearch] = useState('');
+    75→    75→  const [debouncedSearch, setDebouncedSearch] = useState('');
+    76→    76→  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+    77→    77→
+    78→    78→  const [createOpen, setCreateOpen] = useState(false);
+    79→    79→  const [reviewTarget, setReviewTarget] = useState<{ req: LeaveRequestVM; approve: boolean } | null>(null);
+    80→    80→  const [reviewBusy, setReviewBusy] = useState(false);
+    81→    81→
+    82→    82→  // ---- data loading (re-fetches whenever leave requests change anywhere) ----
+    83→    83→  useEffect(() => {
+    84→    84→    let cancelled = false;
+    85→    85→    (async () => {
+    86→    86→      const [reqs, emps] = await Promise.all([
+    87→    87→        dataApi.listLeaveRequests(),
+    88→    88→        dataApi.listEmployees(),
+    89→    89→      ]);
+    90→    90→      if (!cancelled) {
+    91→    91→        setRequests(reqs);
+    92→    92→        setEmployees(emps);
+    93→    93→      }
+    94→    94→    })().catch(() => {
+    95→    95→      if (!cancelled) {
+    96→    96→        setRequests([]);
+    97→    97→        setEmployees([]);
+    98→    98→      }
+    99→    99→    });
+   100→   100→    return () => { cancelled = true; };
+   101→   101→  }, [version]);
+   102→   102→
+   103→   103→  // ---- search debounce (300ms) ------------------------------------------------
+   104→   104→  useEffect(() => {
+   105→   105→    const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 300);
+   106→   106→    return () => clearTimeout(t);
+   107→   107→  }, [search]);
+   108→   108→
+   109→   109→  // ---- derived values ---------------------------------------------------------
+   110→   110→  const stats = useMemo(() => {
+   111→   111→    const list = requests ?? [];
+   112→   112→    return {
+   113→   113→      total: list.length,
+   114→   114→      pending: list.filter((r) => r.status === 'pending').length,
+   115→   115→      approved: list.filter((r) => r.status === 'approved').length,
+   116→   116→      rejected: list.filter((r) => r.status === 'rejected').length,
+   117→   117→    };
+   118→   118→  }, [requests]);
+   119→   119→
+   120→   120→  const filtered = useMemo(() => {
+   121→   121→    const list = requests ?? [];
+   122→   122→    return list.filter((r) => {
+   123→   123→      if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+   124→   124→      if (!debouncedSearch) return true;
+   125→   125→      const label = leaveTypeLabel(r).toLowerCase();
+   126→   126→      const hay = `${r.employee_name} ${r.employee_code} ${r.leave_type} ${label} ${r.other_type_text ?? ''} ${r.reason}`.toLowerCase();
+   127→   127→      return hay.includes(debouncedSearch);
+   128→   128→    });
+   129→   129→  }, [requests, debouncedSearch, statusFilter]);
+   130→   130→
+   131→   131→  const filtersActive = search.trim().length > 0 || statusFilter !== 'all';
+   132→   132→  const loading = requests === null;
+   133→   133→  const activeEmployees = (employees ?? []).filter((e) => e.status === 'active');
+   134→   134→
+   135→   135→  const resetFilters = () => {
+   136→   136→    setSearch('');
+   137→   137→    setStatusFilter('all');
+   138→   138→  };
+   139→   139→
+   140→   140→  // ---- review (super admin only, pending only) ---------------------------------
+   141→   141→  const handleReview = async () => {
+   142→   142→    if (!reviewTarget) return;
+   143→   143→    setReviewBusy(true);
+   144→   144→    try {
+   145→   145→      const { req, approve } = reviewTarget;
+   146→   146→      await dataApi.reviewLeaveRequest(req.id, approve);
+   147→   147→      toast.success(approve ? 'Leave request approved' : 'Leave request rejected', {
+   148→   148→        description: `${req.employee_name} — ${leaveTypeLabel(req)} (${req.total_days} day(s))`,
+   149→   149→      });
+   150→   150→      setReviewTarget(null);
+   151→   151→    } catch (err) {
+   152→   152→      toast.error(err instanceof Error ? err.message : 'Failed to review the request');
+   153→   153→    } finally {
+   154→   154→      setReviewBusy(false);
+   155→   155→    }
+   156→   156→  };
+   157→   157→
+   158→   158→  const shareWhatsApp = (req: LeaveRequestVM) => {
+   159→   159→    shareLeaveViaWhatsApp(req).catch(() => toast.error('Unable to share this application via WhatsApp'));
+   160→   160→  };
+   161→   161→
+   162→   162→  const statCards = [
+   163→   163→    { label: 'Total Requests', value: stats.total, icon: <FileText size={20} />, tone: 'brand' as const, hint: 'All leave applications' },
+   164→   164→    { label: 'Pending', value: stats.pending, icon: <Clock size={20} />, tone: 'amber' as const, hint: 'Awaiting review' },
+   165→   165→    { label: 'Approved', value: stats.approved, icon: <CheckCircle2 size={20} />, tone: 'emerald' as const, hint: 'Confirmed leave' },
+   166→   166→    { label: 'Rejected', value: stats.rejected, icon: <XCircle size={20} />, tone: 'rose' as const, hint: 'Declined applications' },
+   167→   167→  ];
+   168→   168→
+   169→   169→  return (
+   170→   170→    <div className="mx-auto max-w-7xl space-y-6">
+   171→   171→      <PageHeader
+   172→   172→        title="Leave Requests"
+   173→   173→        description="Review and manage employee leave applications"
+   174→   174→        actions={
+   175→   175→          <Button
+   176→   176→            onClick={() => setCreateOpen(true)}
+   177→   177→            className="h-10 brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+   178→   178→          >
+   179→   179→            <CalendarPlus size={16} /> New Leave Request
+   180→   180→          </Button>
+   181→   181→        }
+   182→   182→      />
+   183→   183→
+   184→   184→      {/* ---- Stat cards ---- */}
+   185→   185→      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+   186→   186→        {loading
+   187→   187→          ? Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-xl" />)
+   188→   188→          : statCards.map((s, i) => (
+   189→   189→            <motion.div
+   190→   190→              key={s.label}
+   191→   191→              initial={{ opacity: 0, y: 12 }}
+   192→   192→              animate={{ opacity: 1, y: 0 }}
+   193→   193→              transition={{ delay: i * 0.04, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+   194→   194→            >
+   195→   195→              <StatCard label={s.label} value={s.value} icon={s.icon} tone={s.tone} hint={s.hint} />
+   196→   196→            </motion.div>
+   197→   197→          ))}
+   198→   198→      </div>
+   199→   199→
+   200→   200→      {/* ---- Requests card (filters + list) ---- */}
+   201→   201→      <div className="card-glow rounded-xl border bg-card">
+   202→   202→        {/* Filters */}
+   203→   203→        <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center">
+   204→   204→          <div className="relative flex-1">
+   205→   205→            <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   206→   206→            <Input
+   207→   207→              value={search}
+   208→   208→              onChange={(e) => setSearch(e.target.value)}
+   209→   209→              placeholder="Search by employee, leave type or reason…"
+   210→   210→              aria-label="Search leave requests"
+   211→   211→              className="h-10 pl-9 pr-9"
+   212→   212→            />
+   213→   213→            {search && (
+   214→   214→              <button
+   215→   215→                type="button"
+   216→   216→                onClick={() => setSearch('')}
+   217→   217→                aria-label="Clear search"
+   218→   218→                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+   219→   219→              >
+   220→   220→                <X size={14} />
+   221→   221→              </button>
+   222→   222→            )}
+   223→   223→          </div>
+   224→   224→          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as StatusFilter)}>
+   225→   225→            <SelectTrigger className="h-10 w-full bg-card sm:w-44" aria-label="Filter by status">
+   226→   226→              <SelectValue />
+   227→   227→            </SelectTrigger>
+   228→   228→            <SelectContent>
+   229→   229→              <SelectItem value="all">All Statuses</SelectItem>
+   230→   230→              <SelectItem value="pending">Pending</SelectItem>
+   231→   231→              <SelectItem value="approved">Approved</SelectItem>
+   232→   232→              <SelectItem value="rejected">Rejected</SelectItem>
+   233→   233→            </SelectContent>
+   234→   234→          </Select>
+   235→   235→          {filtersActive && (
+   236→   236→            <Button variant="ghost" size="sm" onClick={resetFilters} className="text-muted-foreground">
+   237→   237→              <X size={14} /> Reset
+   238→   238→            </Button>
+   239→   239→          )}
+   240→   240→          <p className="hidden shrink-0 text-xs text-muted-foreground lg:block">
+   241→   241→            {loading ? 'Loading…' : `${filtered.length} of ${requests?.length ?? 0} request(s)`}
+   242→   242→          </p>
+   243→   243→        </div>
+   244→   244→
+   245→   245→        {/* Content */}
+   246→   246→        {loading ? (
+   247→   247→          <div className="p-4">
+   248→   248→            <SkeletonRows rows={5} />
+   249→   249→          </div>
+   250→   250→        ) : filtered.length === 0 ? (
+   251→   251→          <div className="p-4">
+   252→   252→            <EmptyState
+   253→   253→              icon={<CalendarPlus size={22} />}
+   254→   254→              title={filtersActive ? 'No matching leave requests' : 'No leave requests yet'}
+   255→   255→              description={filtersActive
+   256→   256→                ? 'Try adjusting your search or status filter to find what you are looking for.'
+   257→   257→                : 'Create the first leave application — it will be reviewed by a super admin.'}
+   258→   258→              action={!filtersActive ? (
+   259→   259→                <Button
+   260→   260→                  onClick={() => setCreateOpen(true)}
+   261→   261→                  className="brand-gradient font-semibold text-white"
+   262→   262→                >
+   263→   263→                  <CalendarPlus size={16} /> New Leave Request
+   264→   264→                </Button>
+   265→   265→              ) : undefined}
+   266→   266→            />
+   267→   267→          </div>
+   268→   268→        ) : (
+   269→   269→          <>
+   270→   270→            {/* ---- Desktop table ---- */}
+   271→   271→            <div className="hidden overflow-x-auto p-2 md:block">
+   272→   272→              <Table>
+   273→   273→                <TableHeader>
+   274→   274→                  <TableRow>
+   275→   275→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Employee</TableHead>
+   276→   276→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Leave Type</TableHead>
+   277→   277→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Duration</TableHead>
+   278→   278→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Reason</TableHead>
+   279→   279→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Status</TableHead>
+   280→   280→                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Created</TableHead>
+   281→   281→                    <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Documents</TableHead>
+   282→   282→                    {isSuperAdmin && (
+   283→   283→                      <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Review</TableHead>
+   284→   284→                    )}
+   285→   285→                  </TableRow>
+   286→   286→                </TableHeader>
+   287→   287→                <TableBody>
+   288→   288→                  {filtered.map((r, i) => (
+   289→   289→                    <motion.tr
+   290→   290→                      key={r.id}
+   291→   291→                      initial={{ opacity: 0, y: 12 }}
+   292→   292→                      animate={{ opacity: 1, y: 0 }}
+   293→   293→                      transition={{ delay: i * 0.04, duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+   294→   294→                      className="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/30"
+   295→   295→                    >
+   296→   296→                      <TableCell className="px-3 py-3">
+   297→   297→                        <div className="flex items-center gap-2.5">
+   298→   298→                          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-brand/15 text-[11px] font-bold text-brand">
+   299→   299→                            {initials(r.employee_name)}
+   300→   300→                          </span>
+   301→   301→                          <div className="min-w-0">
+   302→   302→                            <p className="truncate text-sm font-medium">{r.employee_name}</p>
+   303→   303→                            <p className="font-mono text-[11px] text-muted-foreground">{r.employee_code}</p>
+   304→   304→                          </div>
+   305→   305→                        </div>
+   306→   306→                      </TableCell>
+   307→   307→                      <TableCell className="px-3 py-3">
+   308→   308→                        <span className={cn('inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium', LEAVE_TYPE_CHIP[r.leave_type])}>
+   309→   309→                          {leaveTypeLabel(r)}
+   310→   310→                        </span>
+   311→   311→                      </TableCell>
+   312→   312→                      <TableCell className="px-3 py-3">
+   313→   313→                        <p className="text-sm font-medium">{r.total_days} day{r.total_days === 1 ? '' : 's'}</p>
+   314→   314→                        <p className="text-[11px] text-muted-foreground">{fmtDate(r.start_date)} → {fmtDate(r.end_date)}</p>
+   315→   315→                      </TableCell>
+   316→   316→                      <TableCell className="max-w-[220px] px-3 py-3">
+   317→   317→                        <p className="truncate text-sm text-muted-foreground" title={r.reason}>{r.reason}</p>
+   318→   318→                      </TableCell>
+   319→   319→                      <TableCell className="px-3 py-3">
+   320→   320→                        <RequestStatusBadge status={r.status} />
+   321→   321→                      </TableCell>
+   322→   322→                      <TableCell className="px-3 py-3">
+   323→   323→                        <p className="text-sm">{fmtDate(r.created_at)}</p>
+   324→   324→                        <p className="text-[11px] text-muted-foreground">by {r.created_by_name ?? 'System'}</p>
+   325→   325→                      </TableCell>
+   326→   326→                      <TableCell className="px-3 py-3">
+   327→   327→                        <div className="flex items-center justify-end gap-1">
+   328→   328→                          <Button
+   329→   329→                            variant="ghost" size="icon" className={DOC_BTN}
+   330→   330→                            title="Download PDF" aria-label={`Download PDF — ${r.employee_name}`}
+   331→   331→                            onClick={() => downloadLeavePdf(r)}
+   332→   332→                          >
+   333→   333→                            <Download size={15} />
+   334→   334→                          </Button>
+   335→   335→                          <Button
+   336→   336→                            variant="ghost" size="icon" className={DOC_BTN}
+   337→   337→                            title="Print" aria-label={`Print — ${r.employee_name}`}
+   338→   338→                            onClick={() => openLeavePrintWindow(r)}
+   339→   339→                          >
+   340→   340→                            <Printer size={15} />
+   341→   341→                          </Button>
+   342→   342→                          <Button
+   343→   343→                            variant="ghost" size="icon" className={DOC_BTN}
+   344→   344→                            title="Share via WhatsApp" aria-label={`Share via WhatsApp — ${r.employee_name}`}
+   345→   345→                            onClick={() => shareWhatsApp(r)}
+   346→   346→                          >
+   347→   347→                            <MessageCircle size={15} />
+   348→   348→                          </Button>
+   349→   349→                        </div>
+   350→   350→                      </TableCell>
+   351→   351→                      {isSuperAdmin && (
+   352→   352→                        <TableCell className="px-3 py-3">
+   353→   353→                          {r.status === 'pending' ? (
+   354→   354→                            <div className="flex items-center justify-end gap-1">
+   355→   355→                              <Button
+   356→   356→                                variant="ghost" size="icon"
+   357→   357→                                className="size-8 text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-500"
+   358→   358→                                title="Approve" aria-label={`Approve — ${r.employee_name}`}
+   359→   359→                                onClick={() => setReviewTarget({ req: r, approve: true })}
+   360→   360→                              >
+   361→   361→                                <Check size={16} />
+   362→   362→                              </Button>
+   363→   363→                              <Button
+   364→   364→                                variant="ghost" size="icon"
+   365→   365→                                className="size-8 text-rose-500 hover:bg-rose-500/10 hover:text-rose-500"
+   366→   366→                                title="Reject" aria-label={`Reject — ${r.employee_name}`}
+   367→   367→                                onClick={() => setReviewTarget({ req: r, approve: false })}
+   368→   368→                              >
+   369→   369→                                <X size={16} />
+   370→   370→                              </Button>
+   371→   371→                            </div>
+   372→   372→                          ) : (
+   373→   373→                            <p className="text-right text-xs text-muted-foreground/50">—</p>
+   374→   374→                          )}
+   375→   375→                        </TableCell>
+   376→   376→                      )}
+   377→   377→                    </motion.tr>
+   378→   378→                  ))}
+   379→   379→                </TableBody>
+   380→   380→              </Table>
+   381→   381→            </div>
+   382→   382→
+   383→   383→            {/* ---- Mobile cards ---- */}
+   384→   384→            <div className="space-y-3 p-4 md:hidden">
+   385→   385→              {filtered.map((r, i) => (
+   386→   386→                <motion.div
+   387→   387→                  key={r.id}
+   388→   388→                  initial={{ opacity: 0, y: 12 }}
+   389→   389→                  animate={{ opacity: 1, y: 0 }}
+   390→   390→                  transition={{ delay: i * 0.04, duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+   391→   391→                  className="rounded-xl border bg-background/40 p-4"
+   392→   392→                >
+   393→   393→                  <div className="flex items-start justify-between gap-3">
+   394→   394→                    <div className="flex min-w-0 items-center gap-2.5">
+   395→   395→                      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand/15 text-xs font-bold text-brand">
+   396→   396→                        {initials(r.employee_name)}
+   397→   397→                      </span>
+   398→   398→                      <div className="min-w-0">
+   399→   399→                        <p className="truncate text-sm font-medium">{r.employee_name}</p>
+   400→   400→                        <p className="font-mono text-[11px] text-muted-foreground">{r.employee_code}</p>
+   401→   401→                      </div>
+   402→   402→                    </div>
+   403→   403→                    <RequestStatusBadge status={r.status} />
+   404→   404→                  </div>
+   405→   405→
+   406→   406→                  <div className="mt-3 flex flex-wrap items-center gap-2">
+   407→   407→                    <span className={cn('inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium', LEAVE_TYPE_CHIP[r.leave_type])}>
+   408→   408→                      {leaveTypeLabel(r)}
+   409→   409→                    </span>
+   410→   410→                    <span className="inline-flex items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2.5 py-0.5 text-[11px] font-medium text-brand">
+   411→   411→                      <CalendarPlus size={11} /> {r.total_days} day{r.total_days === 1 ? '' : 's'}
+   412→   412→                    </span>
+   413→   413→                  </div>
+   414→   414→
+   415→   415→                  <p className="mt-2 text-xs text-muted-foreground">
+   416→   416→                    {fmtDate(r.start_date)} → {fmtDate(r.end_date)} · created {fmtDate(r.created_at)} by {r.created_by_name ?? 'System'}
+   417→   417→                  </p>
+   418→   418→                  <p className="mt-2 line-clamp-2 text-sm">{r.reason}</p>
+   419→   419→
+   420→   420→                  <div className="mt-3 flex items-center justify-between border-t pt-3">
+   421→   421→                    <div className="flex items-center gap-1">
+   422→   422→                      <Button
+   423→   423→                        variant="ghost" size="icon" className={DOC_BTN}
+   424→   424→                        aria-label="Download PDF" onClick={() => downloadLeavePdf(r)}
+   425→   425→                      >
+   426→   426→                        <Download size={15} />
+   427→   427→                      </Button>
+   428→   428→                      <Button
+   429→   429→                        variant="ghost" size="icon" className={DOC_BTN}
+   430→   430→                        aria-label="Print" onClick={() => openLeavePrintWindow(r)}
+   431→   431→                      >
+   432→   432→                        <Printer size={15} />
+   433→   433→                      </Button>
+   434→   434→                      <Button
+   435→   435→                        variant="ghost" size="icon" className={DOC_BTN}
+   436→   436→                        aria-label="Share via WhatsApp" onClick={() => shareWhatsApp(r)}
+   437→   437→                      >
+   438→   438→                        <MessageCircle size={15} />
+   439→   439→                      </Button>
+   440→   440→                    </div>
+   441→   441→                    {isSuperAdmin && r.status === 'pending' && (
+   442→   442→                      <div className="flex items-center gap-2">
+   443→   443→                        <Button
+   444→   444→                          variant="ghost" size="icon"
+   445→   445→                          className="size-8 text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-500"
+   446→   446→                          aria-label="Approve" onClick={() => setReviewTarget({ req: r, approve: true })}
+   447→   447→                        >
+   448→   448→                          <Check size={16} />
+   449→   449→                        </Button>
+   450→   450→                        <Button
+   451→   451→                          variant="ghost" size="icon"
+   452→   452→                          className="size-8 text-rose-500 hover:bg-rose-500/10 hover:text-rose-500"
+   453→   453→                          aria-label="Reject" onClick={() => setReviewTarget({ req: r, approve: false })}
+   454→   454→                        >
+   455→   455→                          <X size={16} />
+   456→   456→                        </Button>
+   457→   457→                      </div>
+   458→   458→                    )}
+   459→   459→                  </div>
+   460→   460→                </motion.div>
+   461→   461→              ))}
+   462→   462→            </div>
+   463→   463→          </>
+   464→   464→        )}
+   465→   465→      </div>
+   466→   466→
+   467→   467→      {/* ---- New request dialog ---- */}
+   468→   468→      <NewLeaveRequestDialog
+   469→   469→        open={createOpen}
+   470→   470→        onOpenChange={setCreateOpen}
+   471→   471→        employees={activeEmployees}
+   472→   472→      />
+   473→   473→
+   474→   474→      {/* ---- Review confirmation ---- */}
+   475→   475→      <AlertDialog
+   476→   476→        open={!!reviewTarget}
+   477→   477→        onOpenChange={(o) => { if (!o) setReviewTarget(null); }}
+   478→   478→      >
+   479→   479→        <AlertDialogContent>
+   480→   480→          <AlertDialogHeader>
+   481→   481→            <AlertDialogTitle>
+   482→   482→              {reviewTarget?.approve ? 'Approve this leave request?' : 'Reject this leave request?'}
+   483→   483→            </AlertDialogTitle>
+   484→   484→            <AlertDialogDescription>
+   485→   485→              {reviewTarget && (
+   486→   486→                <>
+   487→   487→                  {reviewTarget.approve
+   488→   488→                    ? 'This will approve the request and the employee will be notified. '
+   489→   489→                    : 'This will reject the request and the employee will be notified. '}
+   490→   490→                  <span className="font-medium text-foreground">
+   491→   491→                    {reviewTarget.req.employee_name} ({reviewTarget.req.employee_code})
+   492→   492→                  </span>{' '}
+   493→   493→                  — {leaveTypeLabel(reviewTarget.req)}, {reviewTarget.req.total_days} day(s) from{' '}
+   494→   494→                  {fmtDate(reviewTarget.req.start_date)} to {fmtDate(reviewTarget.req.end_date)}.
+   495→   495→                </>
+   496→   496→              )}
+   497→   497→            </AlertDialogDescription>
+   498→   498→          </AlertDialogHeader>
+   499→   499→          <AlertDialogFooter>
+   500→   500→            <AlertDialogCancel disabled={reviewBusy}>Cancel</AlertDialogCancel>
+   501→   501→            <Button
+   502→   502→              disabled={reviewBusy}
+   503→   503→              onClick={handleReview}
+   504→   504→              className={
+   505→   505→                reviewTarget?.approve
+   506→   506→                  ? 'bg-emerald-600 text-white hover:bg-emerald-600/90'
+   507→   507→                  : 'bg-rose-600 text-white hover:bg-rose-600/90'
+   508→   508→              }
+   509→   509→            >
+   510→   510→              {reviewBusy
+   511→   511→                ? <Loader2 size={16} className="animate-spin" />
+   512→   512→                : reviewTarget?.approve ? <Check size={16} /> : <X size={16} />}
+   513→   513→              {reviewTarget?.approve ? 'Approve' : 'Reject'}
+   514→   514→            </Button>
+   515→   515→          </AlertDialogFooter>
+   516→   516→        </AlertDialogContent>
+   517→   517→      </AlertDialog>
+   518→   518→    </div>
+   519→   519→  );
+   520→   520→}
+   521→   521→
+   522→   522→// ---------------------------------------------------------------------------
+   523→   523→// New Leave Request dialog
+   524→   524→// ---------------------------------------------------------------------------
+   525→   525→function NewLeaveRequestDialog({
+   526→   526→  open, onOpenChange, employees,
+   527→   527→}: {
+   528→   528→  open: boolean;
+   529→   529→  onOpenChange: (open: boolean) => void;
+   530→   530→  employees: EmployeeVM[];
+   531→   531→}) {
+   532→   532→  const [employeeId, setEmployeeId] = useState<string | null>(null);
+   533→   533→  const [leaveType, setLeaveType] = useState<LeaveType | null>(null);
+   534→   534→  const [otherTypeText, setOtherTypeText] = useState('');
+   535→   535→  const [startDate, setStartDate] = useState('');
+   536→   536→  const [endDate, setEndDate] = useState('');
+   537→   537→  const [reason, setReason] = useState('');
+   538→   538→  const [submitting, setSubmitting] = useState(false);
+   539→   539→
+   540→   540→  // Reset the form every time the dialog opens
+   541→   541→  useEffect(() => {
+   542→   542→    if (open) {
+   543→   543→      setEmployeeId(null);
+   544→   544→      setLeaveType(null);
+   545→   545→      setOtherTypeText('');
+   546→   546→      setStartDate('');
+   547→   547→      setEndDate('');
+   548→   548→      setReason('');
+   549→   549→      setSubmitting(false);
+   550→   550→    }
+   551→   551→  }, [open]);
+   552→   552→
+   553→   553→  // Auto-calculated total days = date diff + 1 (minimum 1)
+   554→   554→  const totalDays = useMemo(() => {
+   555→   555→    if (!startDate || !endDate) return 0;
+   556→   556→    const s = new Date(startDate);
+   557→   557→    const e = new Date(endDate);
+   558→   558→    if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) return 0;
+   559→   559→    const diff = Math.round((e.getTime() - s.getTime()) / 86400000) + 1;
+   560→   560→    return diff > 0 ? diff : 0;
+   561→   561→  }, [startDate, endDate]);
+   562→   562→
+   563→   563→  const selectedEmployee = employees.find((e) => e.id === employeeId) ?? null;
+   564→   564→
+   565→   565→  const handleSubmit = async () => {
+   566→   566→    if (!employeeId) { toast.error('Please select an employee'); return; }
+   567→   567→    if (!leaveType) { toast.error('Please select a leave type'); return; }
+   568→   568→    if (leaveType === 'other' && !otherTypeText.trim()) { toast.error('Please specify the leave type'); return; }
+   569→   569→    if (!startDate || !endDate) { toast.error('Please select the start and end dates'); return; }
+   570→   570→    if (totalDays < 1) { toast.error('The end date must be on or after the start date'); return; }
+   571→   571→    if (!reason.trim()) { toast.error('Please provide a reason for the leave'); return; }
+   572→   572→
+   573→   573→    setSubmitting(true);
+   574→   574→    try {
+   575→   575→      await dataApi.createLeaveRequest({
+   576→   576→        employee_id: employeeId,
+   577→   577→        leave_type: leaveType,
+   578→   578→        other_type_text: leaveType === 'other' ? otherTypeText.trim() : null,
+   579→   579→        start_date: startDate,
+   580→   580→        end_date: endDate,
+   581→   581→        total_days: totalDays,
+   582→   582→        reason: reason.trim(),
+   583→   583→      });
+   584→   584→      toast.success('Leave request submitted', {
+   585→   585→        description: `${selectedEmployee?.full_name ?? 'Employee'} — ${totalDays} day(s) of leave, now pending review.`,
+   586→   586→      });
+   587→   587→      onOpenChange(false);
+   588→   588→    } catch (err) {
+   589→   589→      toast.error(err instanceof Error ? err.message : 'Failed to submit the leave request');
+   590→   590→    } finally {
+   591→   591→      setSubmitting(false);
+   592→   592→    }
+   593→   593→  };
+   594→   594→
+   595→   595→  return (
+   596→   596→    <Dialog open={open} onOpenChange={onOpenChange}>
+   597→   597→      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+   598→   598→        <DialogHeader>
+   599→   599→          <DialogTitle>New Leave Request</DialogTitle>
+   600→   600→          <DialogDescription>
+   601→   601→            Submit a leave application on behalf of an employee. A super admin will review it.
+   602→   602→          </DialogDescription>
+   603→   603→        </DialogHeader>
+   604→   604→
+   605→   605→        <div className="space-y-4">
+   606→   606→          {/* Employee */}
+   607→   607→          <div className="space-y-2">
+   608→   608→            <Label>Employee <span className="text-rose-500">*</span></Label>
+   609→   609→            <EmployeeCombobox
+   610→   610→              employees={employees}
+   611→   611→              value={employeeId}
+   612→   612→              onChange={setEmployeeId}
+   613→   613→              placeholder="Search employees…"
+   614→   614→              emptyText="No active employees found."
+   615→   615→            />
+   616→   616→          </div>
+   617→   617→
+   618→   618→          {/* Leave type */}
+   619→   619→          <div className="space-y-2">
+   620→   620→            <Label>Leave Type <span className="text-rose-500">*</span></Label>
+   621→   621→            <Select
+   622→   622→              value={leaveType ?? undefined}
+   623→   623→              onValueChange={(v) => {
+   624→   624→                setLeaveType(v as LeaveType);
+   625→   625→                if (v !== 'other') setOtherTypeText('');
+   626→   626→              }}
+   627→   627→            >
+   628→   628→              <SelectTrigger className="h-11 w-full" aria-label="Leave type">
+   629→   629→                <SelectValue placeholder="Select leave type" />
+   630→   630→              </SelectTrigger>
+   631→   631→              <SelectContent>
+   632→   632→                {LEAVE_TYPES.map((t) => (
+   633→   633→                  <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+   634→   634→                ))}
+   635→   635→              </SelectContent>
+   636→   636→            </Select>
+   637→   637→          </div>
+   638→   638→
+   639→   639→          {/* Other → specify */}
+   640→   640→          {leaveType === 'other' && (
+   641→   641→            <motion.div
+   642→   642→              initial={{ opacity: 0, y: -6 }}
+   643→   643→              animate={{ opacity: 1, y: 0 }}
+   644→   644→              className="space-y-2"
+   645→   645→            >
+   646→   646→              <Label htmlFor="other-type">Specify Leave Type <span className="text-rose-500">*</span></Label>
+   647→   647→              <Input
+   648→   648→                id="other-type"
+   649→   649→                value={otherTypeText}
+   650→   650→                onChange={(e) => setOtherTypeText(e.target.value)}
+   651→   651→                placeholder="e.g. Study leave"
+   652→   652→                className="h-11"
+   653→   653→              />
+   654→   654→            </motion.div>
+   655→   655→          )}
+   656→   656→
+   657→   657→          {/* Dates */}
+   658→   658→          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+   659→   659→            <div className="space-y-2">
+   660→   660→              <Label htmlFor="start-date">Start Date <span className="text-rose-500">*</span></Label>
+   661→   661→              <Input
+   662→   662→                id="start-date"
+   663→   663→                type="date"
+   664→   664→                value={startDate}
+   665→   665→                onChange={(e) => setStartDate(e.target.value)}
+   666→   666→                className="h-11"
+   667→   667→              />
+   668→   668→            </div>
+   669→   669→            <div className="space-y-2">
+   670→   670→              <Label htmlFor="end-date">End Date <span className="text-rose-500">*</span></Label>
+   671→   671→              <Input
+   672→   672→                id="end-date"
+   673→   673→                type="date"
+   674→   674→                value={endDate}
+   675→   675→                min={startDate || undefined}
+   676→   676→                onChange={(e) => setEndDate(e.target.value)}
+   677→   677→                className="h-11"
+   678→   678→              />
+   679→   679→            </div>
+   680→   680→          </div>
+   681→   681→
+   682→   682→          {/* Total days (read-only, auto) */}
+   683→   683→          <div className="space-y-2">
+   684→   684→            <Label htmlFor="total-days">Total Days</Label>
+   685→   685→            <Input
+   686→   686→              id="total-days"
+   687→   687→              readOnly
+   688→   688→              value={totalDays > 0 ? String(totalDays) : ''}
+   689→   689→              placeholder="—"
+   690→   690→              className="h-11 bg-muted/50 font-medium"
+   691→   691→            />
+   692→   692→            <p className="text-xs text-muted-foreground">
+   693→   693→              Auto-calculated from the selected dates (minimum 1 day).
+   694→   694→            </p>
+   695→   695→          </div>
+   696→   696→
+   697→   697→          {/* Reason */}
+   698→   698→          <div className="space-y-2">
+   699→   699→            <Label htmlFor="reason">Reason <span className="text-rose-500">*</span></Label>
+   700→   700→            <Textarea
+
+[showing lines 1-700 of 727; use offset=701 with limit to continue reading]

@@ -1,0 +1,582 @@
+   518→          value={searchQuery}
+   519→          onChange={(e) => setSearchQuery(e.target.value)}
+   520→          className="pl-9 bg-slate-800 border-slate-700 text-slate-200 placeholder:text-slate-500 focus:ring-white/30 focus:border-white/50"
+   521→        />
+   522→      </div>
+   523→
+   524→      {/* Super Admins Section */}
+   525→      {superAdmins.length > 0 && (
+   526→        <Card className="bg-slate-800/50 border-amber-500/20 py-4">
+   527→          <CardHeader className="px-4">
+   528→            <CardTitle className="text-base text-white flex items-center gap-2">
+   529→              <Crown className="h-4 w-4 text-amber-400" />
+   530→              Super Admins
+   531→              <Badge className="bg-amber-500/10 text-amber-400 border-amber-500/20 ml-2">
+   532→                {superAdmins.length}
+   533→              </Badge>
+   534→            </CardTitle>
+   535→          </CardHeader>
+   536→          <CardContent className="px-4">
+   537→            <div className="overflow-x-auto rounded-lg">
+   538→              <Table>
+   539→                <TableHeader>
+   540→                  <TableRow className="border-slate-700 hover:bg-transparent">
+   541→                    <TableHead className="text-slate-400 font-semibold">Name</TableHead>
+   542→                    <TableHead className="text-slate-400 font-semibold">Email</TableHead>
+   543→                    <TableHead className="text-slate-400 font-semibold text-center">Role</TableHead>
+   544→                    <TableHead className="text-slate-400 font-semibold">Created</TableHead>
+   545→                    <TableHead className="text-slate-400 font-semibold text-right">Actions</TableHead>
+   546→                  </TableRow>
+   547→                </TableHeader>
+   548→                <TableBody>
+   549→                  {superAdmins.map((admin) => (
+   550→                    <TableRow key={admin.id} className="border-slate-700/50 hover:bg-slate-700/30">
+   551→                      <TableCell className="text-slate-200 font-medium">
+   552→                        <div className="flex items-center gap-2">
+   553→                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/10">
+   554→                            <Crown className="h-4 w-4 text-amber-400" />
+   555→                          </div>
+   556→                          {admin.name}
+   557→                        </div>
+   558→                      </TableCell>
+   559→                      <TableCell className="text-slate-400">
+   560→                        <div className="flex items-center gap-1.5">
+   561→                          <Mail className="h-3.5 w-3.5 text-slate-500" />
+   562→                          {admin.email}
+   563→                        </div>
+   564→                      </TableCell>
+   565→                      <TableCell className="text-center">
+   566→                        <Badge className="bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/20">
+   567→                          Super Admin
+   568→                        </Badge>
+   569→                      </TableCell>
+   570→                      <TableCell className="text-slate-400 text-sm">
+   571→                        {formatDate(admin.createdAt)}
+   572→                      </TableCell>
+   573→                      <TableCell className="text-right">
+   574→                        <div className="flex items-center justify-end gap-1">
+   575→                          <Button
+   576→                            variant="ghost"
+   577→                            size="sm"
+   578→                            onClick={() => handleEdit(admin)}
+   579→                            className="h-8 w-8 p-0 text-slate-400 hover:text-white hover:bg-white/10"
+   580→                          >
+   581→                            <Pencil className="h-4 w-4" />
+   582→                            <span className="sr-only">Edit</span>
+   583→                          </Button>
+   584→                          <Button
+   585→                            variant="ghost"
+   586→                            size="sm"
+   587→                            onClick={() => handleDelete(admin)}
+   588→                            className="h-8 w-8 p-0 text-slate-400 hover:text-red-400 hover:bg-red-500/10"
+   589→                          >
+   590→                            <Trash2 className="h-4 w-4" />
+   591→                            <span className="sr-only">Delete</span>
+   592→                          </Button>
+   593→                        </div>
+   594→                      </TableCell>
+   595→                    </TableRow>
+   596→                  ))}
+   597→                </TableBody>
+   598→              </Table>
+   599→            </div>
+   600→          </CardContent>
+   601→        </Card>
+   602→      )}
+   603→
+   604→      {/* Regular Admins Section */}
+   605→      <Card className="bg-slate-800/50 border-slate-700/50 py-4">
+   606→        <CardHeader className="px-4">
+   607→          <CardTitle className="text-base text-white flex items-center gap-2">
+   608→            <UserCog className="h-4 w-4 text-slate-400" />
+   609→            Admin Directory
+   610→            <Badge className="bg-white/10 text-white border-white/20 ml-2">
+   611→              {regularAdmins.length}
+   612→            </Badge>
+   613→          </CardTitle>
+   614→        </CardHeader>
+   615→        <CardContent className="px-4">
+   616→          {loading ? (
+   617→            <div className="space-y-3">
+   618→              {[1, 2, 3, 4].map((i) => (
+   619→                <Skeleton key={i} className="h-12 w-full bg-slate-700 rounded-lg" />
+   620→              ))}
+   621→            </div>
+   622→          ) : regularAdmins.length === 0 ? (
+   623→            <div className="flex flex-col items-center justify-center py-16 text-center">
+   624→              <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-slate-700/50 mb-4">
+   625→                <Shield className="h-7 w-7 text-slate-500" />
+   626→              </div>
+   627→              <p className="text-sm font-medium text-slate-400">
+   628→                {searchQuery ? 'No admins match your search' : 'No regular admins found'}
+   629→              </p>
+   630→              <p className="text-xs text-slate-500 mt-1 max-w-sm">
+   631→                {searchQuery
+   632→                  ? 'Try a different search term.'
+   633→                  : 'Click "Create Admin" to add your first admin account.'}
+   634→              </p>
+   635→            </div>
+   636→          ) : (
+   637→            <div className="overflow-x-auto rounded-lg">
+   638→              <Table>
+   639→                <TableHeader>
+   640→                  <TableRow className="border-slate-700 hover:bg-transparent">
+   641→                    <TableHead className="text-slate-400 font-semibold">Name</TableHead>
+   642→                    <TableHead className="text-slate-400 font-semibold">Email</TableHead>
+   643→                    <TableHead className="text-slate-400 font-semibold text-center">Role</TableHead>
+   644→                    <TableHead className="text-slate-400 font-semibold">Access</TableHead>
+   645→                    <TableHead className="text-slate-400 font-semibold">Created</TableHead>
+   646→                    <TableHead className="text-slate-400 font-semibold text-right">Actions</TableHead>
+   647→                  </TableRow>
+   648→                </TableHeader>
+   649→                <TableBody>
+   650→                  {regularAdmins.map((admin) => (
+   651→                    <TableRow key={admin.id} className="border-slate-700/50 hover:bg-slate-700/30">
+   652→                      <TableCell className="text-slate-200 font-medium">
+   653→                        <div className="flex items-center gap-2">
+   654→                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white/10">
+   655→                            <span className="text-sm font-semibold text-white">
+   656→                              {admin.name.charAt(0).toUpperCase()}
+   657→                            </span>
+   658→                          </div>
+   659→                          {admin.name}
+   660→                        </div>
+   661→                      </TableCell>
+   662→                      <TableCell className="text-slate-400">
+   663→                        <div className="flex items-center gap-1.5">
+   664→                          <Mail className="h-3.5 w-3.5 text-slate-500" />
+   665→                          {admin.email}
+   666→                        </div>
+   667→                      </TableCell>
+   668→                      <TableCell className="text-center">
+   669→                        <Badge className="bg-white/10 text-white border-white/20 hover:bg-white/20">
+   670→                          Admin
+   671→                        </Badge>
+   672→                      </TableCell>
+   673→                      <TableCell className="text-slate-400 text-xs max-w-[200px]">
+   674→                        <span className="line-clamp-2">{getAccessLabel(admin)}</span>
+   675→                      </TableCell>
+   676→                      <TableCell className="text-slate-400 text-sm">
+   677→                        {formatDate(admin.createdAt)}
+   678→                      </TableCell>
+   679→                      <TableCell className="text-right">
+   680→                        <div className="flex items-center justify-end gap-1">
+   681→                          <Button
+   682→                            variant="ghost"
+   683→                            size="sm"
+   684→                            onClick={() => handlePermissions(admin)}
+   685→                            className="h-8 w-8 p-0 text-slate-400 hover:text-white hover:bg-white/10"
+   686→                            title="Manage Permissions"
+   687→                          >
+   688→                            <KeyRound className="h-4 w-4" />
+   689→                            <span className="sr-only">Permissions</span>
+   690→                          </Button>
+   691→                          <Button
+   692→                            variant="ghost"
+   693→                            size="sm"
+   694→                            onClick={() => handleEdit(admin)}
+   695→                            className="h-8 w-8 p-0 text-slate-400 hover:text-white hover:bg-white/10"
+   696→                          >
+   697→                            <Pencil className="h-4 w-4" />
+   698→                            <span className="sr-only">Edit</span>
+   699→                          </Button>
+   700→                          <Button
+   701→                            variant="ghost"
+   702→                            size="sm"
+   703→                            onClick={() => handleDelete(admin)}
+   704→                            className="h-8 w-8 p-0 text-slate-400 hover:text-red-400 hover:bg-red-500/10"
+   705→                          >
+   706→                            <Trash2 className="h-4 w-4" />
+   707→                            <span className="sr-only">Delete</span>
+   708→                          </Button>
+   709→                        </div>
+   710→                      </TableCell>
+   711→                    </TableRow>
+   712→                  ))}
+   713→                </TableBody>
+   714→              </Table>
+   715→            </div>
+   716→          )}
+   717→        </CardContent>
+   718→      </Card>
+   719→
+   720→      {/* Create / Edit Dialog */}
+   721→      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+   722→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200 sm:max-w-md">
+   723→          <DialogHeader>
+   724→            <DialogTitle className="text-white flex items-center gap-2">
+   725→              {editingAdmin ? (
+   726→                <>
+   727→                  <Pencil className="h-4 w-4 text-white" />
+   728→                  Edit Account
+   729→                </>
+   730→              ) : formData.role === 'super_admin' ? (
+   731→                <>
+   732→                  <Crown className="h-4 w-4 text-amber-400" />
+   733→                  Create Super Admin
+   734→                </>
+   735→              ) : (
+   736→                <>
+   737→                  <Plus className="h-4 w-4 text-white" />
+   738→                  Create Admin
+   739→                </>
+   740→              )}
+   741→            </DialogTitle>
+   742→            <DialogDescription className="text-slate-400">
+   743→              {editingAdmin
+   744→                ? 'Update account details. Leave password blank to keep unchanged.'
+   745→                : formData.role === 'super_admin'
+   746→                ? 'Create a new Super Admin account with full system access.'
+   747→                : 'Create a new admin account with access to Dashboard and Uniform Registry only.'}
+   748→            </DialogDescription>
+   749→          </DialogHeader>
+   750→          <div className="space-y-4 py-2">
+   751→            {/* Role Selection */}
+   752→            <div className="space-y-2">
+   753→              <Label className="text-slate-300">
+   754→                Role <span className="text-red-400">*</span>
+   755→              </Label>
+   756→              <Select
+   757→                value={formData.role}
+   758→                onValueChange={(value: 'admin' | 'super_admin') => setFormData(f => ({ ...f, role: value }))}
+   759→              >
+   760→                <SelectTrigger className="bg-slate-900 border-slate-700 text-slate-200">
+   761→                  <SelectValue placeholder="Select role" />
+   762→                </SelectTrigger>
+   763→                <SelectContent className="bg-slate-800 border-slate-700">
+   764→                  <SelectItem value="admin" className="text-slate-200 focus:bg-slate-700 focus:text-white">
+   765→                    <div className="flex items-center gap-2">
+   766→                      <UserCog className="h-4 w-4 text-white" />
+   767→                      <span>Admin</span>
+   768→                      <span className="text-xs text-slate-400 ml-1">(Dashboard & Uniform Registry)</span>
+   769→                    </div>
+   770→                  </SelectItem>
+   771→                  <SelectItem value="super_admin" className="text-slate-200 focus:bg-slate-700 focus:text-white">
+   772→                    <div className="flex items-center gap-2">
+   773→                      <Crown className="h-4 w-4 text-amber-400" />
+   774→                      <span>Super Admin</span>
+   775→                      <span className="text-xs text-slate-400 ml-1">(Full access)</span>
+   776→                    </div>
+   777→                  </SelectItem>
+   778→                </SelectContent>
+   779→              </Select>
+   780→            </div>
+   781→
+   782→            {/* Name */}
+   783→            <div className="space-y-2">
+   784→              <Label htmlFor="admin-name" className="text-slate-300">
+   785→                Name <span className="text-red-400">*</span>
+   786→              </Label>
+   787→              <div className="relative">
+   788→                <UserCog className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+   789→                <Input
+   790→                  id="admin-name"
+   791→                  placeholder="Enter full name"
+   792→                  value={formData.name}
+   793→                  onChange={(e) => {
+   794→                    setFormData((f) => ({ ...f, name: e.target.value }));
+   795→                    if (formErrors.name) setFormErrors((fe) => ({ ...fe, name: '' }));
+   796→                  }}
+   797→                  className="pl-9 bg-slate-900 border-slate-700 text-slate-200 placeholder:text-slate-500 focus:ring-white/30 focus:border-white/50"
+   798→                />
+   799→              </div>
+   800→              {formErrors.name && (
+   801→                <p className="text-xs text-red-400">{formErrors.name}</p>
+   802→              )}
+   803→            </div>
+   804→
+   805→            {/* Email */}
+   806→            <div className="space-y-2">
+   807→              <Label htmlFor="admin-email" className="text-slate-300">
+   808→                Email <span className="text-red-400">*</span>
+   809→              </Label>
+   810→              <div className="relative">
+   811→                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+   812→                <Input
+   813→                  id="admin-email"
+   814→                  type="email"
+   815→                  placeholder="admin@example.com"
+   816→                  value={formData.email}
+   817→                  onChange={(e) => {
+   818→                    setFormData((f) => ({ ...f, email: e.target.value }));
+   819→                    if (formErrors.email) setFormErrors((fe) => ({ ...fe, email: '' }));
+   820→                  }}
+   821→                  className="pl-9 bg-slate-900 border-slate-700 text-slate-200 placeholder:text-slate-500 focus:ring-white/30 focus:border-white/50"
+   822→                />
+   823→              </div>
+   824→              {formErrors.email && (
+   825→                <p className="text-xs text-red-400">{formErrors.email}</p>
+   826→              )}
+   827→            </div>
+   828→
+   829→            {/* Password */}
+   830→            <div className="space-y-2">
+   831→              <Label htmlFor="admin-password" className="text-slate-300">
+   832→                Password {editingAdmin ? '' : <span className="text-red-400">*</span>}
+   833→                {editingAdmin && (
+   834→                  <span className="text-slate-500 font-normal ml-1">(optional)</span>
+   835→                )}
+   836→              </Label>
+   837→              <div className="relative">
+   838→                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+   839→                <Input
+   840→                  id="admin-password"
+   841→                  type="password"
+   842→                  placeholder={editingAdmin ? 'Leave blank to keep current' : 'Enter password (min 6 chars)'}
+   843→                  value={formData.password}
+   844→                  onChange={(e) => {
+   845→                    setFormData((f) => ({ ...f, password: e.target.value }));
+   846→                    if (formErrors.password) setFormErrors((fe) => ({ ...fe, password: '' }));
+   847→                  }}
+   848→                  className="pl-9 bg-slate-900 border-slate-700 text-slate-200 placeholder:text-slate-500 focus:ring-white/30 focus:border-white/50"
+   849→                />
+   850→              </div>
+   851→              {formErrors.password && (
+   852→                <p className="text-xs text-red-400">{formErrors.password}</p>
+   853→              )}
+   854→            </div>
+   855→
+   856→            {/* Super Admin Warning */}
+   857→            {formData.role === 'super_admin' && (
+   858→              <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 px-4 py-3 text-sm text-amber-400">
+   859→                <div className="flex items-start gap-2">
+   860→                  <Crown className="h-4 w-4 mt-0.5 shrink-0" />
+   861→                  <div>
+   862→                    <p className="font-medium">Super Admin Privileges</p>
+   863→                    <p className="text-amber-400/80 text-xs mt-1">
+   864→                      This account will have full system access including managing other admins, creating super admins, and accessing all system features.
+   865→                    </p>
+   866→                  </div>
+   867→                </div>
+   868→              </div>
+   869→            )}
+   870→
+   871→            {/* Admin Access Info */}
+   872→            {formData.role === 'admin' && !editingAdmin && (
+   873→              <div className="rounded-lg bg-white/5 border border-white/10 px-4 py-3 text-sm text-white">
+   874→                <div className="flex items-start gap-2">
+   875→                  <UserCog className="h-4 w-4 mt-0.5 shrink-0" />
+   876→                  <div>
+   877→                    <p className="font-medium">Admin Access</p>
+   878→                    <p className="text-white/60 text-xs mt-1">
+   879→                      This account will have access to Dashboard and Uniform Registry by default. You can grant additional menu access after creation using the Permissions button.
+   880→                    </p>
+   881→                  </div>
+   882→                </div>
+   883→              </div>
+   884→            )}
+   885→          </div>
+   886→          <DialogFooter className="gap-2 sm:gap-0">
+   887→            <Button
+   888→              variant="ghost"
+   889→              onClick={() => setDialogOpen(false)}
+   890→              className="text-slate-400 hover:text-white hover:bg-slate-700"
+   891→              disabled={submitting}
+   892→            >
+   893→              Cancel
+   894→            </Button>
+   895→            <Button
+   896→              onClick={handleSubmit}
+   897→              disabled={submitting}
+   898→              className={formData.role === 'super_admin' ? 'bg-amber-600 hover:bg-amber-700 text-white' : 'bg-white hover:bg-gray-200 text-black'}
+   899→            >
+   900→              {submitting ? (
+   901→                <span className="flex items-center gap-2">
+   902→                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+   903→                  {editingAdmin ? 'Updating...' : 'Creating...'}
+   904→                </span>
+   905→              ) : (
+   906→                <>
+   907→                  {editingAdmin ? (
+   908→                    <>
+   909→                      <Pencil className="h-4 w-4 mr-2" />
+   910→                      Update Account
+   911→                    </>
+   912→                  ) : (
+   913→                    <>
+   914→                      {formData.role === 'super_admin' ? (
+   915→                        <>
+   916→                          <Crown className="h-4 w-4 mr-2" />
+   917→                          Create Super Admin
+   918→                        </>
+   919→                      ) : (
+   920→                        <>
+   921→                          <Plus className="h-4 w-4 mr-2" />
+   922→                          Create Admin
+   923→                        </>
+   924→                      )}
+   925→                    </>
+   926→                  )}
+   927→                </>
+   928→              )}
+   929→            </Button>
+   930→          </DialogFooter>
+   931→        </DialogContent>
+   932→      </Dialog>
+   933→
+   934→      {/* Permissions Dialog */}
+   935→      <Dialog open={permissionsDialogOpen} onOpenChange={setPermissionsDialogOpen}>
+   936→        <DialogContent className="bg-slate-800 border-slate-700 text-slate-200 sm:max-w-lg">
+   937→          <DialogHeader>
+   938→            <DialogTitle className="text-white flex items-center gap-2">
+   939→              <KeyRound className="h-4 w-4 text-white" />
+   940→              Menu Permissions
+   941→            </DialogTitle>
+   942→            <DialogDescription className="text-slate-400">
+   943→              Manage sidebar menu access for <span className="text-white font-medium">{permissionsAdmin?.name}</span>.
+   944→              Toggle switches to grant or revoke access to specific menus.
+   945→            </DialogDescription>
+   946→          </DialogHeader>
+   947→
+   948→          {permissionsLoading ? (
+   949→            <div className="space-y-4 py-4">
+   950→              {[1, 2, 3, 4, 5, 6].map((i) => (
+   951→                <Skeleton key={i} className="h-10 w-full bg-slate-700 rounded-lg" />
+   952→              ))}
+   953→            </div>
+   954→          ) : (
+   955→            <div className="space-y-1 py-2">
+   956→              {/* Always Visible Section */}
+   957→              <div className="mb-4">
+   958→                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-1">
+   959→                  Always Visible
+   960→                </p>
+   961→                <div className="space-y-1">
+   962→                  {MENU_ITEMS.filter(m => m.alwaysVisible).map((item) => {
+   963→                    const Icon = item.icon;
+   964→                    return (
+   965→                      <div
+   966→                        key={item.key}
+   967→                        className="flex items-center justify-between rounded-lg px-3 py-2.5 bg-slate-700/30"
+   968→                      >
+   969→                        <div className="flex items-center gap-3">
+   970→                          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-white/5">
+   971→                            <Icon className="h-4 w-4 text-slate-400" />
+   972→                          </div>
+   973→                          <div>
+   974→                            <span className="text-sm font-medium text-slate-300">{item.label}</span>
+   975→                            <p className="text-[11px] text-slate-500">Visible to all admin users</p>
+   976→                          </div>
+   977→                        </div>
+   978→                        <Badge className="bg-white/10 text-slate-400 border-white/10 text-[10px]">
+   979→                          Always On
+   980→                        </Badge>
+   981→                      </div>
+   982→                    );
+   983→                  })}
+   984→                </div>
+   985→              </div>
+   986→
+   987→              <Separator className="bg-slate-700" />
+   988→
+   989→              {/* Toggleable Section */}
+   990→              <div className="mt-4">
+   991→                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-1">
+   992→                  Configurable Access
+   993→                </p>
+   994→                <div className="space-y-1">
+   995→                  {TOGGLEABLE_MENU_ITEMS.map((item) => {
+   996→                    const Icon = item.icon;
+   997→                    const isAllowed = permissions[item.key] === true;
+   998→                    const isSaving = permissionsSaving === item.key;
+   999→
+  1000→                    return (
+  1001→                      <div
+  1002→                        key={item.key}
+  1003→                        className={`flex items-center justify-between rounded-lg px-3 py-2.5 transition-colors ${
+  1004→                          isAllowed ? 'bg-white/5' : 'bg-slate-700/20'
+  1005→                        }`}
+  1006→                      >
+  1007→                        <div className="flex items-center gap-3">
+  1008→                          <div className={`flex h-8 w-8 items-center justify-center rounded-md ${
+  1009→                            isAllowed ? 'bg-white/10' : 'bg-white/5'
+  1010→                          }`}>
+  1011→                            <Icon className={`h-4 w-4 ${isAllowed ? 'text-white' : 'text-slate-500'}`} />
+  1012→                          </div>
+  1013→                          <div>
+  1014→                            <span className={`text-sm font-medium ${isAllowed ? 'text-white' : 'text-slate-400'}`}>
+  1015→                              {item.label}
+  1016→                            </span>
+  1017→                            <p className={`text-[11px] ${isAllowed ? 'text-slate-400' : 'text-slate-600'}`}>
+  1018→                              {isAllowed ? 'Access granted' : 'No access'}
+  1019→                            </p>
+  1020→                          </div>
+  1021→                        </div>
+  1022→                        <div className="flex items-center gap-2">
+  1023→                          {isSaving && (
+  1024→                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+  1025→                          )}
+  1026→                          <Switch
+  1027→                            checked={isAllowed}
+  1028→                            onCheckedChange={(checked: boolean) => handleTogglePermission(item.key, checked)}
+  1029→                            disabled={isSaving}
+  1030→                            className="data-[state=checked]:bg-white data-[state=unchecked]:bg-slate-600"
+  1031→                          />
+  1032→                        </div>
+  1033→                      </div>
+  1034→                    );
+  1035→                  })}
+  1036→                </div>
+  1037→              </div>
+  1038→            </div>
+  1039→          )}
+  1040→
+  1041→          <DialogFooter>
+  1042→            <Button
+  1043→              variant="ghost"
+  1044→              onClick={() => setPermissionsDialogOpen(false)}
+  1045→              className="text-slate-400 hover:text-white hover:bg-slate-700"
+  1046→            >
+  1047→              Done
+  1048→            </Button>
+  1049→          </DialogFooter>
+  1050→        </DialogContent>
+  1051→      </Dialog>
+  1052→
+  1053→      {/* Delete Confirmation Dialog */}
+  1054→      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+  1055→        <AlertDialogContent className="bg-slate-800 border-slate-700 text-slate-200">
+  1056→          <AlertDialogHeader>
+  1057→            <AlertDialogTitle className="text-white">
+  1058→              Delete {deletingAdmin?.role === 'super_admin' ? 'Super Admin' : 'Admin'} Account
+  1059→            </AlertDialogTitle>
+  1060→            <AlertDialogDescription className="text-slate-400">
+  1061→              Are you sure you want to delete the {deletingAdmin?.role === 'super_admin' ? 'super admin' : 'admin'} account for{' '}
+  1062→              <span className="text-white font-semibold">{deletingAdmin?.name}</span>? This action
+  1063→              cannot be undone. The user will lose all access to the system.
+  1064→            </AlertDialogDescription>
+  1065→          </AlertDialogHeader>
+  1066→          <AlertDialogFooter className="gap-2 sm:gap-0">
+  1067→            <AlertDialogCancel
+  1068→              className="text-slate-400 hover:text-white hover:bg-slate-700 border-slate-700"
+  1069→              disabled={deleting}
+  1070→            >
+  1071→              Cancel
+  1072→            </AlertDialogCancel>
+  1073→            <AlertDialogAction
+  1074→              onClick={(e) => {
+  1075→                e.preventDefault();
+  1076→                confirmDelete();
+  1077→              }}
+  1078→              disabled={deleting}
+  1079→              className="bg-red-500 hover:bg-red-600 text-white focus:ring-red-500/30 focus:ring-offset-slate-800 border-0"
+  1080→            >
+  1081→              {deleting ? (
+  1082→                <span className="flex items-center gap-2">
+  1083→                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+  1084→                  Deleting...
+  1085→                </span>
+  1086→              ) : (
+  1087→                <>
+  1088→                  <Trash2 className="h-4 w-4 mr-2" />
+  1089→                  Delete
+  1090→                </>
+  1091→              )}
+  1092→            </AlertDialogAction>
+  1093→          </AlertDialogFooter>
+  1094→        </AlertDialogContent>
+  1095→      </AlertDialog>
+  1096→    </div>
+  1097→  );
+  1098→}
+  1099→

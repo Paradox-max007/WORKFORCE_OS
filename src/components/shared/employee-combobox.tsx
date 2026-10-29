@@ -58,7 +58,7 @@ export function EmployeeCombobox({
             <span className="flex min-w-0 items-center gap-2">
               <span className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
                 {selected.photo ? (
-                  // eslint-disable-next-line @next/next/no-img-element
+                   
                   <img src={selected.photo} alt={selected.full_name} className="size-full object-cover" />
                 ) : (
                   initials(selected.full_name)
@@ -94,7 +94,7 @@ export function EmployeeCombobox({
                 >
                   <span className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
                     {e.photo ? (
-                      // eslint-disable-next-line @next/next/no-img-element
+                       
                       <img src={e.photo} alt={e.full_name} className="size-full object-cover" />
                     ) : (
                       initials(e.full_name)

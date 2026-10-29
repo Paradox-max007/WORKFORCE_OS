@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { dataApi } from '@/lib/data';
+import { supabase } from '@/lib/supabase/client';
 import type { RealtimeTable } from '@/lib/types';
 
 export function useRealtimeVersion(tables: RealtimeTable[] | '*'): number {
@@ -18,7 +19,11 @@ export function useRealtimeVersion(tables: RealtimeTable[] | '*'): number {
 
   useEffect(() => {
     const unsubscribe = dataApi.subscribe((changed) => {
-      if (tables === '*' || changed.includes('*') || changed.some((t) => (tables as string[]).includes(t))) {
+      const hit =
+        tables === '*' ||
+        (changed as string[]).includes('*') ||
+        (changed as string[]).some((t) => (tables as string[]).includes(t));
+      if (hit) {
         // micro-debounce: many mutations emit bursts of events
         if (timer.current) clearTimeout(timer.current);
         timer.current = setTimeout(() => setVersion((v) => v + 1), 120);
@@ -28,18 +33,36 @@ export function useRealtimeVersion(tables: RealtimeTable[] | '*'): number {
       if (timer.current) clearTimeout(timer.current);
       unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [Array.isArray(tables) ? tables.join(',') : tables]);
 
   return version;
 }
 
-// Realtime connection state for the "LIVE" indicator in the header
+// Realtime connection state for the "LIVE" indicator in the header.
+// Supabase mode → real websocket channel status; demo mode → BroadcastChannel.
 export function useRealtimeStatus(): 'connecting' | 'live' {
   const [status, setStatus] = useState<'connecting' | 'live'>('connecting');
+
   useEffect(() => {
-    const t = setTimeout(() => setStatus('live'), 900);
+    const client = supabase;
+    if (client) {
+      // Dedicated presence-free channel purely to track connection health
+      const channel = client.channel('pulse-status');
+      channel
+        .on('broadcast', { event: 'ping' }, () => undefined)
+        .subscribe((s) => {
+          if (s === 'SUBSCRIBED') setStatus('live');
+          else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' || s === 'CLOSED') setStatus('connecting');
+        });
+      return () => {
+        client.removeChannel(channel);
+      };
+    }
+    // Demo mode: BroadcastChannel is instant — surface "live" after a short beat
+    const t = setTimeout(() => setStatus('live'), 600);
     return () => clearTimeout(t);
   }, []);
+
   return status;
 }

@@ -1,3 +1,483 @@
+     1→'use client';
+     2→
+     3→import React, { useEffect, useState, useCallback } from 'react';
+     4→import {
+     5→  Shield,
+     6→  Plus,
+     7→  Pencil,
+     8→  Trash2,
+     9→  UserCog,
+    10→  Search,
+    11→  Mail,
+    12→  Lock,
+    13→  Crown,
+    14→  KeyRound,
+    15→  Users,
+    16→  Building2,
+    17→  Calendar,
+    18→  FileText,
+    19→  Ban,
+    20→  Bell,
+    21→  LayoutDashboard,
+    22→  Shirt,
+    23→} from 'lucide-react';
+    24→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+    25→import { Button } from '@/components/ui/button';
+    26→import { Input } from '@/components/ui/input';
+    27→import { Label } from '@/components/ui/label';
+    28→import { Badge } from '@/components/ui/badge';
+    29→import { Skeleton } from '@/components/ui/skeleton';
+    30→import { Switch } from '@/components/ui/switch';
+    31→import { Separator } from '@/components/ui/separator';
+    32→import {
+    33→  Dialog,
+    34→  DialogContent,
+    35→  DialogDescription,
+    36→  DialogFooter,
+    37→  DialogHeader,
+    38→  DialogTitle,
+    39→} from '@/components/ui/dialog';
+    40→import {
+    41→  AlertDialog,
+    42→  AlertDialogAction,
+    43→  AlertDialogCancel,
+    44→  AlertDialogContent,
+    45→  AlertDialogDescription,
+    46→  AlertDialogFooter,
+    47→  AlertDialogHeader,
+    48→  AlertDialogTitle,
+    49→} from '@/components/ui/alert-dialog';
+    50→import {
+    51→  Select,
+    52→  SelectContent,
+    53→  SelectItem,
+    54→  SelectTrigger,
+    55→  SelectValue,
+    56→} from '@/components/ui/select';
+    57→import {
+    58→  Table,
+    59→  TableBody,
+    60→  TableCell,
+    61→  TableHead,
+    62→  TableHeader,
+    63→  TableRow,
+    64→} from '@/components/ui/table';
+    65→import { useAuthStore } from '@/store/auth-store';
+    66→import { useToast } from '@/hooks/use-toast';
+    67→
+    68→interface Admin {
+    69→  id: string;
+    70→  email: string;
+    71→  name: string;
+    72→  role: string;
+    73→  createdAt: string;
+    74→  updatedAt: string;
+    75→}
+    76→
+    77→interface AdminFormData {
+    78→  name: string;
+    79→  email: string;
+    80→  password: string;
+    81→  role: 'admin' | 'super_admin';
+    82→}
+    83→
+    84→interface MenuPermissionItem {
+    85→  key: string;
+    86→  label: string;
+    87→  icon: React.ElementType;
+    88→  alwaysVisible: boolean;
+    89→}
+    90→
+    91→const MENU_ITEMS: MenuPermissionItem[] = [
+    92→  { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, alwaysVisible: true },
+    93→  { key: 'uniform_registry', label: 'Uniform Registry', icon: Shirt, alwaysVisible: true },
+    94→  { key: 'employees', label: 'Employees', icon: Users, alwaysVisible: false },
+    95→  { key: 'sites', label: 'Sites', icon: Building2, alwaysVisible: false },
+    96→  { key: 'attendance', label: 'Attendance', icon: Calendar, alwaysVisible: false },
+    97→  { key: 'leave_requests', label: 'Leave Requests', icon: FileText, alwaysVisible: false },
+    98→  { key: 'cancellation_requests', label: 'Cancellations', icon: Ban, alwaysVisible: false },
+    99→  { key: 'notifications', label: 'Notifications', icon: Bell, alwaysVisible: false },
+   100→];
+   101→
+   102→const TOGGLEABLE_MENU_ITEMS = MENU_ITEMS.filter((item) => !item.alwaysVisible);
+   103→
+   104→const emptyForm: AdminFormData = {
+   105→  name: '',
+   106→  email: '',
+   107→  password: '',
+   108→  role: 'admin',
+   109→};
+   110→
+   111→export function AdminPage() {
+   112→  const { user } = useAuthStore();
+   113→  const { toast } = useToast();
+   114→
+   115→  const [admins, setAdmins] = useState<Admin[]>([]);
+   116→  const [loading, setLoading] = useState(true);
+   117→  const [searchQuery, setSearchQuery] = useState('');
+   118→
+   119→  // Dialog state
+   120→  const [dialogOpen, setDialogOpen] = useState(false);
+   121→  const [editingAdmin, setEditingAdmin] = useState<Admin | null>(null);
+   122→  const [formData, setFormData] = useState<AdminFormData>(emptyForm);
+   123→  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+   124→  const [submitting, setSubmitting] = useState(false);
+   125→
+   126→  // Delete dialog state
+   127→  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+   128→  const [deletingAdmin, setDeletingAdmin] = useState<Admin | null>(null);
+   129→  const [deleting, setDeleting] = useState(false);
+   130→
+   131→  // Permissions dialog state
+   132→  const [permissionsDialogOpen, setPermissionsDialogOpen] = useState(false);
+   133→  const [permissionsAdmin, setPermissionsAdmin] = useState<Admin | null>(null);
+   134→  const [permissions, setPermissions] = useState<Record<string, boolean>>({});
+   135→  const [permissionsLoading, setPermissionsLoading] = useState(false);
+   136→  const [permissionsSaving, setPermissionsSaving] = useState<string | null>(null);
+   137→
+   138→  // Admin permissions cache for Access column display
+   139→  const [adminPermissionsCache, setAdminPermissionsCache] = useState<Record<string, Record<string, boolean>>>({});
+   140→
+   141→  // Fetch admins
+   142→  const fetchAdmins = useCallback(async () => {
+   143→    try {
+   144→      setLoading(true);
+   145→      const res = await fetch('/api/admins');
+   146→      const json = await res.json();
+   147→      if (json.success) {
+   148→        const adminsList = json.data.admins || [];
+   149→        setAdmins(adminsList);
+   150→        // Fetch permissions for each regular admin
+   151→        for (const admin of adminsList.filter((a: Admin) => a.role === 'admin')) {
+   152→          fetchPermissionsForCache(admin.id);
+   153→        }
+   154→      } else {
+   155→        setAdmins([]);
+   156→      }
+   157→    } catch {
+   158→      setAdmins([]);
+   159→    } finally {
+   160→      setLoading(false);
+   161→    }
+   162→  }, []);
+   163→
+   164→  // Fetch permissions for cache (Access column display)
+   165→  const fetchPermissionsForCache = useCallback(async (userId: string) => {
+   166→    try {
+   167→      const res = await fetch(`/api/menu-permissions?userId=${userId}`);
+   168→      const json = await res.json();
+   169→      if (json.success) {
+   170→        setAdminPermissionsCache((prev) => ({
+   171→          ...prev,
+   172→          [userId]: json.data.permissions || {},
+   173→        }));
+   174→      }
+   175→    } catch {
+   176→      // silent
+   177→    }
+   178→  }, []);
+   179→
+   180→  useEffect(() => {
+   181→    if (user?.role === 'super_admin') {
+   182→      fetchAdmins();
+   183→    }
+   184→  }, [user, fetchAdmins]);
+   185→
+   186→  // Guard: only super_admin can access
+   187→  if (user?.role !== 'super_admin') {
+   188→    return (
+   189→      <div className="flex flex-col gap-6">
+   190→        <div className="flex flex-col items-center justify-center py-20 text-center">
+   191→          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-red-500/10 mb-4">
+   192→            <Shield className="h-8 w-8 text-red-400" />
+   193→          </div>
+   194→          <h2 className="text-xl font-bold text-white">Access Denied</h2>
+   195→          <p className="text-slate-400 mt-2 max-w-md">
+   196→            You do not have permission to access this page. Only super admins can manage admin accounts.
+   197→          </p>
+   198→        </div>
+   199→      </div>
+   200→    );
+   201→  }
+   202→
+   203→  // Filter admins by search
+   204→  const filteredAdmins = admins.filter((admin) => {
+   205→    if (!searchQuery.trim()) return true;
+   206→    const q = searchQuery.toLowerCase();
+   207→    return (
+   208→      admin.name.toLowerCase().includes(q) ||
+   209→      admin.email.toLowerCase().includes(q) ||
+   210→      admin.role.toLowerCase().includes(q)
+   211→    );
+   212→  });
+   213→
+   214→  // Separate super admins and regular admins
+   215→  const superAdmins = filteredAdmins.filter(a => a.role === 'super_admin');
+   216→  const regularAdmins = filteredAdmins.filter(a => a.role === 'admin');
+   217→
+   218→  // Open permissions dialog
+   219→  async function handlePermissions(admin: Admin) {
+   220→    setPermissionsAdmin(admin);
+   221→    setPermissionsLoading(true);
+   222→    setPermissionsDialogOpen(true);
+   223→    setPermissions({});
+   224→
+   225→    try {
+   226→      const res = await fetch(`/api/menu-permissions?userId=${admin.id}`);
+   227→      const json = await res.json();
+   228→      if (json.success) {
+   229→        setPermissions(json.data.permissions || {});
+   230→      }
+   231→    } catch {
+   232→      toast({
+   233→        title: 'Error',
+   234→        description: 'Failed to load permissions',
+   235→        variant: 'destructive',
+   236→      });
+   237→    } finally {
+   238→      setPermissionsLoading(false);
+   239→    }
+   240→  }
+   241→
+   242→  // Toggle a menu permission
+   243→  async function handleTogglePermission(menuKey: string, allowed: boolean) {
+   244→    if (!permissionsAdmin) return;
+   245→
+   246→    setPermissionsSaving(menuKey);
+   247→    // Optimistic update
+   248→    setPermissions((prev) => ({ ...prev, [menuKey]: allowed }));
+   249→
+   250→    try {
+   251→      const res = await fetch('/api/menu-permissions', {
+   252→        method: 'POST',
+   253→        headers: { 'Content-Type': 'application/json' },
+   254→        body: JSON.stringify({
+   255→          userId: permissionsAdmin.id,
+   256→          menuKey,
+   257→          allowed,
+   258→        }),
+   259→      });
+   260→      const json = await res.json();
+   261→
+   262→      if (json.success) {
+   263→        toast({
+   264→          title: 'Permission Updated',
+   265→          description: `${TOGGLEABLE_MENU_ITEMS.find(m => m.key === menuKey)?.label || menuKey} access ${allowed ? 'granted' : 'revoked'} for ${permissionsAdmin.name}.`,
+   266→        });
+   267→        // Update cache
+   268→        setAdminPermissionsCache((prev) => ({
+   269→          ...prev,
+   270→          [permissionsAdmin.id]: { ...(prev[permissionsAdmin.id] || {}), [menuKey]: allowed },
+   271→        }));
+   272→      } else {
+   273→        // Revert on failure
+   274→        setPermissions((prev) => ({ ...prev, [menuKey]: !allowed }));
+   275→        toast({
+   276→          title: 'Error',
+   277→          description: json.error || 'Failed to update permission',
+   278→          variant: 'destructive',
+   279→        });
+   280→      }
+   281→    } catch {
+   282→      // Revert on failure
+   283→      setPermissions((prev) => ({ ...prev, [menuKey]: !allowed }));
+   284→      toast({
+   285→        title: 'Error',
+   286→        description: 'Failed to connect to the server',
+   287→        variant: 'destructive',
+   288→      });
+   289→    } finally {
+   290→      setPermissionsSaving(null);
+   291→    }
+   292→  }
+   293→
+   294→  // Get access label for an admin
+   295→  function getAccessLabel(admin: Admin) {
+   296→    const perms = adminPermissionsCache[admin.id] || {};
+   297→    const alwaysVisible = MENU_ITEMS.filter(m => m.alwaysVisible).map(m => m.label);
+   298→    const granted = TOGGLEABLE_MENU_ITEMS
+   299→      .filter(m => perms[m.key] === true)
+   300→      .map(m => m.label);
+   301→    const allAccess = [...alwaysVisible, ...granted];
+   302→    return allAccess.join(', ');
+   303→  }
+   304→
+   305→  // Validate form
+   306→  function validateForm(data: AdminFormData, isEdit: boolean): Record<string, string> {
+   307→    const errors: Record<string, string> = {};
+   308→    if (!data.name.trim()) {
+   309→      errors.name = 'Name is required';
+   310→    }
+   311→    if (!data.email.trim()) {
+   312→      errors.email = 'Email is required';
+   313→    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+   314→      errors.email = 'Invalid email format';
+   315→    }
+   316→    if (!isEdit && !data.password.trim()) {
+   317→      errors.password = 'Password is required';
+   318→    } else if (data.password && data.password.length < 6) {
+   319→      errors.password = 'Password must be at least 6 characters';
+   320→    }
+   321→    return errors;
+   322→  }
+   323→
+   324→  // Open create dialog
+   325→  function handleCreate(defaultRole: 'admin' | 'super_admin' = 'admin') {
+   326→    setEditingAdmin(null);
+   327→    setFormData({ ...emptyForm, role: defaultRole });
+   328→    setFormErrors({});
+   329→    setDialogOpen(true);
+   330→  }
+   331→
+   332→  // Open edit dialog
+   333→  function handleEdit(admin: Admin) {
+   334→    setEditingAdmin(admin);
+   335→    setFormData({ name: admin.name, email: admin.email, password: '', role: admin.role as 'admin' | 'super_admin' });
+   336→    setFormErrors({});
+   337→    setDialogOpen(true);
+   338→  }
+   339→
+   340→  // Submit create/edit
+   341→  async function handleSubmit() {
+   342→    const isEdit = !!editingAdmin;
+   343→    const errors = validateForm(formData, isEdit);
+   344→    setFormErrors(errors);
+   345→    if (Object.keys(errors).length > 0) return;
+   346→
+   347→    // Warn about creating super admin
+   348→    if (!isEdit && formData.role === 'super_admin') {
+   349→      const confirmed = window.confirm('Are you sure you want to create a Super Admin account? This user will have full system access including the ability to manage other admins.');
+   350→      if (!confirmed) return;
+   351→    }
+   352→
+   353→    // Warn about changing role to super_admin
+   354→    if (isEdit && editingAdmin!.role !== 'super_admin' && formData.role === 'super_admin') {
+   355→      const confirmed = window.confirm('Are you sure you want to promote this user to Super Admin? They will gain full system access.');
+   356→      if (!confirmed) return;
+   357→    }
+   358→
+   359→    // Warn about demoting super_admin
+   360→    if (isEdit && editingAdmin!.role === 'super_admin' && formData.role !== 'super_admin') {
+   361→      const otherSuperAdmins = admins.filter(a => a.role === 'super_admin' && a.id !== editingAdmin!.id);
+   362→      if (otherSuperAdmins.length === 0) {
+   363→        toast({
+   364→          title: 'Cannot Demote',
+   365→          description: 'There must be at least one Super Admin in the system.',
+   366→          variant: 'destructive',
+   367→        });
+   368→        return;
+   369→      }
+   370→      const confirmed = window.confirm('Are you sure you want to demote this Super Admin to a regular Admin? They will lose their elevated privileges.');
+   371→      if (!confirmed) return;
+   372→    }
+   373→
+   374→    setSubmitting(true);
+   375→    try {
+   376→      let res: Response;
+   377→      if (isEdit) {
+   378→        const body: Record<string, string> = { name: formData.name, email: formData.email, role: formData.role };
+   379→        if (formData.password.trim()) body.password = formData.password;
+   380→        res = await fetch(`/api/admins/${editingAdmin.id}`, {
+   381→          method: 'PUT',
+   382→          headers: { 'Content-Type': 'application/json' },
+   383→          body: JSON.stringify(body),
+   384→        });
+   385→      } else {
+   386→        res = await fetch('/api/admins', {
+   387→          method: 'POST',
+   388→          headers: { 'Content-Type': 'application/json' },
+   389→          body: JSON.stringify({ ...formData, requesterId: user?.id }),
+   390→        });
+   391→      }
+   392→      const json = await res.json();
+   393→
+   394→      if (json.success) {
+   395→        toast({
+   396→          title: isEdit ? 'Account Updated' : 'Account Created',
+   397→          description: `${formData.name} has been ${isEdit ? 'updated' : 'created'} as ${formData.role === 'super_admin' ? 'Super Admin' : 'Admin'} successfully.`,
+   398→        });
+   399→        setDialogOpen(false);
+   400→        fetchAdmins();
+   401→      } else {
+   402→        toast({
+   403→          title: 'Error',
+   404→          description: json.error || 'Something went wrong',
+   405→          variant: 'destructive',
+   406→        });
+   407→      }
+   408→    } catch {
+   409→      toast({
+   410→        title: 'Error',
+   411→        description: 'Failed to connect to the server',
+   412→        variant: 'destructive',
+   413→      });
+   414→    } finally {
+   415→      setSubmitting(false);
+   416→    }
+   417→  }
+   418→
+   419→  // Open delete dialog
+   420→  function handleDelete(admin: Admin) {
+   421→    if (admin.role === 'super_admin') {
+   422→      const otherSuperAdmins = admins.filter(a => a.role === 'super_admin' && a.id !== admin.id);
+   423→      if (otherSuperAdmins.length === 0) {
+   424→        toast({
+   425→          title: 'Cannot Delete',
+   426→          description: 'There must be at least one Super Admin in the system. Promote another user first.',
+   427→          variant: 'destructive',
+   428→        });
+   429→        return;
+   430→      }
+   431→    }
+   432→    setDeletingAdmin(admin);
+   433→    setDeleteDialogOpen(true);
+   434→  }
+   435→
+   436→  // Confirm delete
+   437→  async function confirmDelete() {
+   438→    if (!deletingAdmin) return;
+   439→    setDeleting(true);
+   440→    try {
+   441→      const res = await fetch(`/api/admins/${deletingAdmin.id}`, { method: 'DELETE' });
+   442→      const json = await res.json();
+   443→      if (json.success) {
+   444→        toast({
+   445→          title: 'Account Deleted',
+   446→          description: `${deletingAdmin.name} has been removed successfully.`,
+   447→        });
+   448→        setDeleteDialogOpen(false);
+   449→        setDeletingAdmin(null);
+   450→        fetchAdmins();
+   451→      } else {
+   452→        toast({
+   453→          title: 'Error',
+   454→          description: json.error || 'Failed to delete account',
+   455→          variant: 'destructive',
+   456→        });
+   457→      }
+   458→    } catch {
+   459→      toast({
+   460→        title: 'Error',
+   461→        description: 'Failed to connect to the server',
+   462→        variant: 'destructive',
+   463→      });
+   464→    } finally {
+   465→      setDeleting(false);
+   466→    }
+   467→  }
+   468→
+   469→  function formatDate(dateStr: string) {
+   470→    try {
+   471→      return new Date(dateStr).toLocaleDateString('en-US', {
+   472→        year: 'numeric',
+   473→        month: 'short',
+   474→        day: 'numeric',
+   475→      });
+   476→    } catch {
+   477→      return dateStr;
+   478→    }
+   479→  }
+   480→
    481→  return (
    482→    <div className="flex flex-col gap-6">
    483→      {/* Page Header */}

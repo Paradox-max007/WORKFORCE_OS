@@ -122,7 +122,7 @@ const attachFineVM = (f: (typeof db.fines)[number]): FineVM => {
 
 const nextEmployeeCode = (): string => {
   const year = new Date().getFullYear();
-  const prefix = `ASM-${year}-`;
+  const prefix = `PUL-${year}-`;
   const max = db.employees.reduce((m, e) => {
     if (e.employee_code.startsWith(prefix)) {
       const n = parseInt(e.employee_code.slice(prefix.length), 10);

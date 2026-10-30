@@ -11,11 +11,17 @@
 // • BULK DAY ENTRY: fill an entire day for a whole site crew in one action —
 //   hours DEFAULT TO 10 but every value is editable before the save, and the
 //   sheet cells stay editable any time afterwards.
-// • SITE MOVES: an employee transferred mid-month (e.g. Site A → Site B on the
-//   25th) stays under the site they started the month at — BOTTOM of the crew,
-//   faded — and the days from the move to the end of the month render as ONE
-//   merged cell showing the new site (the PDF sheet instead lists them under
-//   their new site, alphabetically).
+// • SITE MOVES: an employee transferred mid-month (e.g. Site A → Site B on
+//   the 25th) appears under BOTH sites for that month: under the site they
+//   started the month at — BOTTOM of the crew, faded — with the days from the
+//   move to the end of the month rendered as ONE merged cell showing the new
+//   site, and under the new site — also bottom + faded — where the earlier
+//   days merge into a cell showing the old site so the moved days can be
+//   marked there. A day that was ALREADY marked before the move was recorded
+//   stays with the old site: the move is then displayed from the next day
+//   (25th already marked at Site A → Site B shows from the 26th). The
+//   printable per-site sheet simply lists them under their new site,
+//   alphabetically.
 // • Each row shows the employee's TRADE (position) next to their ID.
 // • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
 // • Normal admins only see — and can only mark — the sites assigned to them
@@ -60,7 +66,11 @@ const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 // Absent on laptop / desktop screens. Fixed columns take only the space they
 // need; the day columns flex to share the leftover width. The table scrolls
 // horizontally ONLY when the viewport is narrower than the computed minimum.
-// (Literals in the sticky left/right classes must match these values.)
+// MOBILE: only the Employee column stays pinned in place — Trade, all day
+// columns, Total H and Absent scroll together, so every day cell stays
+// reachable for marking (from `lg:` up Trade pins left and Total/Absent pin
+// right again). (Literals in the sticky left/right classes must match these
+// values.)
 // ---------------------------------------------------------------------------
 const EMP_COL_W = 150; // employee — avatar + name (+ camp tooltip) + employee ID
 const TRADE_COL_W = 76; // trade
@@ -220,11 +230,14 @@ export function AttendancePage() {
   }, [employees, assignedSiteIds]);
 
   // ---- site-transfer timelines for the viewed month ---------------------------
-  // Every recorded site move splits the month into segments. The segment the
-  // employee STARTED the month at is their "home" — the row stays under that
-  // site's section (bottom, faded); each later segment renders as one merged
-  // cell showing where they moved to. Months before the move → old site as a
-  // normal row; months after → new site as a normal row.
+  // Every recorded site move splits the month into segments. An employee moved
+  // during the month gets a row in EVERY section they spent days at (bottom,
+  // faded); each foreign segment renders as one merged cell showing that
+  // site. Months before the move → old site as a normal row; months after →
+  // new site as a normal row. IMPORTANT: a day that was already marked BEFORE
+  // the move was recorded keeps its old-site marking — the move is then
+  // displayed from the next unmarked day (marked on the 25th + moved on the
+  // 25th → the sheet shows the move from the 26th only).
   const timelines = useMemo(() => {
     const byEmp = new Map<string, SiteTransfer[]>();
     (transfers ?? []).forEach((t) => {
@@ -236,6 +249,15 @@ export function AttendancePage() {
       a.effective_date === b.effective_date
         ? a.created_at.localeCompare(b.created_at)
         : a.effective_date < b.effective_date ? -1 : 1));
+
+    // records by employee → date (created_at tells us whether the day was
+    // marked at the old site BEFORE the move was recorded)
+    const recBy = new Map<string, Map<string, Attendance>>();
+    (records ?? []).forEach((r) => {
+      let m = recBy.get(r.employee_id);
+      if (!m) { m = new Map(); recBy.set(r.employee_id, m); }
+      m.set(r.date, r);
+    });
 
     const first = ymd(year, month, 1);
     const last = ymd(year, month, days);
@@ -255,7 +277,21 @@ export function AttendancePage() {
       const moves: { day: number; to: string | null }[] = [];
       for (const t of ts) {
         if (t.effective_date <= first) site = t.to_site_id ?? null;
-        else if (t.effective_date <= last) moves.push({ day: Number(t.effective_date.slice(8, 10)), to: t.to_site_id ?? null });
+        else if (t.effective_date <= last) {
+          // displayed move day: skip forward past days that were already
+          // marked at the old site before this transfer was recorded
+          let day = Number(t.effective_date.slice(8, 10));
+          const empRecs = recBy.get(emp.id);
+          if (empRecs) {
+            while (day <= days) {
+              const rec = empRecs.get(ymd(year, month, day));
+              if (rec && rec.created_at <= t.created_at) day += 1;
+              else break;
+            }
+          }
+          if (day > days) continue; // whole month already marked at the old site
+          moves.push({ day, to: t.to_site_id ?? null });
+        }
       }
       const segments: MonthSegment[] = [{ fromDay: 1, toDay: days, siteId: site }];
       for (const mv of moves) {
@@ -267,42 +303,49 @@ export function AttendancePage() {
       map.set(emp.id, { homeSiteId: site, segments, transferred: moves.length > 0 });
     }
     return map;
-  }, [employees, transfers, year, month, days]);
+  }, [employees, transfers, records, year, month, days]);
 
   // ---- sitewise sections --------------------------------------------------------
-  // Alphabetical inside each section; employees moved mid-month stay under the
-  // site they started the month at — at the BOTTOM of the crew, faded.
+  // Alphabetical inside each section; employees moved mid-month get a row at
+  // the BOTTOM of EVERY site they spent days at this month (faded), so their
+  // marking cells stay reachable under both the old and the new site.
   const sections = useMemo<SiteSection[]>(() => {
     const q = debouncedSearch.toLowerCase().trim();
     const matches = (e: EmployeeVM) =>
       !q || `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q);
     const byName = (a: EmployeeVM, b: EmployeeVM) => a.full_name.localeCompare(b.full_name);
 
-    const siteList = (sites ?? []).filter((s) => s.is_active);
+    // admins only ever see their assigned sites' sections
+    const siteList = (sites ?? []).filter(
+      (s) => s.is_active && (assignedSiteIds === null || assignedSiteIds.has(s.id)),
+    );
     const activeSiteIds = new Set(siteList.map((s) => s.id));
 
-    // where does this employee's row live for the viewed month?
-    const placement = (e: EmployeeVM): { siteId: string | null; moved: boolean } => {
+    // where do this employee's rows live for the viewed month? Every site with
+    // at least one segment (moved employees → several sections, one row each).
+    const placements = new Map<string, { sites: Set<string | null>; moved: boolean }>();
+    for (const e of scoped) {
       const tl = timelines.get(e.id);
-      if (!tl) return { siteId: e.current_site_id, moved: false };
-      const home = tl.homeSiteId; // site they were at on day 1 of this month
-      const homeOk = home !== null && activeSiteIds.has(home);
-      if (!tl.transferred) {
-        // moved in ANOTHER month → this whole month was spent at one site:
-        // before the move → the old site, after the move → the new site
-        return { siteId: homeOk ? home : e.current_site_id, moved: false };
+      if (!tl || !tl.transferred) {
+        // no in-month move → exactly one row: at the site they started the
+        // month at, falling back to the current site / idle when it's gone
+        const home = tl?.homeSiteId ?? e.current_site_id;
+        const site = home !== null && activeSiteIds.has(home)
+          ? home
+          : e.current_site_id !== null && activeSiteIds.has(e.current_site_id) ? e.current_site_id : null;
+        placements.set(e.id, { sites: new Set([site]), moved: false });
+        continue;
       }
-      // moved during THIS month → stay under the site the month started at
-      if (homeOk) return { siteId: home, moved: true };
-      // home site gone / inactive (or they started the month idle) → keep the
-      // row visible under their current site / idle instead of losing it
-      return {
-        siteId: e.current_site_id && activeSiteIds.has(e.current_site_id) ? e.current_site_id : null,
-        moved: true,
-      };
-    };
-
-    const placements = new Map(scoped.map((e) => [e.id, placement(e)]));
+      // moved during THIS month → one row per site spent days at
+      const sitesSet = new Set<string | null>();
+      tl.segments.forEach((sg) => {
+        const s = sg.siteId ?? null;
+        if (s !== null && !activeSiteIds.has(s)) return; // site since deleted/inactive
+        sitesSet.add(s);
+      });
+      if (sitesSet.size === 0) sitesSet.add(null); // keep the row visible under idle
+      placements.set(e.id, { sites: sitesSet, moved: true });
+    }
     const rowSort = (a: EmployeeVM, b: EmployeeVM): number => {
       const ma = placements.get(a.id)?.moved ? 1 : 0;
       const mb = placements.get(b.id)?.moved ? 1 : 0;
@@ -317,7 +360,7 @@ export function AttendancePage() {
         title: s.name,
         client: s.client_name,
         emps: scoped
-          .filter((e) => placements.get(e.id)?.siteId === s.id && matches(e))
+          .filter((e) => placements.get(e.id)?.sites.has(s.id) && matches(e))
           .sort(rowSort),
       }))
       .filter((sec) => sec.emps.length > 0);
@@ -325,7 +368,7 @@ export function AttendancePage() {
     // idle employees — super admins only (admins can never mark them)
     if (isSuperAdmin && (siteFilter === 'all' || siteFilter === 'idle')) {
       const idle = scoped
-        .filter((e) => placements.get(e.id)?.siteId === null && matches(e))
+        .filter((e) => placements.get(e.id)?.sites.has(null) && matches(e))
         .sort(rowSort);
       if (idle.length > 0) {
         result.push({
@@ -338,13 +381,18 @@ export function AttendancePage() {
       }
     }
     return result;
-  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines]);
+  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines, assignedSiteIds]);
 
-  // flat crew for the calendar view combobox
-  const crew = useMemo(
-    () => sections.flatMap((s) => s.emps),
-    [sections],
-  );
+  // flat crew for the calendar view combobox (a moved employee sits in several
+  // sections — the picker lists them once)
+  const crew = useMemo(() => {
+    const seen = new Set<string>();
+    const out: EmployeeVM[] = [];
+    sections.forEach((s) => s.emps.forEach((e) => {
+      if (!seen.has(e.id)) { seen.add(e.id); out.push(e); }
+    }));
+    return out;
+  }, [sections]);
 
   // sites selectable in the filter (admins: only their assigned sites)
   const selectableSites = useMemo(() => {
@@ -437,6 +485,27 @@ export function AttendancePage() {
     return { hours: Math.round(hours * 100) / 100, absents };
   };
 
+  // Hours an employee spent at ONE particular site in the viewed month. Moved
+  // employees have rows in several sections — each section band only counts
+  // its own site's days, so nobody is double-counted across sections.
+  const siteRowHours = (empId: string, siteKey: string | null): number => {
+    const segs = timelines.get(empId)?.segments ?? null;
+    let total = 0;
+    const addDay = (d: number) => {
+      const parsed = parseCell(cellText(empId, ymd(year, month, d)));
+      if (parsed.kind === 'hours') total += parsed.hours ?? 0;
+    };
+    if (!segs) {
+      for (let d = 1; d <= days; d++) addDay(d);
+    } else {
+      for (const sg of segs) {
+        if ((sg.siteId ?? null) !== siteKey) continue;
+        for (let d = sg.fromDay; d <= sg.toDay; d++) addDay(d);
+      }
+    }
+    return Math.round(total * 100) / 100;
+  };
+
   // ---- month navigation ----------------------------------------------------------
   const shiftMonth = (delta: number) => {
     const d = new Date(year, month - 1 + delta, 1);
@@ -453,13 +522,27 @@ export function AttendancePage() {
     return p.kind === 'hours' ? String(p.hours) : '10';
   };
 
-  // crew in the current bulk scope (respects admin site permissions)
+  // crew in the current bulk scope (respects admin site permissions AND the
+  // site each employee was actually at on the picked date — a mid-month move
+  // means the employee is bulk-markable at their old site for the days before
+  // the move and at the new site afterwards)
   const bulkCrew = useMemo(() => {
-    let arr = scoped;
-    if (bulkSite === 'idle') arr = scoped.filter((e) => !e.current_site_id);
-    else if (bulkSite !== 'all') arr = scoped.filter((e) => e.current_site_id === bulkSite);
+    const sameMonth = bulkDate.slice(0, 7) === monthKey;
+    const dayOf = Number(bulkDate.slice(8, 10));
+    const siteOnDay = (e: EmployeeVM): string | null => {
+      if (!sameMonth) return e.current_site_id;
+      const segs = timelines.get(e.id)?.segments;
+      if (!segs) return e.current_site_id;
+      const sg = segs.find((x) => dayOf >= x.fromDay && dayOf <= x.toDay);
+      return sg ? (sg.siteId ?? null) : e.current_site_id;
+    };
+    const arr = scoped.filter((e) => {
+      if (bulkSite === 'all') return true;
+      const want = bulkSite === 'idle' ? null : bulkSite;
+      return siteOnDay(e) === want;
+    });
     return [...arr].sort((a, b) => a.full_name.localeCompare(b.full_name));
-  }, [scoped, bulkSite]);
+  }, [scoped, bulkSite, bulkDate, monthKey, timelines]);
 
   // prefill whenever the dialog opens, the date changes or fresh records arrive
   useEffect(() => {
@@ -656,7 +739,9 @@ export function AttendancePage() {
 
   // ---- a full site section (table with that site's crew) ---------------------------
   const renderSheetSection = (section: SiteSection, index: number) => {
-    const totalHours = section.emps.reduce((sum, emp) => sum + rowTotals(emp.id).hours, 0);
+    const totalHours = section.emps.reduce(
+      (sum, emp) => sum + siteRowHours(emp.id, section.isIdle ? null : section.key), 0,
+    );
     const movedCount = section.emps.filter((e) => timelines.get(e.id)?.transferred).length;
     const siteNameOf = (siteId: string | null): string =>
       siteId ? (sites ?? []).find((s) => s.id === siteId)?.name ?? 'Former site' : 'Unassigned / Idle';
@@ -702,7 +787,7 @@ export function AttendancePage() {
             {movedCount > 0 && (
               <span
                 className="hidden items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand sm:inline-flex"
-                title="Employees moved to another site this month stay at the bottom of the crew (faded) with their new site shown across the moved days"
+                title="Employees moved to another site this month sit at the bottom of both crews (faded): mark them at the old site up to the move and at the new site afterwards — the moved days merge into one labelled cell on each row"
               >
                 <ArrowLeftRight size={11} />
                 {movedCount} moved
@@ -739,7 +824,7 @@ export function AttendancePage() {
                   </th>
                   <th
                     style={{ width: TRADE_COL_W }}
-                    className="sticky left-[150px] z-20 border-x border-b border-foreground/15 bg-muted/60 px-2 py-2 font-medium"
+                    className="lg:sticky lg:left-[150px] z-20 border-x border-b border-foreground/15 bg-muted/60 px-2 py-2 font-medium"
                   >
                     Trade
                   </th>
@@ -766,13 +851,13 @@ export function AttendancePage() {
                   })}
                   <th
                     style={{ width: TOTAL_COL_W }}
-                    className="sticky right-[48px] z-20 border-x border-b border-foreground/15 bg-muted/60 px-1 py-2 text-center font-medium text-emerald-500"
+                    className="lg:sticky lg:right-[48px] z-20 border-x border-b border-foreground/15 bg-muted/60 px-1 py-2 text-center font-medium text-emerald-500"
                   >
                     Total H
                   </th>
                   <th
                     style={{ width: ABSENT_COL_W }}
-                    className="sticky right-0 z-20 border-l border-b border-foreground/15 bg-muted/60 px-1 py-2 text-center font-medium text-rose-500"
+                    className="lg:sticky lg:right-0 z-20 border-l border-b border-foreground/15 bg-muted/60 px-1 py-2 text-center font-medium text-rose-500"
                   >
                     Absent
                   </th>
@@ -790,7 +875,7 @@ export function AttendancePage() {
                     tl?.segments ?? [{ fromDay: 1, toDay: days, siteId: emp.current_site_id }];
                   const movedLabel = segs
                     .filter((sg) => (sg.siteId ?? null) !== homeKey)
-                    .map((sg) => `${siteNameOf(sg.siteId)} (${formatDatePretty(ymd(year, month, sg.fromDay))})`)
+                    .map((sg) => `${siteNameOf(sg.siteId)} · ${MONTH_NAMES[month - 1]} ${sg.fromDay}–${sg.toDay}`)
                     .join(' → ');
                   return (
                     <motion.tr
@@ -830,8 +915,8 @@ export function AttendancePage() {
                           </div>
                         </div>
                       </td>
-                      {/* trade — its own dedicated column */}
-                      <td className="sticky left-[150px] z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
+                      {/* trade — its own dedicated column (pins left from lg up) */}
+                      <td className="lg:sticky lg:left-[150px] z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
                         <span
                           className={cn('block truncate text-[11px] font-medium text-foreground/80', moved && 'opacity-60')}
                           title={emp.position ?? undefined}
@@ -872,8 +957,8 @@ export function AttendancePage() {
                           </td>
                         );
                       })}
-                      {/* Total hours */}
-                      <td className="sticky right-[48px] z-10 border-x border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
+                      {/* Total hours (pins right from lg up) */}
+                      <td className="lg:sticky lg:right-[48px] z-10 border-x border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
                         <span className={cn(
                           'inline-flex min-w-9 justify-center rounded-md bg-emerald-500/10 px-1 py-0.5 text-[11px] font-bold tabular-nums text-emerald-500',
                           moved && 'opacity-60',
@@ -881,8 +966,8 @@ export function AttendancePage() {
                           {totals.hours}
                         </span>
                       </td>
-                      {/* Absences */}
-                      <td className="sticky right-0 z-10 border-l border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
+                      {/* Absences (pins right from lg up) */}
+                      <td className="lg:sticky lg:right-0 z-10 border-l border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
                         <span
                           className={cn(
                             'inline-flex min-w-7 justify-center rounded-md px-1 py-0.5 text-[11px] font-bold tabular-nums',
@@ -902,7 +987,7 @@ export function AttendancePage() {
           <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
             {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every past cell is editable (hours e.g. 8, 10.5 or <span className="font-semibold text-rose-500">A</span>); future dates stay blank & locked
             {movedCount > 0 && (
-              <> · <span className="font-medium text-brand">{movedCount} moved mid-month → bottom row, faded, new site shown</span></>
+              <> · <span className="font-medium text-brand">{movedCount} moved mid-month → bottom row, faded — their row also appears under the site they moved to</span></>
             )}
           </p>
         </div>
@@ -919,7 +1004,8 @@ export function AttendancePage() {
           <p className="mt-1 text-sm text-muted-foreground">
             Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent.
             Bulk-fill a whole day in one go via <span className="font-semibold text-foreground">Bulk Day</span> (defaults to 10h).
-            Employees moved mid-month stay under their original site — bottom of the crew, faded, with the new site shown.
+            Employees moved mid-month appear under both sites — bottom of the crew, faded, moved days merged — so they stay markable at each site
+            (a day already marked before the move keeps its original site).
           </p>
         </motion.div>
         <div className="flex flex-wrap items-center gap-2">

@@ -12,7 +12,7 @@ import {
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 import { dataApi } from '@/lib/data';
 import { initials, fmtTimeAgo } from '@/lib/format';
@@ -322,6 +322,12 @@ export function MobileSidebarTrigger() {
         </Button>
       </SheetTrigger>
       <SheetContent side="left" className="w-72 border-border/60 bg-sidebar p-0">
+        {/* accessible labels for screen readers (Radix Dialog/Sheet requires a
+            Title — hidden visually, the drawer itself shows the app logo) */}
+        <SheetHeader className="sr-only">
+          <SheetTitle>Navigation menu</SheetTitle>
+          <SheetDescription>PULSE Workforce OS app navigation</SheetDescription>
+        </SheetHeader>
         <SidebarContent user={user} collapsed={false} onNavigate={() => setOpen(false)} />
       </SheetContent>
     </Sheet>

@@ -8,6 +8,7 @@
 import { supabase } from '@/lib/supabase/client';
 import {
   type Attendance,
+  type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
   type CancellationRequestVM,
@@ -368,6 +369,18 @@ export const prodApi = {
   async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const { error } = await sb().rpc('mark_attendance', {
       p_employee_id: employeeId, p_date: date, p_value: value,
+    });
+    assertOk(error);
+  },
+
+  async bulkMarkAttendance(entries: BulkAttendanceEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const { error } = await sb().rpc('bulk_mark_attendance', {
+      p_entries: entries.map((e) => ({
+        employee_id: e.employee_id,
+        date: e.date,
+        value: e.value,
+      })),
     });
     assertOk(error);
   },

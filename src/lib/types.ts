@@ -310,6 +310,14 @@ export interface MonthlySummaryRow {
   count: number;
 }
 
+/** One row of a bulk day-entry batch (same value semantics as markAttendance) */
+export interface BulkAttendanceEntry {
+  employee_id: string;
+  date: string; // YYYY-MM-DD
+  /** 'A' (absent) | numeric hours text ('10', '8.5') | '' / null (clear) */
+  value: string | null;
+}
+
 // ============================================================================
 // Constants used across the app
 // ============================================================================

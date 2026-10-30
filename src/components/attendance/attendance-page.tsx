@@ -8,6 +8,9 @@
 //   admins only) lists employees without a site.
 // • Every cell is an always-editable input: type custom hours (e.g. 8, 10.5)
 //   or "A" for absent, or clear it to unmark the day.
+// • BULK DAY ENTRY: fill an entire day for a whole site crew in one action —
+//   hours DEFAULT TO 10 but every value is editable before the save, and the
+//   sheet cells stay editable any time afterwards.
 // • Each row shows the employee's TRADE (position) next to their ID.
 // • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
 // • Normal admins only see — and can only mark — the sites assigned to them
@@ -17,15 +20,18 @@
 
 import { motion } from 'framer-motion';
 import {
-  Building2, CalendarCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
-  Tent, UserX,
+  Building2, CalendarCheck, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
+  Tent, UserX, Zap,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
 import { EmptyState, SectionTitle, SkeletonRows } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -33,7 +39,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { Attendance, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { Attendance, BulkAttendanceEntry, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -100,6 +106,15 @@ export function AttendancePage() {
 
   // calendar view state
   const [calendarEmployeeId, setCalendarEmployeeId] = useState<string | null>(null);
+
+  // bulk day entry state ("Bulk Day" dialog)
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkDate, setBulkDate] = useState<string>(todayYMD());
+  const [bulkSite, setBulkSite] = useState<string>('all'); // site id | 'all' | 'idle'
+  const [bulkHours, setBulkHours] = useState('10'); // default hours for unmarked rows
+  const [bulkValues, setBulkValues] = useState<Record<string, string>>({}); // empId → raw cell text
+  const [bulkInclude, setBulkInclude] = useState<Record<string, boolean>>({}); // empId → checked
+  const [bulkSaving, setBulkSaving] = useState(false);
 
   const [year, month] = useMemo(() => {
     const [y, m] = monthKey.split('-').map(Number);
@@ -295,6 +310,152 @@ export function AttendancePage() {
     setMonthKey(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
   };
 
+  // ===========================================================================
+  // BULK DAY ENTRY — mark a whole day for an entire crew at once.
+  // Unmarked employees are prefilled with the default hours (10), every value
+  // is editable before saving, and the sheet cells remain editable any time.
+  // ===========================================================================
+  const defaultHoursText = (): string => {
+    const p = parseCell(bulkHours);
+    return p.kind === 'hours' ? String(p.hours) : '10';
+  };
+
+  // crew in the current bulk scope (respects admin site permissions)
+  const bulkCrew = useMemo(() => {
+    let arr = scoped;
+    if (bulkSite === 'idle') arr = scoped.filter((e) => !e.current_site_id);
+    else if (bulkSite !== 'all') arr = scoped.filter((e) => e.current_site_id === bulkSite);
+    return [...arr].sort((a, b) => a.full_name.localeCompare(b.full_name));
+  }, [scoped, bulkSite]);
+
+  // prefill whenever the dialog opens, the date changes or fresh records arrive
+  useEffect(() => {
+    if (!bulkOpen) return;
+    const def = defaultHoursText();
+    const vals: Record<string, string> = {};
+    const inc: Record<string, boolean> = {};
+    scoped.forEach((e) => {
+      const existing = recordToText(recordMap.get(`${e.id}|${bulkDate}`));
+      vals[e.id] = existing !== '' ? existing : def;
+      inc[e.id] = true;
+    });
+    setBulkValues(vals);
+    setBulkInclude(inc);
+  }, [bulkOpen, bulkDate, recordMap, scoped]);
+
+  // live stats for the footer chips
+  const bulkStats = useMemo(() => {
+    let selected = 0, present = 0, absent = 0, changes = 0, invalid = 0;
+    for (const emp of bulkCrew) {
+      if (!bulkInclude[emp.id]) continue;
+      selected += 1;
+      const raw = (bulkValues[emp.id] ?? '').trim();
+      const parsed = parseCell(raw);
+      if (parsed.kind === 'invalid') invalid += 1;
+      if (parsed.kind === 'hours') present += 1;
+      if (parsed.kind === 'absent') absent += 1;
+      const existing = recordToText(recordMap.get(`${emp.id}|${bulkDate}`));
+      if (raw !== existing) changes += 1;
+    }
+    return { selected, present, absent, changes, invalid };
+  }, [bulkCrew, bulkInclude, bulkValues, recordMap, bulkDate]);
+
+  const bulkAllIncluded = bulkCrew.length > 0 && bulkCrew.every((e) => bulkInclude[e.id]);
+
+  const toggleBulkAbsent = (empId: string) => {
+    const cur = (bulkValues[empId] ?? '').trim().toLowerCase();
+    if (cur === 'a') {
+      const existing = recordToText(recordMap.get(`${empId}|${bulkDate}`));
+      setBulkValues((v) => ({ ...v, [empId]: existing !== '' ? existing : defaultHoursText() }));
+    } else {
+      setBulkValues((v) => ({ ...v, [empId]: 'A' }));
+    }
+  };
+
+  const applyBulkDefault = (all: boolean) => {
+    const def = defaultHoursText();
+    setBulkValues((prev) => {
+      const next = { ...prev };
+      for (const emp of bulkCrew) {
+        if (!bulkInclude[emp.id]) continue; // skipped rows are never touched
+        const existing = recordToText(recordMap.get(`${emp.id}|${bulkDate}`));
+        if (all || existing === '') next[emp.id] = def;
+      }
+      return next;
+    });
+  };
+
+  const onBulkDateChange = (d: string) => {
+    setBulkDate(d);
+    const mk = d.slice(0, 7);
+    if (mk && mk !== monthKey) setMonthKey(mk); // keep the sheet on the day being bulk-filled
+  };
+
+  const openBulkDialog = (siteId: string = 'all') => {
+    setBulkHours('10');
+    setBulkDate(todayYMD());
+    setBulkSite(siteId);
+    setBulkOpen(true);
+  };
+
+  const saveBulkDay = async () => {
+    for (const emp of bulkCrew) {
+      if (!bulkInclude[emp.id]) continue;
+      const raw = (bulkValues[emp.id] ?? '').trim();
+      if (parseCell(raw).kind === 'invalid') {
+        toast.error(`Invalid value for ${emp.full_name}`, { description: 'Enter hours (0–24, e.g. 8 or 10.5) or A for absent.' });
+        return;
+      }
+    }
+    const entries: BulkAttendanceEntry[] = [];
+    for (const emp of bulkCrew) {
+      if (!bulkInclude[emp.id]) continue;
+      const raw = (bulkValues[emp.id] ?? '').trim();
+      const existing = recordToText(recordMap.get(`${emp.id}|${bulkDate}`));
+      if (raw === existing) continue; // untouched → skip
+      entries.push({ employee_id: emp.id, date: bulkDate, value: raw });
+    }
+    if (entries.length === 0) {
+      toast.info('Nothing to save', { description: 'No changes for this day.' });
+      setBulkOpen(false);
+      return;
+    }
+    setBulkSaving(true);
+    try {
+      await dataApi.bulkMarkAttendance(entries);
+      // optimistic local sync (realtime refetch reconciles)
+      setRecords((prev) => {
+        const list = prev ? [...prev] : [];
+        for (const entry of entries) {
+          const parsed = parseCell(entry.value ?? '');
+          const idx = list.findIndex((r) => r.employee_id === entry.employee_id && r.date === entry.date);
+          if (parsed.kind === 'clear') {
+            if (idx >= 0) list.splice(idx, 1);
+            continue;
+          }
+          const rec: Attendance = idx >= 0
+            ? { ...list[idx], status: parsed.kind === 'absent' ? 'absent' : 'present', hours: parsed.hours }
+            : {
+                id: `local-${entry.employee_id}-${entry.date}`, employee_id: entry.employee_id,
+                date: entry.date, status: parsed.kind === 'absent' ? 'absent' : 'present',
+                hours: parsed.hours, is_hidden: false, created_at: new Date().toISOString(),
+              };
+          if (idx >= 0) list[idx] = rec; else list.push(rec);
+        }
+        return list;
+      });
+      const absents = entries.filter((e) => (e.value ?? '').trim().toLowerCase() === 'a').length;
+      toast.success(`Day saved — ${entries.length} employee${entries.length !== 1 ? 's' : ''} updated`, {
+        description: absents > 0 ? `${absents} marked absent · every cell stays editable in the sheet.` : 'Every cell stays editable in the sheet.',
+      });
+      setBulkOpen(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save bulk day');
+    } finally {
+      setBulkSaving(false);
+    }
+  };
+
   const loading = !employees || !records || !sites || (!isSuperAdmin && assignedSiteIds === null);
   const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
 
@@ -401,6 +562,16 @@ export function AttendancePage() {
                 Site total: {Math.round(totalHours * 100) / 100}h
               </span>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 px-2.5 text-[11px]"
+              onClick={() => openBulkDialog(section.isIdle ? 'idle' : section.key)}
+              title={`Bulk-fill a day for ${section.title} — hours default to 10`}
+            >
+              <Zap size={12} />
+              Fill day
+            </Button>
           </div>
         </div>
 
@@ -516,7 +687,8 @@ export function AttendancePage() {
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ease: EASE }}>
           <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Attendance</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent
+            Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent.
+            Bulk-fill a whole day in one go via <span className="font-semibold text-foreground">Bulk Day</span> (defaults to 10h).
           </p>
         </motion.div>
         <div className="flex flex-wrap items-center gap-2">
@@ -595,6 +767,14 @@ export function AttendancePage() {
                 )}
               </SelectContent>
             </Select>
+            <Button
+              className="h-10 gap-1.5"
+              disabled={loading}
+              onClick={() => openBulkDialog('all')}
+            >
+              <Zap size={15} />
+              Bulk Day
+            </Button>
           </>
         )}
         {view === 'calendar' && (
@@ -766,6 +946,216 @@ export function AttendancePage() {
           </motion.div>
         )
       )}
+      {/* ============================ BULK DAY ENTRY DIALOG ============================ */}
+      <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <span className="flex size-7 items-center justify-center rounded-lg bg-brand/10 text-brand">
+                <Zap size={15} />
+              </span>
+              Bulk Day Entry
+            </DialogTitle>
+            <DialogDescription>
+              Fill an entire day for a whole crew in one save — unmarked employees default to{' '}
+              <span className="font-semibold text-foreground">10 hours</span>, and every value stays editable
+              here and in the sheet at any time.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* controls: date · site scope · default hours */}
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="bulk-date">Date *</Label>
+              <Input
+                id="bulk-date"
+                type="date"
+                className="h-10 bg-card"
+                value={bulkDate}
+                max={today}
+                min="2020-01-01"
+                onChange={(e) => onBulkDateChange(e.target.value)}
+              />
+              <p className="text-[10px] text-muted-foreground">Future dates are locked</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Site scope</Label>
+              <Select value={bulkSite} onValueChange={setBulkSite}>
+                <SelectTrigger className="h-10 w-full bg-card"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All my sites</SelectItem>
+                  {selectableSites.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                  ))}
+                  {isSuperAdmin && <SelectItem value="idle">Unassigned / Idle</SelectItem>}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">
+                {isSuperAdmin ? 'All sites + idle crew' : 'Only your assigned sites'}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="bulk-hours">Default hours</Label>
+              <Input
+                id="bulk-hours"
+                inputMode="decimal"
+                className="h-10 bg-card"
+                placeholder="10"
+                value={bulkHours}
+                onChange={(e) => setBulkHours(e.target.value)}
+              />
+              <p className="text-[10px] text-muted-foreground">Applied to unmarked employees</p>
+            </div>
+          </div>
+
+          {/* list header: select-all + default re-apply */}
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2">
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+              <Checkbox
+                checked={bulkAllIncluded}
+                onCheckedChange={(c) =>
+                  setBulkInclude(Object.fromEntries(bulkCrew.map((e) => [e.id, c === true])))
+                }
+                aria-label="Select all employees"
+              />
+              {bulkStats.selected}/{bulkCrew.length} selected
+            </label>
+            <div className="ml-auto flex items-center gap-1.5">
+              <Button
+                variant="outline" size="sm" className="h-7 px-2.5 text-[11px]"
+                disabled={bulkCrew.length === 0}
+                onClick={() => applyBulkDefault(false)}
+              >
+                {defaultHoursText()}h → unmarked
+              </Button>
+              <Button
+                variant="outline" size="sm" className="h-7 px-2.5 text-[11px]"
+                disabled={bulkCrew.length === 0}
+                onClick={() => applyBulkDefault(true)}
+              >
+                {defaultHoursText()}h → all
+              </Button>
+            </div>
+          </div>
+
+          {/* employee rows */}
+          <div className="max-h-[44vh] space-y-1 overflow-y-auto rounded-xl border bg-card p-2">
+            {bulkCrew.length === 0 ? (
+              <p className="px-3 py-8 text-center text-xs text-muted-foreground">
+                No employees in this scope — assign employees to a site first.
+              </p>
+            ) : (
+              bulkCrew.map((emp) => {
+                const raw = bulkValues[emp.id] ?? '';
+                const parsed = parseCell(raw);
+                const invalid = parsed.kind === 'invalid';
+                const isA = parsed.kind === 'absent';
+                const existing = recordToText(recordMap.get(`${emp.id}|${bulkDate}`));
+                const changed = raw.trim() !== existing;
+                const included = bulkInclude[emp.id] ?? false;
+                return (
+                  <div
+                    key={emp.id}
+                    className={cn(
+                      'flex items-center gap-2.5 rounded-lg border px-2.5 py-2 transition-all',
+                      included ? 'bg-card' : 'opacity-50',
+                      invalid && 'border-rose-500/40',
+                    )}
+                  >
+                    <Checkbox
+                      checked={included}
+                      onCheckedChange={(c) => setBulkInclude((v) => ({ ...v, [emp.id]: c === true }))}
+                      aria-label={`Include ${emp.full_name}`}
+                    />
+                    <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+                      {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[13px] font-medium leading-tight">{emp.full_name}</p>
+                      <p className="truncate font-mono text-[10px] leading-tight text-muted-foreground">
+                        {emp.employee_code} · {emp.position ?? 'No trade'}
+                      </p>
+                    </div>
+                    <span className="hidden shrink-0 rounded-full border bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground sm:inline-flex">
+                      {emp.site_name ?? 'Idle'}
+                    </span>
+                    <span className="w-[64px] shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
+                      {existing === '' ? 'unmarked' : `was ${existing}`}
+                    </span>
+                    <Input
+                      value={raw}
+                      onChange={(e) => setBulkValues((v) => ({ ...v, [emp.id]: e.target.value }))}
+                      aria-label={`Hours for ${emp.full_name} on ${bulkDate}`}
+                      className={cn(
+                        'h-9 w-16 shrink-0 text-center font-semibold tabular-nums',
+                        isA && 'bg-rose-500/10 text-rose-500',
+                        invalid && 'border-rose-500/60 bg-rose-500/10 text-rose-500',
+                      )}
+                    />
+                    <Button
+                      variant="outline" size="icon"
+                      className={cn(
+                        'size-9 shrink-0 text-xs font-bold hover:bg-rose-500/10 hover:text-rose-500',
+                        isA && 'border-rose-500/50 bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 hover:text-rose-500',
+                      )}
+                      onClick={() => toggleBulkAbsent(emp.id)}
+                      aria-label={`Toggle absent for ${emp.full_name}`}
+                      title="Toggle absent"
+                    >
+                      A
+                    </Button>
+                    {changed && (
+                      <span className="size-1.5 shrink-0 rounded-full bg-amber-400" title="Changed from saved value" />
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* footer: live summary + save */}
+          <DialogFooter className="flex-col gap-3 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="rounded-full border bg-muted px-2 py-0.5 text-muted-foreground">
+                {bulkStats.selected} selected
+              </span>
+              <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 font-semibold tabular-nums text-emerald-500">
+                {bulkStats.present} present
+              </span>
+              <span className={cn(
+                'rounded-full border px-2 py-0.5 font-semibold tabular-nums',
+                bulkStats.absent > 0
+                  ? 'border-rose-500/25 bg-rose-500/10 text-rose-500'
+                  : 'bg-muted text-muted-foreground',
+              )}>
+                {bulkStats.absent} absent
+              </span>
+              <span className={cn(
+                'rounded-full border px-2 py-0.5 font-semibold tabular-nums',
+                bulkStats.changes > 0
+                  ? 'border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                  : 'bg-muted text-muted-foreground',
+              )}>
+                {bulkStats.changes} change{bulkStats.changes !== 1 ? 's' : ''}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => setBulkOpen(false)} disabled={bulkSaving}>
+                Cancel
+              </Button>
+              <Button
+                onClick={saveBulkDay}
+                disabled={bulkSaving || bulkStats.invalid > 0 || bulkStats.changes === 0}
+              >
+                {bulkSaving ? <Loader2 size={15} className="animate-spin" /> : <CheckCheck size={15} />}
+                {bulkStats.invalid > 0
+                  ? `Fix ${bulkStats.invalid} invalid value${bulkStats.invalid !== 1 ? 's' : ''}`
+                  : `Save Day${bulkStats.changes > 0 ? ` (${bulkStats.changes})` : ''}`}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

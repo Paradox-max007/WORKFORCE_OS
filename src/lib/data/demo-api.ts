@@ -4,6 +4,7 @@
 
 import {
   type Attendance,
+  type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
   type CancellationRequestVM,
@@ -658,6 +659,14 @@ export const demoApi = {
       }
     }
     saveAndEmit(['attendance', 'employee']);
+  },
+
+  /** Bulk day entry — reuses the single-cell engine (permissions, rating,
+   *  auto-warnings) so behaviour is identical to marking cells one by one. */
+  async bulkMarkAttendance(entries: BulkAttendanceEntry[]): Promise<void> {
+    for (const entry of entries) {
+      await this.markAttendance(entry.employee_id, entry.date, entry.value);
+    }
   },
 
   async getMonthlyAttendanceSummary(months = 6): Promise<MonthlySummaryRow[]> {

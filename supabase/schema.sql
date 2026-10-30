@@ -1025,6 +1025,51 @@ begin
   return result;
 end; $$;
 
+-- Bulk day entry: apply the same Excel-style marking to many employees in ONE
+-- round-trip (used by the "Bulk Day Entry" dialog). Each entry reuses the full
+-- mark_attendance engine (permissions, rating, auto-warnings).
+--   p_entries: [{"employee_id": uuid, "date": "YYYY-MM-DD", "value": "10" | "A" | ""}]
+-- Returns the number of applied entries.
+create or replace function public.bulk_mark_attendance(p_entries jsonb)
+returns integer language plpgsql
+security definer set search_path = public
+as $$
+declare
+  entry jsonb;
+  v_emp uuid;
+  v_date date;
+  v_value text;
+  applied integer := 0;
+begin
+  if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
+
+  if p_entries is null or jsonb_typeof(p_entries) <> 'array' then
+    raise exception 'p_entries must be a JSON array';
+  end if;
+
+  for entry in select * from jsonb_array_elements(p_entries) loop
+    v_emp := null; v_date := null; v_value := null;
+    begin
+      v_emp := (entry->>'employee_id')::uuid;
+      v_date := (entry->>'date')::date;
+      v_value := entry->>'value';
+    exception when others then
+      raise exception 'Invalid bulk entry: %', entry::text;
+    end;
+
+    if v_emp is null or v_date is null then
+      raise exception 'Invalid bulk entry (missing employee_id or date): %', entry::text;
+    end if;
+
+    perform public.mark_attendance(v_emp, v_date, v_value);
+    applied := applied + 1;
+  end loop;
+
+  return applied;
+end; $$;
+
 -- Full rating recompute from a month's attendance:
 -- (worked days / working days excluding Fridays) * 5
 create or replace function public.recalc_employee_rating(p_employee_id uuid, p_month text)

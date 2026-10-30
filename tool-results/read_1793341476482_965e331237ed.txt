@@ -1,0 +1,772 @@
+     1→'use client';
+     2→
+     3→// ============================================================================
+     4→// PULSE Workforce OS — Attendance (Excel-style marking sheet, displayed SITEWISE)
+     5→// ----------------------------------------------------------------------------
+     6→// • The sheet is grouped per WORK SITE (attendance is marked sitewise) and each
+     7→//   section's crew is ALPHABETICAL. An "Unassigned / Idle" section (super
+     8→//   admins only) lists employees without a site.
+     9→// • Every cell is an always-editable input: type custom hours (e.g. 8, 10.5)
+    10→//   or "A" for absent, or clear it to unmark the day.
+    11→// • Each row shows the employee's TRADE (position) next to their ID.
+    12→// • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
+    13→// • Normal admins only see — and can only mark — the sites assigned to them
+    14→//   by a super admin (Admin Management → Site Access).
+    15→// • Calendar view: per-employee month calendar with the same editing model.
+    16→// ============================================================================
+    17→
+    18→import { motion } from 'framer-motion';
+    19→import {
+    20→  Building2, CalendarCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
+    21→  Tent, UserX,
+    22→} from 'lucide-react';
+    23→import { Fragment, useEffect, useMemo, useState } from 'react';
+    24→import { toast } from 'sonner';
+    25→import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+    26→import { EmptyState, SectionTitle, SkeletonRows } from '@/components/shared/primitives';
+    27→import { Button } from '@/components/ui/button';
+    28→import { Input } from '@/components/ui/input';
+    29→import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+    30→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    31→import { Skeleton } from '@/components/ui/skeleton';
+    32→import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    33→import { dataApi } from '@/lib/data';
+    34→import { initials } from '@/lib/format';
+    35→import { cn } from '@/lib/utils';
+    36→import type { Attendance, EmployeeVM, SiteWithCount } from '@/lib/types';
+    37→import { useAuthStore } from '@/store/auth-store';
+    38→import { useRealtimeVersion } from '@/store/realtime';
+    39→
+    40→const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+    41→  'July', 'August', 'September', 'October', 'November', 'December'];
+    42→const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    43→const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+    44→
+    45→const pad = (n: number): string => String(n).padStart(2, '0');
+    46→const ymd = (y: number, m: number, d: number): string => `${y}-${pad(m)}-${pad(d)}`;
+    47→const todayYMD = (): string => {
+    48→  const t = new Date();
+    49→  return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
+    50→};
+    51→const isSunday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 0;
+    52→const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
+    53→
+    54→/** Parse a cell value → { kind, hours }. kind: 'absent' | 'hours' | 'clear' | 'invalid' */
+    55→function parseCell(raw: string): { kind: 'absent' | 'hours' | 'clear' | 'invalid'; hours: number | null } {
+    56→  const v = raw.trim();
+    57→  if (v === '') return { kind: 'clear', hours: null };
+    58→  if (v.toLowerCase() === 'a' || v.toLowerCase() === 'absent') return { kind: 'absent', hours: null };
+    59→  const n = Number(v);
+    60→  if (Number.isNaN(n) || !Number.isFinite(n) || n < 0 || n > 24) return { kind: 'invalid', hours: null };
+    61→  return { kind: 'hours', hours: Math.round(n * 100) / 100 };
+    62→}
+    63→
+    64→// ---------------------------------------------------------------------------
+    65→// One site section type (header band + that site's crew table)
+    66→// ---------------------------------------------------------------------------
+    67→interface SiteSection {
+    68→  key: string;
+    69→  title: string;
+    70→  client: string | null;
+    71→  emps: EmployeeVM[];
+    72→  isIdle?: boolean;
+    73→}
+    74→
+    75→// ---------------------------------------------------------------------------
+    76→// Page
+    77→// ---------------------------------------------------------------------------
+    78→export function AttendancePage() {
+    79→  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site']);
+    80→  const user = useAuthStore((s) => s.user);
+    81→  const isSuperAdmin = user?.role === 'super_admin';
+    82→
+    83→  const now = new Date();
+    84→  const [monthKey, setMonthKey] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
+    85→  const [view, setView] = useState<'sheet' | 'calendar'>('sheet');
+    86→
+    87→  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+    88→  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+    89→  const [records, setRecords] = useState<Attendance[] | null>(null);
+    90→  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(isSuperAdmin ? null : new Set());
+    91→
+    92→  // filters
+    93→  const [search, setSearch] = useState('');
+    94→  const [debouncedSearch, setDebouncedSearch] = useState('');
+    95→  const [siteFilter, setSiteFilter] = useState<string>('all');
+    96→
+    97→  // editing state: cellKey "empId|YYYY-MM-DD" → raw input text
+    98→  const [edits, setEdits] = useState<Record<string, string>>({});
+    99→  const [savingKeys, setSavingKeys] = useState<Set<string>>(new Set());
+   100→
+   101→  // calendar view state
+   102→  const [calendarEmployeeId, setCalendarEmployeeId] = useState<string | null>(null);
+   103→
+   104→  const [year, month] = useMemo(() => {
+   105→    const [y, m] = monthKey.split('-').map(Number);
+   106→    return [y, m];
+   107→  }, [monthKey]);
+   108→
+   109→  const today = todayYMD();
+   110→  const days = daysInMonth(year, month);
+   111→
+   112→  // ---- data loading ----------------------------------------------------------
+   113→  useEffect(() => {
+   114→    let cancelled = false;
+   115→    (async () => {
+   116→      try {
+   117→        const [emps, sts] = await Promise.all([dataApi.listEmployees(), dataApi.listSites()]);
+   118→        if (!cancelled) { setEmployees(emps); setSites(sts); }
+   119→      } catch (err) {
+   120→        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
+   121→      }
+   122→    })();
+   123→    return () => { cancelled = true; };
+   124→  }, [realtimeVersion]);
+   125→
+   126→  // admins: which sites they may mark (null = unrestricted super admin)
+   127→  useEffect(() => {
+   128→    if (isSuperAdmin) { setAssignedSiteIds(null); return; }
+   129→    if (!user) return;
+   130→    let cancelled = false;
+   131→    dataApi.getSiteAssignments(user.id)
+   132→      .then((ids) => { if (!cancelled) setAssignedSiteIds(new Set(ids)); })
+   133→      .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
+   134→    return () => { cancelled = true; };
+   135→  }, [user, isSuperAdmin, realtimeVersion]);
+   136→
+   137→  useEffect(() => {
+   138→    let cancelled = false;
+   139→    dataApi.getMonthAttendance(monthKey)
+   140→      .then((rows) => { if (!cancelled) setRecords(rows); })
+   141→      .catch(() => { if (!cancelled) setRecords([]); });
+   142→    return () => { cancelled = true; };
+   143→  }, [monthKey, realtimeVersion]);
+   144→
+   145→  useEffect(() => {
+   146→    const t = setTimeout(() => setDebouncedSearch(search), 300);
+   147→    return () => clearTimeout(t);
+   148→  }, [search]);
+   149→
+   150→  // ---- scoped crew (admins → their assigned sites only; super admins → all) ---
+   151→  const scoped = useMemo(() => {
+   152→    const list = (employees ?? []).filter((e) => e.status !== 'deleted');
+   153→    if (assignedSiteIds === null) return list;
+   154→    return list.filter((e) => e.current_site_id !== null && assignedSiteIds.has(e.current_site_id));
+   155→  }, [employees, assignedSiteIds]);
+   156→
+   157→  // ---- sitewise sections (alphabetical inside each section) -------------------
+   158→  const sections = useMemo<SiteSection[]>(() => {
+   159→    const q = debouncedSearch.toLowerCase().trim();
+   160→    const matches = (e: EmployeeVM) =>
+   161→      !q || `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q);
+   162→    const byName = (a: EmployeeVM, b: EmployeeVM) => a.full_name.localeCompare(b.full_name);
+   163→
+   164→    const siteList = (sites ?? []).filter((s) => s.is_active);
+   165→    const result: SiteSection[] = siteList
+   166→      .filter((s) => siteFilter === 'all' || s.id === siteFilter)
+   167→      .map((s) => ({
+   168→        key: s.id,
+   169→        title: s.name,
+   170→        client: s.client_name,
+   171→        emps: scoped
+   172→          .filter((e) => e.current_site_id === s.id && matches(e))
+   173→          .sort(byName),
+   174→      }))
+   175→      .filter((sec) => sec.emps.length > 0);
+   176→
+   177→    // idle employees — super admins only (admins can never mark them)
+   178→    if (isSuperAdmin && (siteFilter === 'all' || siteFilter === 'idle')) {
+   179→      const idle = scoped
+   180→        .filter((e) => !e.current_site_id && matches(e))
+   181→        .sort(byName);
+   182→      if (idle.length > 0) {
+   183→        result.push({
+   184→          key: '__idle__',
+   185→          title: 'Unassigned / Idle — no site',
+   186→          client: null,
+   187→          emps: idle,
+   188→          isIdle: true,
+   189→        });
+   190→      }
+   191→    }
+   192→    return result;
+   193→  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin]);
+   194→
+   195→  // flat crew for the calendar view combobox
+   196→  const crew = useMemo(
+   197→    () => sections.flatMap((s) => s.emps),
+   198→    [sections],
+   199→  );
+   200→
+   201→  // sites selectable in the filter (admins: only their assigned sites)
+   202→  const selectableSites = useMemo(() => {
+   203→    const active = (sites ?? []).filter((s) => s.is_active);
+   204→    if (assignedSiteIds === null) return active;
+   205→    return active.filter((s) => assignedSiteIds.has(s.id));
+   206→  }, [sites, assignedSiteIds]);
+   207→
+   208→  // ---- record lookups ---------------------------------------------------------
+   209→  const recordMap = useMemo(() => {
+   210→    const map = new Map<string, Attendance>();
+   211→    (records ?? []).forEach((r) => map.set(`${r.employee_id}|${r.date}`, r));
+   212→    return map;
+   213→  }, [records]);
+   214→
+   215→  const recordToText = (r: Attendance | undefined): string => {
+   216→    if (!r) return '';
+   217→    if (r.status === 'absent') return 'A';
+   218→    if (r.status === 'present' && r.hours != null) return String(r.hours);
+   219→    return '';
+   220→  };
+   221→
+   222→  const cellText = (empId: string, date: string): string => {
+   223→    const key = `${empId}|${date}`;
+   224→    return edits[key] ?? recordToText(recordMap.get(key));
+   225→  };
+   226→
+   227→  // ---- commit a cell ------------------------------------------------------------
+   228→  const commitCell = async (empId: string, date: string) => {
+   229→    const key = `${empId}|${date}`;
+   230→    const raw = edits[key];
+   231→    if (raw === undefined) return; // untouched
+   232→
+   233→    const current = recordToText(recordMap.get(key));
+   234→    if (raw === current) { // no change → drop local edit
+   235→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   236→      return;
+   237→    }
+   238→
+   239→    const parsed = parseCell(raw);
+   240→    if (parsed.kind === 'invalid') {
+   241→      toast.error('Invalid value', { description: 'Enter hours (0–24, e.g. 8 or 10.5) or A for absent.' });
+   242→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   243→      return;
+   244→    }
+   245→
+   246→    setSavingKeys((prev) => new Set(prev).add(key));
+   247→    try {
+   248→      await dataApi.markAttendance(empId, date, parsed.kind === 'clear' ? '' : raw.trim());
+   249→      // optimistic local sync (realtime refetch will reconcile)
+   250→      setRecords((prev) => {
+   251→        const list = prev ?? [];
+   252→        const rest = list.filter((r) => !(r.employee_id === empId && r.date === date));
+   253→        if (parsed.kind === 'clear') return rest;
+   254→        const base = list.find((r) => r.employee_id === empId && r.date === date);
+   255→        return [...rest, {
+   256→          id: base?.id ?? `local-${key}`,
+   257→          employee_id: empId,
+   258→          date,
+   259→          status: parsed.kind === 'absent' ? 'absent' : 'present',
+   260→          hours: parsed.hours,
+   261→          is_hidden: false,
+   262→          created_at: base?.created_at ?? new Date().toISOString(),
+   263→        }];
+   264→      });
+   265→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   266→    } catch (err) {
+   267→      toast.error(err instanceof Error ? err.message : 'Failed to save');
+   268→      setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
+   269→    } finally {
+   270→      setSavingKeys((prev) => { const n = new Set(prev); n.delete(key); return n; });
+   271→    }
+   272→  };
+   273→
+   274→  const setCell = (empId: string, date: string, value: string) => {
+   275→    const key = `${empId}|${date}`;
+   276→    setEdits((prev) => ({ ...prev, [key]: value }));
+   277→  };
+   278→
+   279→  // ---- row totals (TOTAL HOURS + ABSENCES) ---------------------------------------
+   280→  const rowTotals = (empId: string): { hours: number; absents: number } => {
+   281→    let hours = 0;
+   282→    let absents = 0;
+   283→    for (let d = 1; d <= days; d++) {
+   284→      const date = ymd(year, month, d);
+   285→      const parsed = parseCell(cellText(empId, date));
+   286→      if (parsed.kind === 'hours') hours += parsed.hours ?? 0;
+   287→      if (parsed.kind === 'absent') absents += 1;
+   288→    }
+   289→    return { hours: Math.round(hours * 100) / 100, absents };
+   290→  };
+   291→
+   292→  // ---- month navigation ----------------------------------------------------------
+   293→  const shiftMonth = (delta: number) => {
+   294→    const d = new Date(year, month - 1 + delta, 1);
+   295→    setMonthKey(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
+   296→  };
+   297→
+   298→  const loading = !employees || !records || !sites || (!isSuperAdmin && assignedSiteIds === null);
+   299→  const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
+   300→
+   301→  const dayColumns = useMemo(() => {
+   302→    // always show the FULL month (1 … last day): un-entered days stay blank,
+   303→    // future days are rendered but locked against editing.
+   304→    const cols: number[] = [];
+   305→    for (let d = 1; d <= days; d++) cols.push(d);
+   306→    return cols;
+   307→  }, [days]);
+   308→
+   309→  // ---- one day cell (plain render fn — keeps input focus stable) ------------
+   310→  const renderDayCell = (emp: EmployeeVM, date: string) => {
+   311→    const key = `${emp.id}|${date}`;
+   312→    const value = cellText(emp.id, date);
+   313→    const busy = savingKeys.has(key);
+   314→    const sun = isSunday(date);
+   315→    const future = date > today;
+   316→    const isA = value.trim().toLowerCase() === 'a';
+   317→    return (
+   318→      <td
+   319→        key={key}
+   320→        className={cn(
+   321→          'border-x border-b border-foreground/15 p-0 text-center',
+   322→          sun && 'bg-rose-500/[0.05]',
+   323→          !sun && !future && date > new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10) && 'bg-emerald-500/[0.04]',
+   324→          future && 'bg-muted/40',
+   325→        )}
+   326→      >
+   327→        {future ? (
+   328→          // future dates are visible but locked — nothing to mark yet
+   329→          <div
+   330→            className="flex h-9 w-10 cursor-not-allowed items-center justify-center"
+   331→            title={`${date} — future date, not editable yet`}
+   332→            aria-label={`${emp.full_name} — ${date} — future date, locked`}
+   333→          />
+   334→        ) : (
+   335→          <div className="relative">
+   336→            <input
+   337→              value={value}
+   338→              disabled={busy}
+   339→              onChange={(e) => setCell(emp.id, date, e.target.value)}
+   340→              onBlur={() => commitCell(emp.id, date)}
+   341→              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+   342→              aria-label={`${emp.full_name} — ${date}`}
+   343→              className={cn(
+   344→                'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
+   345→                'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
+   346→                isA && 'bg-rose-500/10 font-bold text-rose-500',
+   347→                value !== '' && !isA && 'text-foreground',
+   348→                busy && 'opacity-50',
+   349→              )}
+   350→            />
+   351→            {busy && (
+   352→              <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+   353→                <Loader2 size={10} className="animate-spin text-brand" />
+   354→              </span>
+   355→            )}
+   356→          </div>
+   357→        )}
+   358→      </td>
+   359→    );
+   360→  };
+   361→
+   362→  // ---- a full site section (table with that site's crew) ---------------------------
+   363→  const renderSheetSection = (section: SiteSection, index: number) => {
+   364→    const totalHours = section.emps.reduce((sum, emp) => sum + rowTotals(emp.id).hours, 0);
+   365→    return (
+   366→      <motion.section
+   367→        initial={{ opacity: 0, y: 14 }}
+   368→        animate={{ opacity: 1, y: 0 }}
+   369→        transition={{ duration: 0.35, delay: Math.min(index * 0.05, 0.3), ease: EASE }}
+   370→        className="space-y-2"
+   371→      >
+   372→        {/* section band */}
+   373→        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border bg-card px-4 py-2.5">
+   374→          <span
+   375→            className={cn(
+   376→              'flex size-8 shrink-0 items-center justify-center rounded-lg',
+   377→              section.isIdle ? 'bg-amber-500/10 text-amber-500' : 'bg-brand/10 text-brand',
+   378→            )}
+   379→          >
+   380→            {section.isIdle ? <UserX size={16} /> : <Building2 size={16} />}
+   381→          </span>
+   382→          <div className="min-w-0">
+   383→            <h3 className="truncate text-sm font-semibold">{section.title}</h3>
+   384→            {section.client && (
+   385→              <p className="truncate text-[11px] text-muted-foreground">Client: {section.client}</p>
+   386→            )}
+   387→          </div>
+   388→          <div className="ml-auto flex items-center gap-2">
+   389→            <span
+   390→              className={cn(
+   391→                'rounded-full px-2.5 py-0.5 text-[11px] font-semibold tabular-nums',
+   392→                section.isIdle
+   393→                  ? 'border border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+   394→                  : 'border border-brand/25 bg-brand/10 text-brand',
+   395→              )}
+   396→            >
+   397→              {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''}
+   398→            </span>
+   399→            {section.emps.length > 0 && (
+   400→              <span className="hidden rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500 sm:inline-flex">
+   401→                Site total: {Math.round(totalHours * 100) / 100}h
+   402→              </span>
+   403→            )}
+   404→          </div>
+   405→        </div>
+   406→
+   407→        {/* crew table */}
+   408→        <div className="card-glow overflow-hidden rounded-xl border bg-card">
+   409→          <div className="overflow-x-auto">
+   410→            <table className="w-full min-w-max border-collapse text-sm">
+   411→              <thead>
+   412→                <tr className="border-b bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+   413→                  <th className="sticky left-0 z-20 w-[240px] min-w-[240px] border-x border-foreground/15 bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
+   414→                  <th className="sticky left-[240px] z-20 w-[120px] min-w-[120px] border-x border-b border-foreground/15 bg-muted/60 px-3 py-2.5 font-medium">Trade</th>
+   415→                  {dayColumns.map((d) => {
+   416→                    const date = ymd(year, month, d);
+   417→                    const sun = isSunday(date);
+   418→                    const future = date > today;
+   419→                    return (
+   420→                      <th
+   421→                        key={d}
+   422→                        className={cn(
+   423→                          'w-10 min-w-10 border-x border-b border-foreground/15 px-1 py-2.5 text-center font-medium',
+   424→                          sun && 'bg-rose-500/[0.07] text-rose-500',
+   425→                          future && 'text-muted-foreground/50',
+   426→                        )}
+   427→                        title={`${MONTH_NAMES[month - 1]} ${d}${sun ? ' (Sunday)' : ''}${future ? ' — future (locked)' : ''}`}
+   428→                      >
+   429→                        <div>{d}</div>
+   430→                        <div className={cn('text-[9px] font-normal normal-case opacity-70', sun && 'text-rose-500')}>
+   431→                          {WEEKDAYS[new Date(`${date}T00:00:00`).getDay()]}
+   432→                        </div>
+   433→                      </th>
+   434→                    );
+   435→                  })}
+   436→                  <th className="sticky right-[92px] z-20 w-[92px] border-x border-b border-foreground/15 bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
+   437→                  <th className="sticky right-0 z-20 w-[92px] border-l border-b border-foreground/15 bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
+   438→                </tr>
+   439→              </thead>
+   440→              <tbody>
+   441→                {section.emps.map((emp, i) => {
+   442→                  const totals = rowTotals(emp.id);
+   443→                  return (
+   444→                    <motion.tr
+   445→                      key={emp.id}
+   446→                      initial={{ opacity: 0, y: 6 }}
+   447→                      animate={{ opacity: 1, y: 0 }}
+   448→                      transition={{ delay: Math.min(i * 0.02, 0.25), ease: EASE }}
+   449→                      className="transition-colors"
+   450→                    >
+   451→                      {/* employee — stacked: name / employee ID / camp */}
+   452→                      <td className="sticky left-0 z-10 border-x border-b border-foreground/15 bg-card px-4 py-2">
+   453→                        <div className="flex items-center gap-2.5">
+   454→                          <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+   455→                            {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
+   456→                          </span>
+   457→                          <div className="min-w-0">
+   458→                            <p className="truncate text-[13px] font-medium leading-tight">{emp.full_name}</p>
+   459→                            <p className="truncate font-mono text-[10px] leading-tight text-muted-foreground">{emp.employee_code}</p>
+   460→                            {emp.camp_name ? (
+   461→                              <p
+   462→                                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] leading-tight text-amber-600 dark:text-amber-400"
+   463→                                title={`Camp: ${emp.camp_name}${emp.camp_block ? ' · Block ' + emp.camp_block : ''}${emp.camp_room ? ' · Room ' + emp.camp_room : ''}`}
+   464→                              >
+   465→                                <Tent size={9} className="inline" />
+   466→                                {emp.camp_name}
+   467→                              </p>
+   468→                            ) : (
+   469→                              <p className="text-[10px] leading-tight text-muted-foreground/60">No camp</p>
+   470→                            )}
+   471→                          </div>
+   472→                        </div>
+   473→                      </td>
+   474→                      {/* trade — its own dedicated column */}
+   475→                      <td className="sticky left-[240px] z-10 border-x border-b border-foreground/15 bg-card px-3 py-2">
+   476→                        <span className="truncate text-xs font-medium text-foreground/80">{emp.position ?? '—'}</span>
+   477→                      </td>
+   478→                      {dayColumns.map((d) => (
+   479→                        renderDayCell(emp, ymd(year, month, d))
+   480→                      ))}
+   481→                      {/* Total hours */}
+   482→                      <td className="sticky right-[92px] z-10 border-x border-b border-foreground/15 bg-card px-2 text-center">
+   483→                        <span className="inline-flex min-w-12 rounded-lg bg-emerald-500/10 px-1.5 py-1 text-[12px] font-bold tabular-nums text-emerald-500">
+   484→                          {totals.hours}
+   485→                        </span>
+   486→                      </td>
+   487→                      {/* Absences */}
+   488→                      <td className="sticky right-0 z-10 border-l border-b border-foreground/15 bg-card px-2 text-center">
+   489→                        <span
+   490→                          className={cn(
+   491→                            'inline-flex min-w-8 rounded-lg px-1.5 py-1 text-[12px] font-bold tabular-nums',
+   492→                            totals.absents > 0 ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground',
+   493→                          )}
+   494→                        >
+   495→                          {totals.absents}
+   496→                        </span>
+   497→                      </td>
+   498→                    </motion.tr>
+   499→                  );
+   500→                })}
+   501→              </tbody>
+   502→            </table>
+   503→          </div>
+   504→          <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
+   505→            {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every past cell is editable (hours e.g. 8, 10.5 or <span className="font-semibold text-rose-500">A</span>); future dates stay blank & locked
+   506→          </p>
+   507→        </div>
+   508→      </motion.section>
+   509→    );
+   510→  };
+   511→
+   512→  return (
+   513→    <div className="mx-auto max-w-[1600px]">
+   514→      {/* header */}
+   515→      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+   516→        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ease: EASE }}>
+   517→          <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Attendance</h1>
+   518→          <p className="mt-1 text-sm text-muted-foreground">
+   519→            Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent
+   520→          </p>
+   521→        </motion.div>
+   522→        <div className="flex flex-wrap items-center gap-2">
+   523→          <Tabs value={view} onValueChange={(v) => setView(v as 'sheet' | 'calendar')}>
+   524→            <TabsList>
+   525→              <TabsTrigger value="sheet"><CalendarCheck size={14} className="mr-1" />Sheet</TabsTrigger>
+   526→              <TabsTrigger value="calendar">Calendar</TabsTrigger>
+   527→            </TabsList>
+   528→          </Tabs>
+   529→          <div className="flex items-center gap-1">
+   530→            <Button variant="outline" size="icon" className="size-9" onClick={() => shiftMonth(-1)} aria-label="Previous month">
+   531→              <ChevronLeft size={16} />
+   532→            </Button>
+   533→            <Select value={MONTH_NAMES[month - 1]} onValueChange={(m) => setMonthKey(`${year}-${pad(MONTH_NAMES.indexOf(m) + 1)}`)}>
+   534→              <SelectTrigger className="h-9 w-32 bg-card"><SelectValue /></SelectTrigger>
+   535→              <SelectContent>
+   536→                {MONTH_NAMES.map((m) => (
+   537→                  <SelectItem key={m} value={m}>{m}</SelectItem>
+   538→                ))}
+   539→              </SelectContent>
+   540→            </Select>
+   541→            <Select value={String(year)} onValueChange={(y) => setMonthKey(`${y}-${pad(month)}`)}>
+   542→              <SelectTrigger className="h-9 w-[76px] bg-card"><SelectValue /></SelectTrigger>
+   543→              <SelectContent>
+   544→                {[now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => (
+   545→                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+   546→                ))}
+   547→              </SelectContent>
+   548→            </Select>
+   549→            <Button
+   550→              variant="outline" size="icon" className="size-9"
+   551→              disabled={monthKey >= `${now.getFullYear()}-${pad(now.getMonth() + 1)}`}
+   552→              onClick={() => shiftMonth(1)} aria-label="Next month"
+   553→            >
+   554→              <ChevronRight size={16} />
+   555→            </Button>
+   556→          </div>
+   557→        </div>
+   558→      </div>
+   559→
+   560→      {/* admin scope hint */}
+   561→      {!isSuperAdmin && assignedSiteIds !== null && (
+   562→        <div className="mb-4 flex items-center gap-2 rounded-lg border border-brand/25 bg-brand/[0.06] px-3.5 py-2.5 text-xs text-muted-foreground">
+   563→          <Shield size={14} className="shrink-0 text-brand" />
+   564→          <span>
+   565→            You can only view and mark <span className="font-medium text-foreground">{assignedSiteIds.size} assigned site{assignedSiteIds.size !== 1 ? 's' : ''}</span> —
+   566→            ask a super admin to assign more via Admin Management → Site Access.
+   567→          </span>
+   568→        </div>
+   569→      )}
+   570→
+   571→      {/* toolbar */}
+   572→      <div className="mb-4 flex flex-wrap items-center gap-2">
+   573→        {view === 'sheet' && (
+   574→          <>
+   575→            <div className="relative min-w-52 flex-1 sm:max-w-xs">
+   576→              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+   577→              <Input
+   578→                placeholder="Search employees…"
+   579→                className="h-10 pl-9"
+   580→                value={search}
+   581→                onChange={(e) => setSearch(e.target.value)}
+   582→              />
+   583→            </div>
+   584→            <Select value={siteFilter} onValueChange={setSiteFilter}>
+   585→              <SelectTrigger className="h-10 w-56 bg-card"><SelectValue /></SelectTrigger>
+   586→              <SelectContent>
+   587→                <SelectItem value="all">All Sites</SelectItem>
+   588→                {selectableSites.map((s) => (
+   589→                  <SelectItem key={s.id} value={s.id}>
+   590→                    {s.name} ({s.employee_count})
+   591→                  </SelectItem>
+   592→                ))}
+   593→                {isSuperAdmin && (
+   594→                  <SelectItem value="idle">Unassigned / Idle only</SelectItem>
+   595→                )}
+   596→              </SelectContent>
+   597→            </Select>
+   598→          </>
+   599→        )}
+   600→        {view === 'calendar' && (
+   601→          <div className="min-w-64 flex-1 sm:max-w-sm">
+   602→            <EmployeeCombobox
+   603→              employees={crew}
+   604→              value={calendarEmployeeId}
+   605→              onChange={(id) => setCalendarEmployeeId(id)}
+   606→              placeholder="Select an employee to view their timesheet…"
+   607→            />
+   608→          </div>
+   609→        )}
+   610→        <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
+   611→          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/20 ring-1 ring-rose-500/40" />A = Absent</span>
+   612→          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-emerald-500/20 ring-1 ring-emerald-500/40" />Hours</span>
+   613→          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/[0.06] ring-1 ring-border" />Sunday</span>
+   614→          <span className="hidden items-center gap-1.5 lg:flex"><span className="size-2.5 rounded-sm bg-muted/60 ring-1 ring-border/70" />Future (locked)</span>
+   615→        </div>
+   616→      </div>
+   617→
+   618→      {/* ============================ SHEET VIEW (site sections) ============================ */}
+   619→      {view === 'sheet' && (
+   620→        loading ? (
+   621→          <SkeletonRows rows={8} />
+   622→        ) : !isSuperAdmin && assignedSiteIds !== null && assignedSiteIds.size === 0 ? (
+   623→          <EmptyState
+   624→            icon={<Shield size={22} />}
+   625→            title="No sites assigned to you yet"
+   626→            description="A super admin needs to assign you at least one site (Admin Management → Site Access) before you can mark attendance."
+   627→          />
+   628→        ) : sections.length === 0 ? (
+   629→          <EmptyState
+   630→            icon={<CalendarCheck size={22} />}
+   631→            title={debouncedSearch || siteFilter !== 'all' ? 'No employees match your filters' : 'No site employees to mark'}
+   632→            description={debouncedSearch || siteFilter !== 'all'
+   633→              ? 'Try adjusting the search or site filter.'
+   634→              : 'Employees are grouped by their work site — assign employees to a site to start marking their attendance.'}
+   635→          />
+   636→        ) : (
+   637→          <div className="space-y-6">
+   638→            {sections.map((section, i) => (
+   639→              <Fragment key={section.key}>
+   640→                {renderSheetSection(section, i)}
+   641→              </Fragment>
+   642→            ))}
+   643→          </div>
+   644→        )
+   645→      )}
+   646→
+   647→      {/* ============================ CALENDAR VIEW ============================ */}
+   648→      {view === 'calendar' && (
+   649→        loading ? (
+   650→          <div className="grid gap-3 sm:grid-cols-7">
+   651→            {Array.from({ length: 35 }).map((_, i) => <Skeleton key={i} className="h-20 rounded-lg" />)}
+   652→          </div>
+   653→        ) : !calendarEmployee ? (
+   654→          <EmptyState
+   655→            icon={<CalendarCheck size={22} />}
+   656→            title="Select an employee"
+   657→            description="Pick an employee above to view and edit their monthly timesheet."
+   658→          />
+   659→        ) : (
+   660→          <motion.div
+   661→            key={calendarEmployee.id + monthKey}
+   662→            initial={{ opacity: 0, y: 12 }}
+   663→            animate={{ opacity: 1, y: 0 }}
+   664→            transition={{ duration: 0.35, ease: EASE }}
+   665→            className="card-glow rounded-xl border bg-card p-5"
+   666→          >
+   667→            <SectionTitle
+   668→              title={`${calendarEmployee.full_name} — ${MONTH_NAMES[month - 1]} ${year}`}
+   669→              sub={`${calendarEmployee.employee_code} · ${calendarEmployee.position ?? 'No trade'}${calendarEmployee.site_name ? ' · ' + calendarEmployee.site_name : ' · Idle'}`}
+   670→            />
+   671→            <div className="mt-4 grid grid-cols-7 gap-1.5">
+   672→              {WEEKDAYS.map((w) => (
+   673→                <div key={w} className={cn('pb-1 text-center text-[11px] font-medium uppercase tracking-wide', w === 'Sun' ? 'text-rose-500' : 'text-muted-foreground')}>
+   674→                  {w}
+   675→                </div>
+   676→              ))}
+   677→              {Array.from({ length: new Date(year, month - 1, 1).getDay() }).map((_, i) => <div key={`pad-${i}`} />)}
+   678→              {Array.from({ length: days }).map((_, idx) => {
+   679→                const d = idx + 1;
+   680→                const date = ymd(year, month, d);
+   681→                const future = date > today;
+   682→                const sun = isSunday(date);
+   683→                const value = cellText(calendarEmployee.id, date);
+   684→                const parsed = parseCell(value);
+   685→                return (
+   686→                  <Popover key={d}>
+   687→                    <PopoverTrigger asChild>
+   688→                      <button
+   689→                        disabled={future}
+   690→                        className={cn(
+   691→                          'group relative flex h-16 flex-col items-center justify-center rounded-lg border text-sm transition-all',
+   692→                          future
+   693→                            ? 'cursor-not-allowed border-dashed opacity-40'
+   694→                            : 'hover:border-brand/50 hover:shadow-[0_4px_16px_-6px_var(--glow)]',
+   695→                          sun && 'border-rose-500/20 bg-rose-500/[0.05]',
+   696→                          !future && !sun && 'bg-card',
+   697→                          date === today && 'ring-2 ring-brand/50',
+   698→                        )}
+   699→                      >
+   700→                        <span className="absolute left-1.5 top-1 text-[10px] text-muted-foreground">{d}</span>
+   701→                        {parsed.kind === 'absent' ? (
+   702→                          <span className="text-lg font-bold text-rose-500">A</span>
+   703→                        ) : parsed.kind === 'hours' ? (
+   704→                          <span className="text-base font-semibold tabular-nums text-emerald-500">{parsed.hours}h</span>
+   705→                        ) : (
+   706→                          <span className="text-xs text-muted-foreground/50">—</span>
+   707→                        )}
+   708→                      </button>
+   709→                    </PopoverTrigger>
+   710→                    <PopoverContent className="w-56 p-3" align="center">
+   711→                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+   712→                        {calendarEmployee.full_name} · {date}{sun ? ' (Sunday)' : ''}
+   713→                      </p>
+   714→                      <Input
+   715→                        autoFocus
+   716→                        value={value}
+   717→                        disabled={future}
+   718→                        placeholder="Hours (8) or A"
+   719→                        onChange={(e) => setCell(calendarEmployee.id, date, e.target.value)}
+   720→                        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+   721→                        onBlur={() => commitCell(calendarEmployee.id, date)}
+   722→                        className="h-9 text-center font-semibold tabular-nums"
+   723→                      />
+   724→                      <div className="mt-2 grid grid-cols-4 gap-1">
+   725→                        {['8', '10', '12'].map((h) => (
+   726→                          <Button key={h} variant="outline" size="sm" className="h-7 px-0 text-xs" onClick={() => { setCell(calendarEmployee.id, date, h); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}>
+   727→                            {h}h
+   728→                          </Button>
+   729→                        ))}
+   730→                        <Button variant="outline" size="sm" className="h-7 px-0 text-xs font-bold text-rose-500" onClick={() => { setCell(calendarEmployee.id, date, 'A'); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}>
+   731→                          A
+   732→                        </Button>
+   733→                      </div>
+   734→                      <Button
+   735→                        variant="ghost" size="sm"
+   736→                        className="mt-1.5 w-full text-xs text-muted-foreground"
+   737→                        onClick={() => { setCell(calendarEmployee.id, date, ''); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}
+   738→                      >
+   739→                        Clear day
+   740→                      </Button>
+   741→                    </PopoverContent>
+   742→                  </Popover>
+   743→                );
+   744→              })}
+   745→            </div>
+   746→
+   747→            {/* Month totals */}
+   748→            <div className="mt-4 flex flex-wrap items-center gap-3 border-t pt-4">
+   749→              {(() => {
+   750→                const totals = rowTotals(calendarEmployee.id);
+   751→                return (
+   752→                  <>
+   753→                    <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-4 py-1.5 text-sm font-semibold text-emerald-500">
+   754→                      Total Hours: {totals.hours}
+   755→                    </span>
+   756→                    <span className={cn(
+   757→                      'rounded-full border px-4 py-1.5 text-sm font-semibold',
+   758→                      totals.absents > 0 ? 'border-rose-500/25 bg-rose-500/10 text-rose-500' : 'border-border bg-muted text-muted-foreground',
+   759→                    )}>
+   760→                      Total Absent: {totals.absents}
+   761→                    </span>
+   762→                  </>
+   763→                );
+   764→              })()}
+   765→            </div>
+   766→          </motion.div>
+   767→        )
+   768→      )}
+   769→    </div>
+   770→  );
+   771→}
+   772→

@@ -20,7 +20,7 @@
 
 import { motion } from 'framer-motion';
 import {
-  Building2, CalendarCheck, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
+  Building2, CalendarCheck, CalendarDays, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
   Tent, UserX, Zap,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState } from 'react';
@@ -28,6 +28,7 @@ import { toast } from 'sonner';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
 import { EmptyState, SectionTitle, SkeletonRows } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
+import { Calendar } from '@/components/ui/calendar';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -48,11 +49,35 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
+// ---------------------------------------------------------------------------
+// Compact column widths (px) — the marking sheet must ALWAYS show Name +
+// Trade + ALL 30/31 day columns (per the selected month/year) + Total H +
+// Absent on laptop / desktop screens. Fixed columns take only the space they
+// need; the day columns flex to share the leftover width. The table scrolls
+// horizontally ONLY when the viewport is narrower than the computed minimum.
+// (Literals in the sticky left/right classes must match these values.)
+// ---------------------------------------------------------------------------
+const EMP_COL_W = 150; // employee — avatar + name (+ camp tooltip) + employee ID
+const TRADE_COL_W = 76; // trade
+const TOTAL_COL_W = 54; // total hours
+const ABSENT_COL_W = 48; // absent count
+const DAY_MIN_W = 22; // per-day column minimum before scrolling kicks in
+
 const pad = (n: number): string => String(n).padStart(2, '0');
 const ymd = (y: number, m: number, d: number): string => `${y}-${pad(m)}-${pad(d)}`;
+const dateToYMD = (d: Date): string => ymd(d.getFullYear(), d.getMonth() + 1, d.getDate());
 const todayYMD = (): string => {
   const t = new Date();
   return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
+};
+const yesterdayYMD = (): string => {
+  const t = new Date();
+  t.setDate(t.getDate() - 1);
+  return ymd(t.getFullYear(), t.getMonth() + 1, t.getDate());
+};
+const formatDatePretty = (date: string): string => {
+  const dt = new Date(`${date}T00:00:00`);
+  return `${WEEKDAYS[dt.getDay()]}, ${dt.getDate()} ${MONTH_NAMES[dt.getMonth()].slice(0, 3)} ${dt.getFullYear()}`;
 };
 const isSunday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 0;
 const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
@@ -115,6 +140,7 @@ export function AttendancePage() {
   const [bulkValues, setBulkValues] = useState<Record<string, string>>({}); // empId → raw cell text
   const [bulkInclude, setBulkInclude] = useState<Record<string, boolean>>({}); // empId → checked
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkCalOpen, setBulkCalOpen] = useState(false); // date picker popover
 
   const [year, month] = useMemo(() => {
     const [y, m] = monthKey.split('-').map(Number);
@@ -488,7 +514,7 @@ export function AttendancePage() {
         {future ? (
           // future dates are visible but locked — nothing to mark yet
           <div
-            className="flex h-9 w-10 cursor-not-allowed items-center justify-center"
+            className="flex h-8 w-full cursor-not-allowed items-center justify-center"
             title={`${date} — future date, not editable yet`}
             aria-label={`${emp.full_name} — ${date} — future date, locked`}
           />
@@ -502,7 +528,7 @@ export function AttendancePage() {
               onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
               aria-label={`${emp.full_name} — ${date}`}
               className={cn(
-                'h-9 w-10 bg-transparent text-center text-[12px] font-medium tabular-nums outline-none transition-colors',
+                'h-8 w-full bg-transparent text-center text-[11px] font-medium tabular-nums outline-none transition-colors',
                 'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
                 isA && 'bg-rose-500/10 font-bold text-rose-500',
                 value !== '' && !isA && 'text-foreground',
@@ -575,14 +601,28 @@ export function AttendancePage() {
           </div>
         </div>
 
-        {/* crew table */}
+        {/* crew table — fits the FULL month (all columns) on desktop;
+            horizontal scrolling only kicks in on smaller screens */}
         <div className="card-glow overflow-hidden rounded-xl border bg-card">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-max border-collapse text-sm">
+            <table
+              className="w-full table-fixed border-collapse text-sm"
+              style={{ minWidth: EMP_COL_W + TRADE_COL_W + TOTAL_COL_W + ABSENT_COL_W + dayColumns.length * DAY_MIN_W }}
+            >
               <thead>
-                <tr className="border-b bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <th className="sticky left-0 z-20 w-[240px] min-w-[240px] border-x border-foreground/15 bg-muted/60 px-4 py-2.5 font-medium">Employee</th>
-                  <th className="sticky left-[240px] z-20 w-[120px] min-w-[120px] border-x border-b border-foreground/15 bg-muted/60 px-3 py-2.5 font-medium">Trade</th>
+                <tr className="border-b bg-muted/60 text-left text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <th
+                    style={{ width: EMP_COL_W }}
+                    className="sticky left-0 z-20 border-x border-foreground/15 bg-muted/60 px-2 py-2 font-medium"
+                  >
+                    Employee
+                  </th>
+                  <th
+                    style={{ width: TRADE_COL_W }}
+                    className="sticky left-[150px] z-20 border-x border-b border-foreground/15 bg-muted/60 px-2 py-2 font-medium"
+                  >
+                    Trade
+                  </th>
                   {dayColumns.map((d) => {
                     const date = ymd(year, month, d);
                     const sun = isSunday(date);
@@ -591,21 +631,31 @@ export function AttendancePage() {
                       <th
                         key={d}
                         className={cn(
-                          'w-10 min-w-10 border-x border-b border-foreground/15 px-1 py-2.5 text-center font-medium',
+                          'border-x border-b border-foreground/15 px-0 py-2 text-center font-medium',
                           sun && 'bg-rose-500/[0.07] text-rose-500',
                           future && 'text-muted-foreground/50',
                         )}
                         title={`${MONTH_NAMES[month - 1]} ${d}${sun ? ' (Sunday)' : ''}${future ? ' — future (locked)' : ''}`}
                       >
-                        <div>{d}</div>
-                        <div className={cn('text-[9px] font-normal normal-case opacity-70', sun && 'text-rose-500')}>
+                        <div className="text-[10px] leading-tight">{d}</div>
+                        <div className={cn('text-[8px] font-normal normal-case leading-tight opacity-70', sun && 'text-rose-500')}>
                           {WEEKDAYS[new Date(`${date}T00:00:00`).getDay()]}
                         </div>
                       </th>
                     );
                   })}
-                  <th className="sticky right-[92px] z-20 w-[92px] border-x border-b border-foreground/15 bg-muted/60 px-2 py-2.5 text-center font-medium text-emerald-500">Total H</th>
-                  <th className="sticky right-0 z-20 w-[92px] border-l border-b border-foreground/15 bg-muted/60 px-2 py-2.5 text-center font-medium text-rose-500">Absent</th>
+                  <th
+                    style={{ width: TOTAL_COL_W }}
+                    className="sticky right-[48px] z-20 border-x border-b border-foreground/15 bg-muted/60 px-1 py-2 text-center font-medium text-emerald-500"
+                  >
+                    Total H
+                  </th>
+                  <th
+                    style={{ width: ABSENT_COL_W }}
+                    className="sticky right-0 z-20 border-l border-b border-foreground/15 bg-muted/60 px-1 py-2 text-center font-medium text-rose-500"
+                  >
+                    Absent
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -619,47 +669,46 @@ export function AttendancePage() {
                       transition={{ delay: Math.min(i * 0.02, 0.25), ease: EASE }}
                       className="transition-colors"
                     >
-                      {/* employee — stacked: name / employee ID / camp */}
-                      <td className="sticky left-0 z-10 border-x border-b border-foreground/15 bg-card px-4 py-2">
-                        <div className="flex items-center gap-2.5">
-                          <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+                      {/* employee — avatar + name (camp as tooltip icon) + ID */}
+                      <td className="sticky left-0 z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[9px] font-bold text-brand">
                             {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
                           </span>
                           <div className="min-w-0">
-                            <p className="truncate text-[13px] font-medium leading-tight">{emp.full_name}</p>
-                            <p className="truncate font-mono text-[10px] leading-tight text-muted-foreground">{emp.employee_code}</p>
-                            {emp.camp_name ? (
-                              <p
-                                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] leading-tight text-amber-600 dark:text-amber-400"
-                                title={`Camp: ${emp.camp_name}${emp.camp_block ? ' · Block ' + emp.camp_block : ''}${emp.camp_room ? ' · Room ' + emp.camp_room : ''}`}
-                              >
-                                <Tent size={9} className="inline" />
-                                {emp.camp_name}
-                              </p>
-                            ) : (
-                              <p className="text-[10px] leading-tight text-muted-foreground/60">No camp</p>
-                            )}
+                            <p className="truncate text-[12px] font-medium leading-tight">
+                              {emp.full_name}
+                              {emp.camp_name && (
+                                <span
+                                  className="ml-1 inline-block align-middle text-amber-600 dark:text-amber-400"
+                                  title={`Camp: ${emp.camp_name}${emp.camp_block ? ' · Block ' + emp.camp_block : ''}${emp.camp_room ? ' · Room ' + emp.camp_room : ''}`}
+                                >
+                                  <Tent size={9} className="inline" />
+                                </span>
+                              )}
+                            </p>
+                            <p className="truncate font-mono text-[9px] leading-tight text-muted-foreground">{emp.employee_code}</p>
                           </div>
                         </div>
                       </td>
                       {/* trade — its own dedicated column */}
-                      <td className="sticky left-[240px] z-10 border-x border-b border-foreground/15 bg-card px-3 py-2">
-                        <span className="truncate text-xs font-medium text-foreground/80">{emp.position ?? '—'}</span>
+                      <td className="sticky left-[150px] z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
+                        <span className="block truncate text-[11px] font-medium text-foreground/80" title={emp.position ?? undefined}>{emp.position ?? '—'}</span>
                       </td>
                       {dayColumns.map((d) => (
                         renderDayCell(emp, ymd(year, month, d))
                       ))}
                       {/* Total hours */}
-                      <td className="sticky right-[92px] z-10 border-x border-b border-foreground/15 bg-card px-2 text-center">
-                        <span className="inline-flex min-w-12 rounded-lg bg-emerald-500/10 px-1.5 py-1 text-[12px] font-bold tabular-nums text-emerald-500">
+                      <td className="sticky right-[48px] z-10 border-x border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
+                        <span className="inline-flex min-w-9 justify-center rounded-md bg-emerald-500/10 px-1 py-0.5 text-[11px] font-bold tabular-nums text-emerald-500">
                           {totals.hours}
                         </span>
                       </td>
                       {/* Absences */}
-                      <td className="sticky right-0 z-10 border-l border-b border-foreground/15 bg-card px-2 text-center">
+                      <td className="sticky right-0 z-10 border-l border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
                         <span
                           className={cn(
-                            'inline-flex min-w-8 rounded-lg px-1.5 py-1 text-[12px] font-bold tabular-nums',
+                            'inline-flex min-w-7 justify-center rounded-md px-1 py-0.5 text-[11px] font-bold tabular-nums',
                             totals.absents > 0 ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground',
                           )}
                         >
@@ -966,17 +1015,46 @@ export function AttendancePage() {
           {/* controls: date · site scope · default hours */}
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="space-y-1.5">
-              <Label htmlFor="bulk-date">Date *</Label>
-              <Input
-                id="bulk-date"
-                type="date"
-                className="h-10 bg-card"
-                value={bulkDate}
-                max={today}
-                min="2020-01-01"
-                onChange={(e) => onBulkDateChange(e.target.value)}
-              />
-              <p className="text-[10px] text-muted-foreground">Future dates are locked</p>
+              <Label>Date *</Label>
+              <Popover open={bulkCalOpen} onOpenChange={setBulkCalOpen}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="h-10 w-full justify-between bg-card font-normal" aria-label="Pick a date to bulk-fill">
+                    <span className="truncate">{bulkDate ? formatDatePretty(bulkDate) : 'Pick a date'}</span>
+                    <CalendarDays size={15} className="shrink-0 opacity-60" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-0" align="start">
+                  <Calendar
+                    mode="single"
+                    defaultMonth={bulkDate ? new Date(`${bulkDate}T00:00:00`) : new Date()}
+                    selected={bulkDate ? new Date(`${bulkDate}T00:00:00`) : undefined}
+                    onDayClick={(d) => {
+                      onBulkDateChange(dateToYMD(d));
+                      setBulkCalOpen(false);
+                    }}
+                    disabled={{ after: new Date() }}
+                    captionLayout="dropdown"
+                    fromYear={2020}
+                    toYear={new Date().getFullYear()}
+                    weekStartsOn={0}
+                  />
+                  <div className="flex gap-1.5 border-t p-2">
+                    <Button
+                      variant="outline" size="sm" className="h-7 flex-1 text-[11px]"
+                      onClick={() => { onBulkDateChange(todayYMD()); setBulkCalOpen(false); }}
+                    >
+                      Today
+                    </Button>
+                    <Button
+                      variant="outline" size="sm" className="h-7 flex-1 text-[11px]"
+                      onClick={() => { onBulkDateChange(yesterdayYMD()); setBulkCalOpen(false); }}
+                    >
+                      Yesterday
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+              <p className="text-[10px] text-muted-foreground">Pick any past date to fill it</p>
             </div>
             <div className="space-y-1.5">
               <Label>Site scope</Label>

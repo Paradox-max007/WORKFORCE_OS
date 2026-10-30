@@ -167,16 +167,35 @@ path per feature — no feature drift between demo and production.
   `mark_attendance()`; `get_month_attendance` returns **only real records** — un-entered
   days stay blank in the sheet, future days are locked client-side
 - `bulk_mark_attendance(p_entries jsonb)` — bulk day entry in a single round-trip; every
-  entry reuses the full `mark_attendance` engine (permissions, rating, auto-warnings)
+  entry reuses the full `mark_attendance` engine (date-effective site permissions,
+  rating, auto-warnings) so bulk and single-cell marking can never disagree
+- `emp_site_on_date(p_emp, p_date)` — **the date-effective site assignment**: answers
+  "which site did this employee belong to on THIS date" from the `site_transfer` log
+  (never from `current_site_id`, which only reflects the present). Mirrors the shared
+  TypeScript engine in `src/lib/site-timeline.ts` — the ONE calculation used by the
+  marking sheet, Bulk Day Entry, demo-mode permissions and the Supabase RPCs. The
+  "25th at 8 PM" rule: a day already marked at the OLD site before the move was
+  recorded keeps its old-site assignment, so the move takes effect from the first
+  UNMARKED day (marked on the 25th at 5 PM + moved on the 25th at 8 PM → effective
+  from the 26th); multiple transfers fold chronologically (A → B → C works), and
+  existing attendance records are never rewritten
+- `get_month_attendance` / `mark_attendance` — site authorization is **date-effective**:
+  a normal admin receives / may mark a day when the employee belonged to one of their
+  sites ON THAT DAY (an employee moved mid-month stays markable at the old site for
+  the days before the move and at the new site afterwards; Admin A can never touch
+  the destination days, Admin B can never touch the old-site days)
 - `site_transfer` — automatic move log (from/to site + `effective_date`): `update_employee`
   writes one row whenever `current_site_id` changes (the client passes its local date).
-  The attendance sheet folds this log into per-month timelines: a moved employee sits at
-  the bottom of BOTH crews (faded) — their original site keeps the days up to the move
-  (the moved days merge into one cell showing the new site) and the new site shows the
-  earlier days as a merged cell showing the old site, so the moved days can be marked
-  there. Days already marked before the move was recorded stay with the old site
-  (compared via `created_at`), shifting the displayed move to the next unmarked day.
-  The printable per-site sheet simply lists them under their new site alphabetically
+  The attendance sheet folds this log into per-month timelines via the shared engine:
+  a moved employee sits at the bottom of BOTH crews (faded) — their original site keeps
+  the days up to the move (the moved days merge into one cell showing the new site) and
+  the new site shows the earlier days as a merged cell showing the old site, so the
+  moved days can be marked there. Days already marked before the move was recorded stay
+  with the old site (compared via `created_at`), shifting the displayed move to the next
+  unmarked day. Admin scoping is timeline-aware too: a normal admin sees every employee
+  who spent ANY day of the viewed month at one of their sites. The printable per-site
+  sheet lists employees under their CURRENT site alphabetically and reconciles its rows
+  live when transfers happen while the preview is open (manual edits preserved)
 - `create_employee` accepts an **optional manual employee ID** (validated unique) and
   falls back to `next_employee_code()` when blank
 - `uniform_registry` token sequencing + encrypted document numbers + renewal chain

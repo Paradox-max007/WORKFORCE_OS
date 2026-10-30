@@ -923,6 +923,73 @@ end; $$;
 
 -- Fetch one month's REAL attendance records (un-entered days stay blank in the
 -- marking sheet). Normal admins only receive rows for employees working at THEIR assigned sites.
+-- ---------------------------------------------------------------------------
+-- Date-effective employee site assignment (mirrors src/lib/site-timeline.ts).
+--
+-- Answers "which site did this employee belong to on THIS date" from the
+-- site_transfer log — NOT from employee.current_site_id (that only reflects
+-- the present and breaks historical attendance after a move).
+--
+-- The "25th at 8 PM" rule: a day already marked at the OLD site before the
+-- move was recorded keeps its old-site assignment — the move is enforced from
+-- the first day that was NOT already marked (marked on the 25th + moved on
+-- the 25th → effective from the 26th). Existing attendance records are never
+-- rewritten. Multiple transfers fold chronologically (effective_date, then
+-- created_at), so A → B → C in one month resolves correctly per date.
+-- ---------------------------------------------------------------------------
+create or replace function public.emp_site_on_date(p_emp uuid, p_date date)
+returns uuid
+language plpgsql
+stable
+security definer set search_path = public
+as $$
+declare
+  t record;
+  v_site uuid;
+  v_first uuid;
+  v_start date;
+begin
+  -- no logged move → the employee simply sits at their current site
+  if not exists (select 1 from public.site_transfer where employee_id = p_emp) then
+    return (select current_site_id from public.employee where id = p_emp);
+  end if;
+
+  -- site before any logged move = where the earliest move started from
+  select st.from_site_id into v_first
+    from public.site_transfer st
+    where st.employee_id = p_emp
+    order by st.effective_date, st.created_at
+    limit 1;
+  v_site := v_first;
+
+  -- fold every move whose display date is on/before the requested date
+  for t in
+    select st.from_site_id, st.to_site_id, st.effective_date, st.created_at
+    from public.site_transfer st
+    where st.employee_id = p_emp
+    order by st.effective_date, st.created_at
+  loop
+    -- display date: skip days already marked at the old site BEFORE this
+    -- move was recorded (bounded by the requested date)
+    v_start := t.effective_date;
+    while v_start <= p_date and exists (
+      select 1 from public.attendance a
+      where a.employee_id = p_emp
+        and a.date = v_start
+        and a.created_at <= t.created_at
+    ) loop
+      v_start := v_start + 1;
+    end loop;
+    if v_start <= p_date then
+      v_site := t.to_site_id;
+    end if;
+  end loop;
+
+  return v_site;
+end; $$;
+
+grant execute on function public.emp_site_on_date(uuid, date) to authenticated;
+
 create or replace function public.get_month_attendance(p_month text)
 returns setof public.attendance language plpgsql
 security definer set search_path = public
@@ -935,6 +1002,9 @@ begin
   -- Only REAL records are returned: days with no record simply stay blank in
   -- the marking sheet (no auto-created 8h defaults). Future days render blank
   -- and are locked client-side.
+  -- Site authorization is DATE-EFFECTIVE: a normal admin sees a record when
+  -- the employee belonged to one of their sites on that record's date (an
+  -- employee moved mid-month keeps their old site's history visible there).
   return query
     select a.* from public.attendance a
     join public.employee e on e.id = a.employee_id
@@ -945,7 +1015,8 @@ begin
         public.is_super_admin()
         or exists (
           select 1 from public.admin_site s
-          where s.profile_id = auth.uid() and s.site_id = e.current_site_id
+          where s.profile_id = auth.uid()
+            and s.site_id = public.emp_site_on_date(e.id, a.date)
         )
       )
     order by a.date;
@@ -973,12 +1044,14 @@ begin
     raise exception 'Access denied';
   end if;
 
-  -- site-scoped marking: normal admins may only mark attendance for their
-  -- assigned sites (and never for idle employees — super admins can).
-  select current_site_id into v_emp_site from public.employee where id = p_employee_id;
+  -- site-scoped marking is DATE-EFFECTIVE: normal admins may only mark days
+  -- the employee belonged to one of their assigned sites on (an employee
+  -- moved mid-month stays markable at the old site for the days before the
+  -- move and at the new site afterwards). Idle days remain super-admin only.
+  select public.emp_site_on_date(p_employee_id, p_date) into v_emp_site;
   if not public.is_super_admin() then
     if v_emp_site is null then
-      raise exception 'This employee has no site — only super admins can mark idle employees';
+      raise exception 'This employee has no site on this date — only super admins can mark idle employees';
     end if;
     if not exists (
       select 1 from public.admin_site where profile_id = auth.uid() and site_id = v_emp_site
@@ -1059,7 +1132,9 @@ end; $$;
 
 -- Bulk day entry: apply the same Excel-style marking to many employees in ONE
 -- round-trip (used by the "Bulk Day Entry" dialog). Each entry reuses the full
--- mark_attendance engine (permissions, rating, auto-warnings).
+-- mark_attendance engine — including the DATE-EFFECTIVE site authorization
+-- (emp_site_on_date), rating, auto-warnings — so bulk and single-cell marking
+-- can never disagree.
 --   p_entries: [{"employee_id": uuid, "date": "YYYY-MM-DD", "value": "10" | "A" | ""}]
 -- Returns the number of applied entries.
 create or replace function public.bulk_mark_attendance(p_entries jsonb)

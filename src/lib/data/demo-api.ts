@@ -38,6 +38,7 @@ import {
   toYMD,
   uid,
 } from './demo-store';
+import { getEmployeeSiteForDate } from '@/lib/site-timeline';
 
 type VM = Record<string, unknown>;
 
@@ -574,14 +575,21 @@ export const demoApi = {
     // Only REAL records are returned — days with no record simply stay blank
     // in the marking sheet (no more auto-created 8h defaults).
 
-    // normal admins only see rows for employees at their assigned sites
+    // Normal admins only see a record when the employee belonged to one of
+    // their sites ON THAT RECORD'S DATE (date-effective — mirrors the
+    // get_month_attendance RPC; moved employees keep old-site history).
     const allowedSites = mySiteAllowance();
     return db.attendance.filter((a) => {
       if (!a.date.startsWith(month) || a.is_hidden) return false;
       const e = db.employees.find((x) => x.id === a.employee_id);
       if (!e || e.status === 'deleted') return false;
       if (allowedSites === null) return true;
-      return e.current_site_id !== null && allowedSites.has(e.current_site_id);
+      const siteOnDate = getEmployeeSiteForDate(a.employee_id, a.date, {
+        transfers: db.siteTransfers,
+        records: db.attendance,
+        currentSiteId: e.current_site_id,
+      });
+      return siteOnDate !== null && allowedSites.has(siteOnDate);
     });
   },
 
@@ -591,14 +599,22 @@ export const demoApi = {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
 
-    // site-scoped marking: normal admins only mark their assigned sites
+    // site-scoped marking is DATE-EFFECTIVE (mirrors the mark_attendance RPC):
+    // normal admins only mark days the employee belonged to one of their
+    // assigned sites on — an employee moved mid-month stays markable at the
+    // old site for the days before the move and at the new site afterwards.
     const me = currentProfile();
     if (me && me.role !== 'super_admin') {
-      if (!e.current_site_id) {
-        throw new Error('This employee has no site — only super admins can mark idle employees');
+      const siteOnDate = getEmployeeSiteForDate(employeeId, date, {
+        transfers: db.siteTransfers,
+        records: db.attendance,
+        currentSiteId: e.current_site_id,
+      });
+      if (!siteOnDate) {
+        throw new Error('This employee has no site on this date — only super admins can mark idle employees');
       }
       const assigned = db.siteAssignments.some(
-        (x) => x.profile_id === me.id && x.site_id === e.current_site_id,
+        (x) => x.profile_id === me.id && x.site_id === siteOnDate,
       );
       if (!assigned) {
         throw new Error('Access denied — you can only mark attendance for your assigned sites');
@@ -681,8 +697,9 @@ export const demoApi = {
     saveAndEmit(['attendance', 'employee']);
   },
 
-  /** Bulk day entry — reuses the single-cell engine (permissions, rating,
-   *  auto-warnings) so behaviour is identical to marking cells one by one. */
+  /** Bulk day entry — reuses the single-cell engine (date-effective site
+   *  permissions, rating, auto-warnings) so behaviour is identical to marking
+   *  cells one by one. */
   async bulkMarkAttendance(entries: BulkAttendanceEntry[]): Promise<void> {
     for (const entry of entries) {
       await this.markAttendance(entry.employee_id, entry.date, entry.value);

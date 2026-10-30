@@ -11,16 +11,20 @@
 // • BULK DAY ENTRY: fill an entire day for a whole site crew in one action —
 //   hours DEFAULT TO 10 but every value is editable before the save, and the
 //   sheet cells stay editable any time afterwards.
-// • SITE MOVES: an employee transferred mid-month (e.g. Site A → Site B on
-//   the 25th) appears under BOTH sites for that month: under the site they
-//   started the month at — BOTTOM of the crew, faded — with the days from the
-//   move to the end of the month rendered as ONE merged cell showing the new
-//   site, and under the new site — also bottom + faded — where the earlier
-//   days merge into a cell showing the old site so the moved days can be
-//   marked there. A day that was ALREADY marked before the move was recorded
-//   stays with the old site: the move is then displayed from the next day
-//   (25th already marked at Site A → Site B shows from the 26th). The
-//   printable per-site sheet simply lists them under their new site,
+// • SITE MOVES (DATE-EFFECTIVE, one shared engine): src/lib/site-timeline.ts —
+//   mirrored by the emp_site_on_date() SQL function — decides which site an
+//   employee belonged to on every date. An employee transferred mid-month
+//   (e.g. Site A → Site B on the 25th) appears under BOTH sites for that
+//   month: under the site they started the month at — BOTTOM of the crew,
+//   faded — with the days from the move to the end of the month rendered as
+//   ONE merged cell showing the new site, and under the new site — also
+//   bottom + faded — where the earlier days merge into a cell showing the
+//   old site so the moved days can be marked there. A day that was ALREADY
+//   marked before the move was recorded stays with the old site: the move is
+//   then displayed (and enforced by the marking RPCs) from the next unmarked
+//   day (25th marked at 5 PM + moved on the 25th at 8 PM → Site B shows from
+//   the 26th). Multiple transfers chain chronologically (A → B → C works).
+//   The printable per-site sheet simply lists them under their current site,
 //   alphabetically.
 // • Each row shows the employee's TRADE (position) next to their ID.
 // • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
@@ -50,6 +54,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
+import {
+  buildMonthTimeline,
+  getEmployeeSiteForDate,
+  indexRecords,
+  type MonthSegment,
+  type MonthTimeline,
+  type SiteTimelineInput,
+} from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
 import type { Attendance, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
@@ -116,22 +128,6 @@ interface SiteSection {
   client: string | null;
   emps: EmployeeVM[];
   isIdle?: boolean;
-}
-
-/** A run of days within the viewed month spent at one site (null = idle). */
-interface MonthSegment {
-  fromDay: number;
-  toDay: number;
-  siteId: string | null;
-}
-
-/** An employee's site timeline across the viewed month (from the transfer log). */
-interface MonthTimeline {
-  /** Site the employee was at on day 1 of the month — where their row lives. */
-  homeSiteId: string | null;
-  segments: MonthSegment[];
-  /** True when at least one move happened inside this month. */
-  transferred: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,88 +218,49 @@ export function AttendancePage() {
     return () => clearTimeout(t);
   }, [search]);
 
+  // ---- date-effective site timelines for the viewed month ---------------------
+  // ONE shared engine (src/lib/site-timeline.ts — mirrored by the
+  // emp_site_on_date() SQL function) decides which site an employee belonged
+  // to on every day, so the marking sheet, Bulk Day Entry, demo permissions
+  // and the Supabase RPCs can never disagree. Every recorded move splits the
+  // month into segments; a day already marked at the OLD site before the move
+  // was recorded keeps its old-site assignment — the move displays from the
+  // next unmarked day (marked on the 25th + moved on the 25th at 8 PM → the
+  // sheet shows the move from the 26th only). Months before the move → the
+  // old site as a normal row; months after → the new site.
+  const recordsByEmployee = useMemo(() => indexRecords(records ?? []), [records]);
+  const timelines = useMemo(() => {
+    const base: Omit<SiteTimelineInput, 'currentSiteId'> = {
+      transfers: transfers ?? [],
+      records: recordsByEmployee,
+    };
+    const map = new Map<string, MonthTimeline>();
+    for (const emp of employees ?? []) {
+      map.set(emp.id, buildMonthTimeline(emp.id, year, month, {
+        ...base,
+        currentSiteId: emp.current_site_id,
+      }));
+    }
+    return map;
+  }, [employees, transfers, recordsByEmployee, year, month]);
+
   // ---- scoped crew (admins → their assigned sites only; super admins → all) ---
+  // Timeline-aware: a normal admin sees every employee who spent ANY day of the
+  // viewed month at one of their sites — an employee moved mid-month stays
+  // visible (and markable) at the old site for the days before the move even
+  // though their current site is elsewhere now, and appears at the destination
+  // immediately after the move.
   const scoped = useMemo(() => {
     const list = (employees ?? []).filter((e) => e.status !== 'deleted');
     if (assignedSiteIds === null) return list;
-    return list.filter((e) => e.current_site_id !== null && assignedSiteIds.has(e.current_site_id));
-  }, [employees, assignedSiteIds]);
-
-  // ---- site-transfer timelines for the viewed month ---------------------------
-  // Every recorded site move splits the month into segments. An employee moved
-  // during the month gets a row in EVERY section they spent days at (bottom,
-  // faded); each foreign segment renders as one merged cell showing that
-  // site. Months before the move → old site as a normal row; months after →
-  // new site as a normal row. IMPORTANT: a day that was already marked BEFORE
-  // the move was recorded keeps its old-site marking — the move is then
-  // displayed from the next unmarked day (marked on the 25th + moved on the
-  // 25th → the sheet shows the move from the 26th only).
-  const timelines = useMemo(() => {
-    const byEmp = new Map<string, SiteTransfer[]>();
-    (transfers ?? []).forEach((t) => {
-      const arr = byEmp.get(t.employee_id) ?? [];
-      arr.push(t);
-      byEmp.set(t.employee_id, arr);
+    return list.filter((e) => {
+      const tl = timelines.get(e.id);
+      if (!tl) {
+        return e.current_site_id !== null && assignedSiteIds.has(e.current_site_id);
+      }
+      return tl.segments.some((sg) => sg.siteId !== null && assignedSiteIds.has(sg.siteId));
     });
-    byEmp.forEach((arr) => arr.sort((a, b) =>
-      a.effective_date === b.effective_date
-        ? a.created_at.localeCompare(b.created_at)
-        : a.effective_date < b.effective_date ? -1 : 1));
-
-    // records by employee → date (created_at tells us whether the day was
-    // marked at the old site BEFORE the move was recorded)
-    const recBy = new Map<string, Map<string, Attendance>>();
-    (records ?? []).forEach((r) => {
-      let m = recBy.get(r.employee_id);
-      if (!m) { m = new Map(); recBy.set(r.employee_id, m); }
-      m.set(r.date, r);
-    });
-
-    const first = ymd(year, month, 1);
-    const last = ymd(year, month, days);
-    const map = new Map<string, MonthTimeline>();
-    for (const emp of employees ?? []) {
-      const ts = byEmp.get(emp.id);
-      if (!ts || ts.length === 0) {
-        map.set(emp.id, {
-          homeSiteId: emp.current_site_id,
-          segments: [{ fromDay: 1, toDay: days, siteId: emp.current_site_id }],
-          transferred: false,
-        });
-        continue;
-      }
-      // site at day 1 = fold of every transfer already effective by then
-      let site: string | null = ts[0].from_site_id ?? null;
-      const moves: { day: number; to: string | null }[] = [];
-      for (const t of ts) {
-        if (t.effective_date <= first) site = t.to_site_id ?? null;
-        else if (t.effective_date <= last) {
-          // displayed move day: skip forward past days that were already
-          // marked at the old site before this transfer was recorded
-          let day = Number(t.effective_date.slice(8, 10));
-          const empRecs = recBy.get(emp.id);
-          if (empRecs) {
-            while (day <= days) {
-              const rec = empRecs.get(ymd(year, month, day));
-              if (rec && rec.created_at <= t.created_at) day += 1;
-              else break;
-            }
-          }
-          if (day > days) continue; // whole month already marked at the old site
-          moves.push({ day, to: t.to_site_id ?? null });
-        }
-      }
-      const segments: MonthSegment[] = [{ fromDay: 1, toDay: days, siteId: site }];
-      for (const mv of moves) {
-        const cur = segments[segments.length - 1];
-        if (mv.day <= cur.fromDay) { cur.siteId = mv.to; continue; } // same-day move → overwrite
-        cur.toDay = mv.day - 1;
-        segments.push({ fromDay: mv.day, toDay: days, siteId: mv.to });
-      }
-      map.set(emp.id, { homeSiteId: site, segments, transferred: moves.length > 0 });
-    }
-    return map;
-  }, [employees, transfers, records, year, month, days]);
+  }, [employees, assignedSiteIds, timelines]);
 
   // ---- sitewise sections --------------------------------------------------------
   // Alphabetical inside each section; employees moved mid-month get a row at
@@ -522,27 +479,30 @@ export function AttendancePage() {
     return p.kind === 'hours' ? String(p.hours) : '10';
   };
 
-  // crew in the current bulk scope (respects admin site permissions AND the
-  // site each employee was actually at on the picked date — a mid-month move
-  // means the employee is bulk-markable at their old site for the days before
-  // the move and at the new site afterwards)
+  // crew in the current bulk scope — the SAME shared date-effective engine as
+  // the sheet decides each employee's site on the picked day (and the marking
+  // RPCs enforce the identical rule on save): a mid-month move means the
+  // employee is bulk-markable at their old site for the days before the move
+  // and at the new site afterwards. Normal admins only ever get employees
+  // sitting inside their assigned sites on that day (idle → super admins only).
   const bulkCrew = useMemo(() => {
-    const sameMonth = bulkDate.slice(0, 7) === monthKey;
-    const dayOf = Number(bulkDate.slice(8, 10));
-    const siteOnDay = (e: EmployeeVM): string | null => {
-      if (!sameMonth) return e.current_site_id;
-      const segs = timelines.get(e.id)?.segments;
-      if (!segs) return e.current_site_id;
-      const sg = segs.find((x) => dayOf >= x.fromDay && dayOf <= x.toDay);
-      return sg ? (sg.siteId ?? null) : e.current_site_id;
-    };
+    const siteOnDay = (e: EmployeeVM): string | null =>
+      getEmployeeSiteForDate(e.id, bulkDate, {
+        transfers: transfers ?? [],
+        records: recordsByEmployee,
+        currentSiteId: e.current_site_id,
+      });
     const arr = scoped.filter((e) => {
-      if (bulkSite === 'all') return true;
+      if (bulkSite === 'all') {
+        if (assignedSiteIds === null) return true; // super admin → everyone
+        const s = siteOnDay(e);
+        return s !== null && assignedSiteIds.has(s);
+      }
       const want = bulkSite === 'idle' ? null : bulkSite;
       return siteOnDay(e) === want;
     });
     return [...arr].sort((a, b) => a.full_name.localeCompare(b.full_name));
-  }, [scoped, bulkSite, bulkDate, monthKey, timelines]);
+  }, [scoped, bulkSite, bulkDate, transfers, recordsByEmployee, assignedSiteIds]);
 
   // prefill whenever the dialog opens, the date changes or fresh records arrive
   useEffect(() => {
@@ -550,14 +510,14 @@ export function AttendancePage() {
     const def = defaultHoursText();
     const vals: Record<string, string> = {};
     const inc: Record<string, boolean> = {};
-    scoped.forEach((e) => {
+    bulkCrew.forEach((e) => {
       const existing = recordToText(recordMap.get(`${e.id}|${bulkDate}`));
       vals[e.id] = existing !== '' ? existing : def;
       inc[e.id] = true;
     });
     setBulkValues(vals);
     setBulkInclude(inc);
-  }, [bulkOpen, bulkDate, recordMap, scoped]);
+  }, [bulkOpen, bulkDate, recordMap, bulkCrew]);
 
   // live stats for the footer chips
   const bulkStats = useMemo(() => {
@@ -609,8 +569,13 @@ export function AttendancePage() {
 
   const openBulkDialog = (siteId: string = 'all') => {
     setBulkHours('10');
-    setBulkDate(todayYMD());
+    const t = todayYMD();
+    setBulkDate(t);
     setBulkSite(siteId);
+    // keep the sheet on the day being bulk-filled so the picked month's
+    // records (and the date-effective engine's pre-marked-day walk) are live
+    const mk = t.slice(0, 7);
+    if (mk !== monthKey) setMonthKey(mk);
     setBulkOpen(true);
   };
 

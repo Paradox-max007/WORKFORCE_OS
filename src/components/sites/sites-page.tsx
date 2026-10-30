@@ -113,7 +113,23 @@ interface SheetRow {
   signature: string;
   isTeamLeader: boolean;
   isSupervisor: boolean;
+  /** Snapshot of the employee values this row was BUILT from — lets the
+   *  reconciliation effect tell hand-edited cells apart from upstream
+   *  (transfer / edit) updates, so manual edits are never lost. */
+  src: { name: string; code: string; position: string };
 }
+
+/** Build a fresh PDF row from the employee record (roster source of truth). */
+const buildSheetRow = (e: EmployeeVM, siteId: string): SheetRow => ({
+  id: e.id,
+  name: e.full_name,
+  code: e.employee_code,
+  position: e.position ?? '',
+  signature: '',
+  isTeamLeader: e.is_team_leader && e.team_leader_site_id === siteId,
+  isSupervisor: (e.position ?? '').toLowerCase().includes('supervisor'),
+  src: { name: e.full_name, code: e.employee_code, position: e.position ?? '' },
+});
 
 interface ExtraRow {
   name: string;
@@ -202,7 +218,7 @@ function AttLogo() {
 export function SitesPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
-  const version = useRealtimeVersion(['site', 'employee']);
+  const version = useRealtimeVersion(['site', 'employee', 'site_transfer']);
 
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
@@ -1324,26 +1340,51 @@ function AttendanceSheetView({
   const [clientName, setClientName] = useState((site.client_name ?? '').toUpperCase());
   const [projectName, setProjectName] = useState((site.project_name ?? site.name).toUpperCase());
   const [dateInput, setDateInput] = useState(() => formatDateDisplay(new Date()));
-  const [strength, setStrength] = useState(String(employees.length));
 
   // editable rows (team leaders first, then supervisors, then alphabetical)
   const [rows, setRows] = useState<SheetRow[]>(() =>
-    employees.map((e) => ({
-      id: e.id,
-      name: e.full_name,
-      code: e.employee_code,
-      position: e.position ?? '',
-      signature: '',
-      isTeamLeader: e.is_team_leader && e.team_leader_site_id === site.id,
-      isSupervisor: (e.position ?? '').toLowerCase().includes('supervisor'),
-    })),
+    employees.map((e) => buildSheetRow(e, site.id)),
   );
+  // employee-strength field is auto-derived until the user hand-edits it
+  const [strength, setStrength] = useState(String(employees.length));
+  const strengthDirty = useRef(false);
   const [extras, setExtras] = useState<ExtraRow[]>(() =>
     Array.from({ length: EXTRA_ROWS }, () => ({ name: '', code: '', trade: '', signature: '' })),
   );
   // hand-written totals (blank lines to be filled after signing)
   const [totalPresent, setTotalPresent] = useState('');
   const [totalAbsent, setTotalAbsent] = useState('');
+
+  // ---- roster reconciliation --------------------------------------------------
+  // The employees prop is the CURRENT site roster — it changes live when
+  // employees are transferred to/from this site while the sheet is open
+  // (realtime). Rebuild the rows so employees moved OUT disappear, employees
+  // moved IN appear (sortedRows re-sorts alphabetically on every render),
+  // manual edits on surviving rows (name / ID / trade / signature) survive,
+  // and strength + pagination stay correct. Preview and exported PDF read
+  // the same `rows`, so both always match. Nobody is ever listed twice.
+  useEffect(() => {
+    setRows((prev) => {
+      const prevById = new Map(prev.map((r) => [r.id, r]));
+      return employees.map((e) => {
+        const old = prevById.get(e.id);
+        const fresh = buildSheetRow(e, site.id);
+        if (!old) return fresh; // newly transferred in (or first build)
+        const position = old.position !== old.src.position ? old.position : fresh.position;
+        return {
+          id: e.id,
+          name: old.name !== old.src.name ? old.name : fresh.name,
+          code: old.code !== old.src.code ? old.code : fresh.code,
+          position,
+          signature: old.signature, // signatures are only ever hand-written
+          isTeamLeader: fresh.isTeamLeader,
+          isSupervisor: position.toLowerCase().includes('supervisor'),
+          src: fresh.src,
+        };
+      });
+    });
+    if (!strengthDirty.current) setStrength(String(employees.length));
+  }, [employees, site.id]);
 
   const sortedRows = useMemo(
     () => [...rows].sort((a, b) => a.name.localeCompare(b.name)),
@@ -1463,7 +1504,7 @@ function AttendanceSheetView({
               <div className="att-info-row">
                 <span className="att-info-label">• STRENGTH :</span>
                 <span className="att-info-value">
-                  {cell(strength, interactive ? (v) => setStrength(v) : null)}
+                  {cell(strength, interactive ? (v) => { strengthDirty.current = true; setStrength(v); } : null)}
                 </span>
               </div>
             </div>

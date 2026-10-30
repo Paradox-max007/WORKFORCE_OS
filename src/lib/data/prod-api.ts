@@ -23,6 +23,7 @@ import {
   type Profile,
   type RealtimeTable,
   type Site,
+  type SiteTransfer,
   type SiteWithCount,
   type UniformEntry,
   type UniformEntryInput,
@@ -37,6 +38,12 @@ const sb = () => {
 
 const assertOk = (error: { message: string } | null): void => {
   if (error) throw new Error(error.message);
+};
+
+/** Local-time today as YYYY-MM-DD — the effective date of a recorded site move. */
+const localTodayYMD = (): string => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
 // ---------------------------------------------------------------------------
@@ -321,6 +328,12 @@ export const prodApi = {
     }));
   },
 
+  async listSiteTransfers(): Promise<SiteTransfer[]> {
+    const { data, error } = await sb().from('site_transfer').select('*').order('created_at');
+    assertOk(error);
+    return (data ?? []) as SiteTransfer[];
+  },
+
   async createEmployee(input: EmployeeInput): Promise<EmployeeVM> {
     const { data, error } = await sb().rpc('create_employee', {
       p_employee: JSON.stringify(input),
@@ -336,7 +349,7 @@ export const prodApi = {
 
   async updateEmployee(id: string, input: EmployeeInput): Promise<EmployeeVM> {
     const { data, error } = await sb().rpc('update_employee', {
-      p_id: id, p_employee: JSON.stringify(input),
+      p_id: id, p_employee: JSON.stringify(input), p_effective_date: localTodayYMD(),
     });
     assertOk(error);
     const updated = data as unknown as Record<string, unknown>;

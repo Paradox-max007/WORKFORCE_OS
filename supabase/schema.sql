@@ -98,6 +98,19 @@ create table if not exists public.admin_site (
   unique (profile_id, site_id)
 );
 
+-- Site transfer log: one row is written automatically whenever an employee's
+-- work site changes (employee form, per-site transfer, remove-from-site).
+-- The attendance sheet uses it to place moved employees at the bottom of their
+-- original site's crew (faded) with the new site shown across the moved days.
+create table if not exists public.site_transfer (
+  id             uuid primary key default gen_random_uuid(),
+  employee_id    uuid not null references public.employee(id) on delete cascade,
+  from_site_id   uuid references public.site(id) on delete set null,
+  to_site_id     uuid references public.site(id) on delete set null,
+  effective_date date not null default current_date,
+  created_at     timestamptz not null default now()
+);
+
 -- ---------------------------------------------------------------------------
 -- Migration guards (make re-running this file safe on older installs)
 -- ---------------------------------------------------------------------------
@@ -235,6 +248,8 @@ create index if not exists idx_uniform_created      on public.uniform_registry(c
 create index if not exists idx_menu_perm_profile    on public.menu_permission(profile_id);
 create index if not exists idx_admin_site_profile   on public.admin_site(profile_id);
 create index if not exists idx_admin_site_site      on public.admin_site(site_id);
+create index if not exists idx_site_transfer_emp   on public.site_transfer(employee_id);
+create index if not exists idx_site_transfer_date  on public.site_transfer(effective_date);
 
 -- ============================================================================
 -- 3. HELPER + SECURITY FUNCTIONS
@@ -355,6 +370,7 @@ alter table public.fine                enable row level security;
 alter table public.leave_request       enable row level security;
 alter table public.cancellation_request enable row level security;
 alter table public.uniform_registry    enable row level security;
+alter table public.site_transfer       enable row level security;
 
 -- profiles: read self, super admins read all
 drop policy if exists profiles_select on public.profiles;
@@ -387,6 +403,9 @@ drop policy if exists camp_select on public.camp;
 create policy camp_select on public.camp for select using (public.is_staff());
 drop policy if exists employee_select on public.employee;
 create policy employee_select on public.employee for select using (public.is_staff());
+drop policy if exists site_transfer_select on public.site_transfer;
+create policy site_transfer_select on public.site_transfer
+  for select using (public.is_staff());
 drop policy if exists attendance_select on public.attendance;
 create policy attendance_select on public.attendance for select using (public.is_staff());
 drop policy if exists warning_select on public.warning;
@@ -728,7 +747,7 @@ begin
   return result;
 end; $$;
 
-create or replace function public.update_employee(p_id uuid, p_employee jsonb)
+create or replace function public.update_employee(p_id uuid, p_employee jsonb, p_effective_date date default null)
 returns public.employee language plpgsql
 security definer set search_path = public
 as $$
@@ -739,6 +758,7 @@ declare v_block text := nullif(btrim(coalesce(p_employee->>'camp_block','')), ''
 declare v_room  text := nullif(btrim(coalesce(p_employee->>'camp_room','')), '');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
+declare v_prev_site uuid;
 declare conflicting public.employee;
 begin
   if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
@@ -764,6 +784,9 @@ begin
     end if;
   end if;
 
+  -- remember the previous site so the move can be logged below
+  select current_site_id into v_prev_site from public.employee where id = p_id;
+
   update public.employee set
     full_name         = p_employee->>'full_name',
     nationality       = nullif(p_employee->>'nationality',''),
@@ -788,6 +811,15 @@ begin
     team_leader_site_id = case when v_is_leader then v_leader_site else null end,
     updated_at        = now()
   where id = p_id returning * into result;
+
+  -- log the site move (site → site, site → idle, idle → site) so the attendance
+  -- sheet can keep the row under the original site with the new site shown
+  -- across the merged moved-days cells
+  if v_prev_site is distinct from v_site then
+    insert into public.site_transfer (employee_id, from_site_id, to_site_id, effective_date)
+    values (p_id, v_prev_site, v_site,
+            coalesce(p_effective_date, (now() at time zone 'Asia/Dubai')::date));
+  end if;
   return result;
 end; $$;
 
@@ -1343,6 +1375,7 @@ begin
   alter publication supabase_realtime add table public.leave_request;
   alter publication supabase_realtime add table public.cancellation_request;
   alter publication supabase_realtime add table public.uniform_registry;
+  alter publication supabase_realtime add table public.site_transfer;
 exception
   when duplicate_object then null; -- already in publication
 end $$;

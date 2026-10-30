@@ -11,6 +11,11 @@
 // • BULK DAY ENTRY: fill an entire day for a whole site crew in one action —
 //   hours DEFAULT TO 10 but every value is editable before the save, and the
 //   sheet cells stay editable any time afterwards.
+// • SITE MOVES: an employee transferred mid-month (e.g. Site A → Site B on the
+//   25th) stays under the site they started the month at — BOTTOM of the crew,
+//   faded — and the days from the move to the end of the month render as ONE
+//   merged cell showing the new site (the PDF sheet instead lists them under
+//   their new site, alphabetically).
 // • Each row shows the employee's TRADE (position) next to their ID.
 // • Right side: TOTAL HOURS (sum of the row's cells) + ABSENCES count.
 // • Normal admins only see — and can only mark — the sites assigned to them
@@ -20,10 +25,10 @@
 
 import { motion } from 'framer-motion';
 import {
-  Building2, CalendarCheck, CalendarDays, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
+  ArrowLeftRight, Building2, CalendarCheck, CalendarDays, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
   Tent, UserX, Zap,
 } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
 import { EmptyState, SectionTitle, SkeletonRows } from '@/components/shared/primitives';
@@ -40,7 +45,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { Attendance, BulkAttendanceEntry, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { Attendance, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -103,11 +108,27 @@ interface SiteSection {
   isIdle?: boolean;
 }
 
+/** A run of days within the viewed month spent at one site (null = idle). */
+interface MonthSegment {
+  fromDay: number;
+  toDay: number;
+  siteId: string | null;
+}
+
+/** An employee's site timeline across the viewed month (from the transfer log). */
+interface MonthTimeline {
+  /** Site the employee was at on day 1 of the month — where their row lives. */
+  homeSiteId: string | null;
+  segments: MonthSegment[];
+  /** True when at least one move happened inside this month. */
+  transferred: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export function AttendancePage() {
-  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site']);
+  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer']);
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
 
@@ -117,6 +138,7 @@ export function AttendancePage() {
 
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  const [transfers, setTransfers] = useState<SiteTransfer[] | null>(null);
   const [records, setRecords] = useState<Attendance[] | null>(null);
   const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(isSuperAdmin ? null : new Set());
 
@@ -155,8 +177,10 @@ export function AttendancePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts] = await Promise.all([dataApi.listEmployees(), dataApi.listSites()]);
-        if (!cancelled) { setEmployees(emps); setSites(sts); }
+        const [emps, sts, trs] = await Promise.all([
+          dataApi.listEmployees(), dataApi.listSites(), dataApi.listSiteTransfers(),
+        ]);
+        if (!cancelled) { setEmployees(emps); setSites(sts); setTransfers(trs); }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
       }
@@ -195,7 +219,59 @@ export function AttendancePage() {
     return list.filter((e) => e.current_site_id !== null && assignedSiteIds.has(e.current_site_id));
   }, [employees, assignedSiteIds]);
 
-  // ---- sitewise sections (alphabetical inside each section) -------------------
+  // ---- site-transfer timelines for the viewed month ---------------------------
+  // Every recorded site move splits the month into segments. The segment the
+  // employee STARTED the month at is their "home" — the row stays under that
+  // site's section (bottom, faded); each later segment renders as one merged
+  // cell showing where they moved to. Months before the move → old site as a
+  // normal row; months after → new site as a normal row.
+  const timelines = useMemo(() => {
+    const byEmp = new Map<string, SiteTransfer[]>();
+    (transfers ?? []).forEach((t) => {
+      const arr = byEmp.get(t.employee_id) ?? [];
+      arr.push(t);
+      byEmp.set(t.employee_id, arr);
+    });
+    byEmp.forEach((arr) => arr.sort((a, b) =>
+      a.effective_date === b.effective_date
+        ? a.created_at.localeCompare(b.created_at)
+        : a.effective_date < b.effective_date ? -1 : 1));
+
+    const first = ymd(year, month, 1);
+    const last = ymd(year, month, days);
+    const map = new Map<string, MonthTimeline>();
+    for (const emp of employees ?? []) {
+      const ts = byEmp.get(emp.id);
+      if (!ts || ts.length === 0) {
+        map.set(emp.id, {
+          homeSiteId: emp.current_site_id,
+          segments: [{ fromDay: 1, toDay: days, siteId: emp.current_site_id }],
+          transferred: false,
+        });
+        continue;
+      }
+      // site at day 1 = fold of every transfer already effective by then
+      let site: string | null = ts[0].from_site_id ?? null;
+      const moves: { day: number; to: string | null }[] = [];
+      for (const t of ts) {
+        if (t.effective_date <= first) site = t.to_site_id ?? null;
+        else if (t.effective_date <= last) moves.push({ day: Number(t.effective_date.slice(8, 10)), to: t.to_site_id ?? null });
+      }
+      const segments: MonthSegment[] = [{ fromDay: 1, toDay: days, siteId: site }];
+      for (const mv of moves) {
+        const cur = segments[segments.length - 1];
+        if (mv.day <= cur.fromDay) { cur.siteId = mv.to; continue; } // same-day move → overwrite
+        cur.toDay = mv.day - 1;
+        segments.push({ fromDay: mv.day, toDay: days, siteId: mv.to });
+      }
+      map.set(emp.id, { homeSiteId: site, segments, transferred: moves.length > 0 });
+    }
+    return map;
+  }, [employees, transfers, year, month, days]);
+
+  // ---- sitewise sections --------------------------------------------------------
+  // Alphabetical inside each section; employees moved mid-month stay under the
+  // site they started the month at — at the BOTTOM of the crew, faded.
   const sections = useMemo<SiteSection[]>(() => {
     const q = debouncedSearch.toLowerCase().trim();
     const matches = (e: EmployeeVM) =>
@@ -203,6 +279,37 @@ export function AttendancePage() {
     const byName = (a: EmployeeVM, b: EmployeeVM) => a.full_name.localeCompare(b.full_name);
 
     const siteList = (sites ?? []).filter((s) => s.is_active);
+    const activeSiteIds = new Set(siteList.map((s) => s.id));
+
+    // where does this employee's row live for the viewed month?
+    const placement = (e: EmployeeVM): { siteId: string | null; moved: boolean } => {
+      const tl = timelines.get(e.id);
+      if (!tl) return { siteId: e.current_site_id, moved: false };
+      const home = tl.homeSiteId; // site they were at on day 1 of this month
+      const homeOk = home !== null && activeSiteIds.has(home);
+      if (!tl.transferred) {
+        // moved in ANOTHER month → this whole month was spent at one site:
+        // before the move → the old site, after the move → the new site
+        return { siteId: homeOk ? home : e.current_site_id, moved: false };
+      }
+      // moved during THIS month → stay under the site the month started at
+      if (homeOk) return { siteId: home, moved: true };
+      // home site gone / inactive (or they started the month idle) → keep the
+      // row visible under their current site / idle instead of losing it
+      return {
+        siteId: e.current_site_id && activeSiteIds.has(e.current_site_id) ? e.current_site_id : null,
+        moved: true,
+      };
+    };
+
+    const placements = new Map(scoped.map((e) => [e.id, placement(e)]));
+    const rowSort = (a: EmployeeVM, b: EmployeeVM): number => {
+      const ma = placements.get(a.id)?.moved ? 1 : 0;
+      const mb = placements.get(b.id)?.moved ? 1 : 0;
+      if (ma !== mb) return ma - mb; // moved rows sink to the bottom
+      return byName(a, b);
+    };
+
     const result: SiteSection[] = siteList
       .filter((s) => siteFilter === 'all' || s.id === siteFilter)
       .map((s) => ({
@@ -210,16 +317,16 @@ export function AttendancePage() {
         title: s.name,
         client: s.client_name,
         emps: scoped
-          .filter((e) => e.current_site_id === s.id && matches(e))
-          .sort(byName),
+          .filter((e) => placements.get(e.id)?.siteId === s.id && matches(e))
+          .sort(rowSort),
       }))
       .filter((sec) => sec.emps.length > 0);
 
     // idle employees — super admins only (admins can never mark them)
     if (isSuperAdmin && (siteFilter === 'all' || siteFilter === 'idle')) {
       const idle = scoped
-        .filter((e) => !e.current_site_id && matches(e))
-        .sort(byName);
+        .filter((e) => placements.get(e.id)?.siteId === null && matches(e))
+        .sort(rowSort);
       if (idle.length > 0) {
         result.push({
           key: '__idle__',
@@ -231,7 +338,7 @@ export function AttendancePage() {
       }
     }
     return result;
-  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin]);
+  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines]);
 
   // flat crew for the calendar view combobox
   const crew = useMemo(
@@ -482,7 +589,7 @@ export function AttendancePage() {
     }
   };
 
-  const loading = !employees || !records || !sites || (!isSuperAdmin && assignedSiteIds === null);
+  const loading = !employees || !records || !sites || !transfers || (!isSuperAdmin && assignedSiteIds === null);
   const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
 
   const dayColumns = useMemo(() => {
@@ -494,7 +601,7 @@ export function AttendancePage() {
   }, [days]);
 
   // ---- one day cell (plain render fn — keeps input focus stable) ------------
-  const renderDayCell = (emp: EmployeeVM, date: string) => {
+  const renderDayCell = (emp: EmployeeVM, date: string, faded = false) => {
     const key = `${emp.id}|${date}`;
     const value = cellText(emp.id, date);
     const busy = savingKeys.has(key);
@@ -533,6 +640,7 @@ export function AttendancePage() {
                 isA && 'bg-rose-500/10 font-bold text-rose-500',
                 value !== '' && !isA && 'text-foreground',
                 busy && 'opacity-50',
+                faded && 'opacity-60',
               )}
             />
             {busy && (
@@ -549,6 +657,9 @@ export function AttendancePage() {
   // ---- a full site section (table with that site's crew) ---------------------------
   const renderSheetSection = (section: SiteSection, index: number) => {
     const totalHours = section.emps.reduce((sum, emp) => sum + rowTotals(emp.id).hours, 0);
+    const movedCount = section.emps.filter((e) => timelines.get(e.id)?.transferred).length;
+    const siteNameOf = (siteId: string | null): string =>
+      siteId ? (sites ?? []).find((s) => s.id === siteId)?.name ?? 'Former site' : 'Unassigned / Idle';
     return (
       <motion.section
         initial={{ opacity: 0, y: 14 }}
@@ -586,6 +697,15 @@ export function AttendancePage() {
             {section.emps.length > 0 && (
               <span className="hidden rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500 sm:inline-flex">
                 Site total: {Math.round(totalHours * 100) / 100}h
+              </span>
+            )}
+            {movedCount > 0 && (
+              <span
+                className="hidden items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand sm:inline-flex"
+                title="Employees moved to another site this month stay at the bottom of the crew (faded) with their new site shown across the moved days"
+              >
+                <ArrowLeftRight size={11} />
+                {movedCount} moved
               </span>
             )}
             <Button
@@ -661,17 +781,28 @@ export function AttendancePage() {
               <tbody>
                 {section.emps.map((emp, i) => {
                   const totals = rowTotals(emp.id);
+                  const tl = timelines.get(emp.id);
+                  const moved = tl?.transferred ?? false;
+                  // segment matching the section's site (or idle) → editable day
+                  // cells; every other segment → ONE merged cell with the site name
+                  const homeKey: string | null = section.isIdle ? null : section.key;
+                  const segs: MonthSegment[] =
+                    tl?.segments ?? [{ fromDay: 1, toDay: days, siteId: emp.current_site_id }];
+                  const movedLabel = segs
+                    .filter((sg) => (sg.siteId ?? null) !== homeKey)
+                    .map((sg) => `${siteNameOf(sg.siteId)} (${formatDatePretty(ymd(year, month, sg.fromDay))})`)
+                    .join(' → ');
                   return (
                     <motion.tr
                       key={emp.id}
                       initial={{ opacity: 0, y: 6 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: Math.min(i * 0.02, 0.25), ease: EASE }}
-                      className="transition-colors"
+                      className={cn('transition-colors', moved && 'bg-muted/25')}
                     >
                       {/* employee — avatar + name (camp as tooltip icon) + ID */}
                       <td className="sticky left-0 z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
-                        <div className="flex items-center gap-2">
+                        <div className={cn('flex items-center gap-2', moved && 'opacity-60')}>
                           <span className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[9px] font-bold text-brand">
                             {emp.photo ? <img src={emp.photo} alt={emp.full_name} className="size-full object-cover" /> : initials(emp.full_name)}
                           </span>
@@ -686,6 +817,14 @@ export function AttendancePage() {
                                   <Tent size={9} className="inline" />
                                 </span>
                               )}
+                              {moved && (
+                                <span
+                                  className="ml-1 inline-block align-middle text-brand"
+                                  title={`Moved this month: ${movedLabel}`}
+                                >
+                                  <ArrowLeftRight size={9} className="inline" />
+                                </span>
+                              )}
                             </p>
                             <p className="truncate font-mono text-[9px] leading-tight text-muted-foreground">{emp.employee_code}</p>
                           </div>
@@ -693,14 +832,52 @@ export function AttendancePage() {
                       </td>
                       {/* trade — its own dedicated column */}
                       <td className="sticky left-[150px] z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
-                        <span className="block truncate text-[11px] font-medium text-foreground/80" title={emp.position ?? undefined}>{emp.position ?? '—'}</span>
+                        <span
+                          className={cn('block truncate text-[11px] font-medium text-foreground/80', moved && 'opacity-60')}
+                          title={emp.position ?? undefined}
+                        >
+                          {emp.position ?? '—'}
+                        </span>
                       </td>
-                      {dayColumns.map((d) => (
-                        renderDayCell(emp, ymd(year, month, d))
-                      ))}
+                      {/* days — one editable cell per day for the segment(s) at this
+                          site; moved-away segments merge into one labelled cell */}
+                      {segs.map((seg, si) => {
+                        const isHome = (seg.siteId ?? null) === homeKey;
+                        if (isHome) {
+                          const cells: ReactNode[] = [];
+                          for (let d = seg.fromDay; d <= seg.toDay; d++) {
+                            cells.push(renderDayCell(emp, ymd(year, month, d), moved));
+                          }
+                          return <Fragment key={`seg-${si}`}>{cells}</Fragment>;
+                        }
+                        const span = seg.toDay - seg.fromDay + 1;
+                        const label = siteNameOf(seg.siteId);
+                        // leading segment = where they came from; later = where they moved to
+                        const tooltip = si === 0
+                          ? `Was at ${label} until ${formatDatePretty(ymd(year, month, segs[si + 1]?.fromDay ?? days))}`
+                          : `Moved to ${label} on ${formatDatePretty(ymd(year, month, seg.fromDay))}`;
+                        return (
+                          <td
+                            key={`seg-${si}`}
+                            colSpan={span}
+                            className="border-x border-b border-foreground/15 bg-brand/[0.08] p-0"
+                          >
+                            <div
+                              className="flex h-8 items-center justify-center gap-1 px-1"
+                              title={tooltip}
+                            >
+                              <ArrowLeftRight size={10} className="shrink-0 text-brand" />
+                              <span className="truncate text-[10px] font-semibold italic text-brand">{label}</span>
+                            </div>
+                          </td>
+                        );
+                      })}
                       {/* Total hours */}
                       <td className="sticky right-[48px] z-10 border-x border-b border-foreground/15 bg-card px-1 py-1.5 text-center">
-                        <span className="inline-flex min-w-9 justify-center rounded-md bg-emerald-500/10 px-1 py-0.5 text-[11px] font-bold tabular-nums text-emerald-500">
+                        <span className={cn(
+                          'inline-flex min-w-9 justify-center rounded-md bg-emerald-500/10 px-1 py-0.5 text-[11px] font-bold tabular-nums text-emerald-500',
+                          moved && 'opacity-60',
+                        )}>
                           {totals.hours}
                         </span>
                       </td>
@@ -710,6 +887,7 @@ export function AttendancePage() {
                           className={cn(
                             'inline-flex min-w-7 justify-center rounded-md px-1 py-0.5 text-[11px] font-bold tabular-nums',
                             totals.absents > 0 ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground',
+                            moved && 'opacity-60',
                           )}
                         >
                           {totals.absents}
@@ -723,6 +901,9 @@ export function AttendancePage() {
           </div>
           <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
             {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every past cell is editable (hours e.g. 8, 10.5 or <span className="font-semibold text-rose-500">A</span>); future dates stay blank & locked
+            {movedCount > 0 && (
+              <> · <span className="font-medium text-brand">{movedCount} moved mid-month → bottom row, faded, new site shown</span></>
+            )}
           </p>
         </div>
       </motion.section>
@@ -738,6 +919,7 @@ export function AttendancePage() {
           <p className="mt-1 text-sm text-muted-foreground">
             Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent.
             Bulk-fill a whole day in one go via <span className="font-semibold text-foreground">Bulk Day</span> (defaults to 10h).
+            Employees moved mid-month stay under their original site — bottom of the crew, faded, with the new site shown.
           </p>
         </motion.div>
         <div className="flex flex-wrap items-center gap-2">
@@ -841,6 +1023,7 @@ export function AttendancePage() {
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-emerald-500/20 ring-1 ring-emerald-500/40" />Hours</span>
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/[0.06] ring-1 ring-border" />Sunday</span>
           <span className="hidden items-center gap-1.5 lg:flex"><span className="size-2.5 rounded-sm bg-muted/60 ring-1 ring-border/70" />Future (locked)</span>
+          <span className="hidden items-center gap-1.5 lg:flex"><span className="size-2.5 rounded-sm bg-brand/15 ring-1 ring-brand/40" />Moved mid-month (faded)</span>
         </div>
       </div>
 

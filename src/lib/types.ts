@@ -87,6 +87,22 @@ export interface EmployeeVM extends Employee {
 
 export type AttendanceStatus = 'present' | 'absent' | 'not_marked';
 
+/**
+ * One recorded site move. Written automatically whenever an employee's work
+ * site changes (employee form, site transfer, remove-from-site). The
+ * attendance sheet uses this log to keep moved employees under the site they
+ * started the month at — bottom of the crew, faded — with the destination site
+ * shown across the merged moved-days cells.
+ */
+export interface SiteTransfer {
+  id: string;
+  employee_id: string;
+  from_site_id: string | null; // null = was unassigned / idle
+  to_site_id: string | null;   // null = moved to unassigned / idle
+  effective_date: string;      // YYYY-MM-DD — the day the move takes effect
+  created_at: string;          // exact timestamp of the move (e.g. 25th 8 PM)
+}
+
 export interface Attendance {
   id: string;
   employee_id: string;
@@ -302,7 +318,8 @@ export type RealtimeTable =
   | 'fine'
   | 'leave_request'
   | 'cancellation_request'
-  | 'uniform_registry';
+  | 'uniform_registry'
+  | 'site_transfer';
 
 export interface MonthlySummaryRow {
   month: string; // YYYY-MM

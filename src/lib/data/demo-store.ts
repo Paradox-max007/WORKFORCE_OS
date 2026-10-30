@@ -18,6 +18,7 @@ import {
   type Notification,
   type Profile,
   type Site,
+  type SiteTransfer,
   type UniformEntry,
   type Warning,
 } from '@/lib/types';
@@ -41,6 +42,7 @@ export interface DemoDB {
   uniforms: UniformEntry[];
   menuPermissions: { profile_id: string; menu_key: MenuKey; allowed: boolean }[];
   siteAssignments: { profile_id: string; site_id: string }[];
+  siteTransfers: SiteTransfer[];
   counters: { uniform_id: number; token_number: number };
 }
 
@@ -88,7 +90,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 6,
+    version: 7,
     profiles: [],
     sites: [],
     camps: [],
@@ -102,6 +104,7 @@ function seedDB(): DemoDB {
     uniforms: [],
     menuPermissions: [],
     siteAssignments: [],
+    siteTransfers: [],
     counters: { uniform_id: 0, token_number: 0 },
   };
 
@@ -382,7 +385,7 @@ function seedDB(): DemoDB {
 // Persistence + cross-tab realtime sync
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'pulse_demo_db_v6';
+const STORAGE_KEY = 'pulse_demo_db_v7';
 const SESSION_KEY = 'pulse_demo_session';
 const CHANNEL = 'pulse-demo-realtime';
 
@@ -410,7 +413,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 6) return parsed;
+      if (parsed.version === 7) return parsed;
     }
   } catch {
     // corrupted → reseed

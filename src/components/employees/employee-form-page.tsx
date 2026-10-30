@@ -452,6 +452,12 @@ export function EmployeeFormPage() {
                     <SelectItem value="__add_new" className="text-brand">+ Add New Site…</SelectItem>
                   </SelectContent>
                 </Select>
+                {mode === 'edit' && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Changing the site records a transfer effective today — the attendance sheet keeps the employee at the
+                    bottom of the old site's crew (faded) with the new site shown across the moved days.
+                  </p>
+                )}
               </div>
               {newSiteName !== null && (
                 <div className="flex items-end gap-2 sm:col-span-2">

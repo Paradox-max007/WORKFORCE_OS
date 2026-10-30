@@ -18,6 +18,7 @@ import {
   type Notification,
   type Profile,
   type Site,
+  type SiteTransfer,
   type SiteWithCount,
   type UniformEntry,
   type UniformEntryInput,
@@ -403,6 +404,10 @@ export const demoApi = {
     return db.employees.filter((e) => e.status !== 'deleted').map(attachEmployeeVM);
   },
 
+  async listSiteTransfers(): Promise<SiteTransfer[]> {
+    return [...db.siteTransfers];
+  },
+
   async createEmployee(input: EmployeeInput): Promise<EmployeeVM> {
     if (input.current_site_id) {
       const site = db.sites.find((s) => s.id === input.current_site_id);
@@ -475,6 +480,11 @@ export const demoApi = {
       );
       if (conflict) throw new Error(`Another employee (${conflict.full_name}) is already the team leader of this site`);
     }
+    // remember the previous site — a change is logged as a site transfer so the
+    // attendance sheet can show the move (bottom of the old crew, faded, new
+    // site across the merged moved-days cells)
+    const prevSiteId = e.current_site_id ?? null;
+    const nextSiteId = input.current_site_id || null;
     Object.assign(e, {
       full_name: input.full_name,
       nationality: input.nationality || null,
@@ -499,7 +509,17 @@ export const demoApi = {
       team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
       updated_at: nowISO(),
     });
-    saveAndEmit(['employee']);
+    if (prevSiteId !== nextSiteId) {
+      db.siteTransfers.push({
+        id: uid(),
+        employee_id: id,
+        from_site_id: prevSiteId,
+        to_site_id: nextSiteId,
+        effective_date: toYMD(new Date()),
+        created_at: nowISO(),
+      });
+    }
+    saveAndEmit(['employee', 'site_transfer']);
     return attachEmployeeVM(e);
   },
 

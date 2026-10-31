@@ -31,6 +31,12 @@
 // • Normal admins only see — and can only mark — the sites assigned to them
 //   by a super admin (Admin Management → Site Access).
 // • Calendar view: per-employee month calendar with the same editing model.
+// • KEYBOARD NAVIGATION (src/lib/grid-nav.ts): arrow keys and Enter move
+//   between the day cells like a spreadsheet — ↑/↓ and Enter/Shift+Enter hop
+//   between rows in the same day column, ←/→ step along the row when the
+//   caret is at the edge of the value. Locked future dates and merged
+//   moved-away segments are skipped automatically. The bulk-day dialog's
+//   value cells support the same ↑/↓/Enter walking down the crew list.
 // ============================================================================
 
 import { motion } from 'framer-motion';
@@ -54,6 +60,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
+import { gridCellKeyDown, type GridNavConfig } from '@/lib/grid-nav';
 import {
   buildMonthTimeline,
   getEmployeeSiteForDate,
@@ -89,6 +96,20 @@ const TRADE_COL_W = 76; // trade
 const TOTAL_COL_W = 54; // total hours
 const ABSENT_COL_W = 48; // absent count
 const DAY_MIN_W = 22; // per-day column minimum before scrolling kicks in
+
+// keyboard navigation pools (arrow keys + Enter — see the file header)
+const DAY_CELL_NAV: GridNavConfig = {
+  // column = day of the month ("01"…"31"), row = the sheet row (<tr>)
+  selector: 'input[data-day-col]',
+  colOf: (el) => el.dataset.dayCol,
+  rowOf: (el) => el.closest('tr'),
+};
+const BULK_VALUE_NAV: GridNavConfig = {
+  // one value cell per employee row → a single vertical column
+  selector: 'input[data-bulk-value]',
+  colOf: () => 'v',
+  rowOf: (el) => el.closest('[data-bulk-row]'),
+};
 
 const pad = (n: number): string => String(n).padStart(2, '0');
 const ymd = (y: number, m: number, d: number): string => `${y}-${pad(m)}-${pad(d)}`;
@@ -678,9 +699,10 @@ export function AttendancePage() {
             <input
               value={value}
               disabled={busy}
+              data-day-col={date.slice(8)}
               onChange={(e) => setCell(emp.id, date, e.target.value)}
               onBlur={() => commitCell(emp.id, date)}
-              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              onKeyDown={(e) => gridCellKeyDown(e, DAY_CELL_NAV)}
               aria-label={`${emp.full_name} — ${date}`}
               className={cn(
                 'h-8 w-full bg-transparent text-center text-[11px] font-medium tabular-nums outline-none transition-colors',
@@ -950,7 +972,7 @@ export function AttendancePage() {
             </table>
           </div>
           <p className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
-            {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every past cell is editable (hours e.g. 8, 10.5 or <span className="font-semibold text-rose-500">A</span>); future dates stay blank & locked
+            {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''} · alphabetical — every past cell is editable (hours e.g. 8, 10.5 or <span className="font-semibold text-rose-500">A</span>); future dates stay blank & locked · <span className="font-medium text-foreground">arrow keys / Enter move between cells</span>
             {movedCount > 0 && (
               <> · <span className="font-medium text-brand">{movedCount} moved mid-month → bottom row, faded — their row also appears under the site they moved to</span></>
             )}
@@ -1368,6 +1390,7 @@ export function AttendancePage() {
                 return (
                   <div
                     key={emp.id}
+                    data-bulk-row=""
                     className={cn(
                       'flex items-center gap-2.5 rounded-lg border px-2.5 py-2 transition-all',
                       included ? 'bg-card' : 'opacity-50',
@@ -1396,7 +1419,9 @@ export function AttendancePage() {
                     </span>
                     <Input
                       value={raw}
+                      data-bulk-value=""
                       onChange={(e) => setBulkValues((v) => ({ ...v, [emp.id]: e.target.value }))}
+                      onKeyDown={(e) => gridCellKeyDown(e, BULK_VALUE_NAV)}
                       aria-label={`Hours for ${emp.full_name} on ${bulkDate}`}
                       className={cn(
                         'h-9 w-16 shrink-0 text-center font-semibold tabular-nums',

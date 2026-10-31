@@ -45,6 +45,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
 import { fmtDate, initials } from '@/lib/format';
+import { gridCellKeyDown, type GridNavConfig } from '@/lib/grid-nav';
 import { exportElementToPdf, printElement } from '@/lib/pdf';
 import { cn } from '@/lib/utils';
 import type { EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
@@ -104,6 +105,17 @@ const formatDateDisplay = (d: Date): string =>
 const ROWS_PER_PAGE = 24;
 const FIRST_PAGE_ROWS = 18; // first page carries the big header block
 const EXTRA_ROWS = 5;
+
+// keyboard navigation between the A4 sheet's editable cells (arrow keys +
+// Enter — same engine as the marking sheet, see src/lib/grid-nav.ts):
+// ↑/↓ and Enter/Shift+Enter walk a column (client→project→date→strength,
+// then name/code/trade/signature down the rows, extras included), ←/→ step
+// along a row when the caret is at the edge of the value.
+const SHEET_CELL_NAV: GridNavConfig = {
+  selector: 'input[data-sheet-col]',
+  colOf: (el) => el.dataset.sheetCol,
+  rowOf: (el) => el.dataset.sheetRow,
+};
 
 interface SheetRow {
   id: string;
@@ -1442,13 +1454,22 @@ function AttendanceSheetView({
   };
 
   /** Inline editable cell — renders an <input> on screen and plain text in the
-   *  hidden print/PDF copies (input values don't survive outerHTML cloning). */
-  const cell = (value: string, onChange: ((v: string) => void) | null, center = false) =>
+   *  hidden print/PDF copies (input values don't survive outerHTML cloning).
+   *  `nav` (row / col identity) wires the cell into the sheet's arrow-key +
+   *  Enter navigation — see SHEET_CELL_NAV above. */
+  const cell = (
+    value: string,
+    onChange: ((v: string) => void) | null,
+    center = false,
+    nav?: { row: string; col: string },
+  ) =>
     onChange ? (
       <input
         type="text"
+        {...(nav ? { 'data-sheet-row': nav.row, 'data-sheet-col': nav.col } : {})}
         value={value}
         onChange={(e) => onChange(upper(e.target.value))}
+        onKeyDown={nav ? (e) => gridCellKeyDown(e, SHEET_CELL_NAV) : undefined}
         aria-label="Editable cell"
         className={cn(
           'att-input rounded-sm bg-transparent transition-colors hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60',
@@ -1486,25 +1507,25 @@ function AttendanceSheetView({
               <div className="att-info-row">
                 <span className="att-info-label">• CLIENT NAME :</span>
                 <span className="att-info-value">
-                  {cell(clientName, interactive ? (v) => setClientName(v) : null)}
+                  {cell(clientName, interactive ? (v) => setClientName(v) : null, false, { row: 'h0', col: 'h' })}
                 </span>
               </div>
               <div className="att-info-row">
                 <span className="att-info-label">• PROJECT NAME :</span>
                 <span className="att-info-value">
-                  {cell(projectName, interactive ? (v) => setProjectName(v) : null)}
+                  {cell(projectName, interactive ? (v) => setProjectName(v) : null, false, { row: 'h1', col: 'h' })}
                 </span>
               </div>
               <div className="att-info-row">
                 <span className="att-info-label">• DATE :</span>
                 <span className="att-info-value">
-                  {cell(dateInput, interactive ? (v) => setDateInput(v) : null)}
+                  {cell(dateInput, interactive ? (v) => setDateInput(v) : null, false, { row: 'h2', col: 'h' })}
                 </span>
               </div>
               <div className="att-info-row">
                 <span className="att-info-label">• STRENGTH :</span>
                 <span className="att-info-value">
-                  {cell(strength, interactive ? (v) => { strengthDirty.current = true; setStrength(v); } : null)}
+                  {cell(strength, interactive ? (v) => { strengthDirty.current = true; setStrength(v); } : null, false, { row: 'h3', col: 'h' })}
                 </span>
               </div>
             </div>
@@ -1550,14 +1571,16 @@ function AttendanceSheetView({
               return (
                 <tr key={row.id} className={rowCls}>
                   <td className="att-ta-center">{serialOffset + idx + 1}</td>
-                  <td>{cell(upper(row.name), interactive ? (v) => updateRow(row.id, 'name', v) : null)}</td>
+                  <td>{cell(upper(row.name), interactive ? (v) => updateRow(row.id, 'name', v) : null, false, { row: String(serialOffset + idx), col: 'c0' })}</td>
                   <td className="att-ta-center">
-                    {cell(upper(row.code), interactive ? (v) => updateRow(row.id, 'code', v) : null, true)}
+                    {cell(upper(row.code), interactive ? (v) => updateRow(row.id, 'code', v) : null, true, { row: String(serialOffset + idx), col: 'c1' })}
                   </td>
                   <td>
                     {cell(
                       upper(displayTrade(row)),
                       interactive ? (v) => updateRow(row.id, 'position', stripTradeSuffix(v)) : null,
+                      false,
+                      { row: String(serialOffset + idx), col: 'c2' },
                     )}
                   </td>
                   <td className="att-ta-center">
@@ -1565,6 +1588,7 @@ function AttendanceSheetView({
                       upper(row.signature),
                       interactive ? (v) => updateRow(row.id, 'signature', v) : null,
                       true,
+                      { row: String(serialOffset + idx), col: 'c3' },
                     )}
                   </td>
                 </tr>
@@ -1591,13 +1615,13 @@ function AttendanceSheetView({
                 {extras.map((x, idx) => (
                   <tr key={idx}>
                     <td className="att-ta-center att-extra-no">{extraStart + idx}</td>
-                    <td>{cell(x.name, interactive ? (v) => updateExtra(idx, 'name', v) : null)}</td>
+                    <td>{cell(x.name, interactive ? (v) => updateExtra(idx, 'name', v) : null, false, { row: `x${idx}`, col: 'c0' })}</td>
                     <td className="att-ta-center">
-                      {cell(x.code, interactive ? (v) => updateExtra(idx, 'code', v) : null, true)}
+                      {cell(x.code, interactive ? (v) => updateExtra(idx, 'code', v) : null, true, { row: `x${idx}`, col: 'c1' })}
                     </td>
-                    <td>{cell(x.trade, interactive ? (v) => updateExtra(idx, 'trade', v) : null)}</td>
+                    <td>{cell(x.trade, interactive ? (v) => updateExtra(idx, 'trade', v) : null, false, { row: `x${idx}`, col: 'c2' })}</td>
                     <td className="att-ta-center">
-                      {cell(x.signature, interactive ? (v) => updateExtra(idx, 'signature', v) : null, true)}
+                      {cell(x.signature, interactive ? (v) => updateExtra(idx, 'signature', v) : null, true, { row: `x${idx}`, col: 'c3' })}
                     </td>
                   </tr>
                 ))}
@@ -1609,13 +1633,13 @@ function AttendanceSheetView({
               <div className="att-totals-cell">
                 <span className="att-totals-label">TOTAL PRESENT :</span>
                 <span className="att-totals-blank">
-                  {cell(totalPresent, interactive ? (v) => setTotalPresent(v) : null, true)}
+                  {cell(totalPresent, interactive ? (v) => setTotalPresent(v) : null, true, { row: 't', col: 't' })}
                 </span>
               </div>
               <div className="att-totals-cell">
                 <span className="att-totals-label">TOTAL ABSENT :</span>
                 <span className="att-totals-blank">
-                  {cell(totalAbsent, interactive ? (v) => setTotalAbsent(v) : null, true)}
+                  {cell(totalAbsent, interactive ? (v) => setTotalAbsent(v) : null, true, { row: 't', col: 't' })}
                 </span>
               </div>
             </div>
@@ -1676,7 +1700,7 @@ function AttendanceSheetView({
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold">Attendance Sheet — {site.name}</p>
           <p className="truncate text-[11px] text-muted-foreground">
-            {sortedRows.length} employee(s) · {pages.length} page(s) · fields are editable before export
+            {sortedRows.length} employee(s) · {pages.length} page(s) · fields are editable before export · arrow keys / Enter move between cells
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">

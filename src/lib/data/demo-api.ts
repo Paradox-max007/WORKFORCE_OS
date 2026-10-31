@@ -3,6 +3,7 @@
 // ============================================================================
 
 import {
+  type AdminSiteAssignment,
   type Attendance,
   type BulkAttendanceEntry,
   type Camp,
@@ -287,6 +288,16 @@ export const demoApi = {
       );
     }
     saveAndEmit(['admin_site']);
+  },
+
+  /** All admin→site assignments with the admin's display name — mirrors the
+   *  prod API so "View by Supervisors" can group by assigned admin too. */
+  async listAdminSiteAssignments(): Promise<AdminSiteAssignment[]> {
+    return db.siteAssignments.map((x) => ({
+      profileId: x.profile_id,
+      profileName: db.profiles.find((p) => p.id === x.profile_id)?.name ?? 'Unknown admin',
+      siteId: x.site_id,
+    }));
   },
 
   // ---- sites -----------------------------------------------------------------

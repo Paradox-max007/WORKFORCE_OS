@@ -38,10 +38,12 @@
 //   moved-away segments are skipped automatically. The bulk-day dialog's
 //   value cells support the same ↑/↓/Enter walking down the crew list.
 // • SUPERVISORS (attendance markers): every site can name the person who
-//   marks its attendance (Sites → site form → Supervisor). Each site section
-//   shows a "Supervised by" chip, and "View by Supervisors" at the top lists
-//   every marker with the sites + crews they cover — expanding one shows
-//   their sites and clicking a site jumps the sheet straight to it.
+//   marks its attendance (Sites → site form → Supervisor), and admin accounts
+//   assigned to the site (Admin Management → Site Access) count as markers too
+//   — both sources are merged (deduped by name). Each site section shows a
+//   "Supervised by" chip, and "View by Supervisors" at the top lists every
+//   marker with the sites + crews they cover — expanding one shows their sites
+//   and clicking a site jumps the sheet straight to it.
 // ============================================================================
 
 import { motion } from 'framer-motion';
@@ -75,7 +77,7 @@ import {
   type SiteTimelineInput,
 } from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
-import type { Attendance, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
+import type { AdminSiteAssignment, Attendance, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -152,7 +154,8 @@ interface SiteSection {
   key: string;
   title: string;
   client: string | null;
-  /** attendance marker responsible for this site (null = not assigned) */
+  /** attendance markers responsible for this site — the named marker plus any
+   *  assigned admin accounts, joined with " · " (null = none assigned) */
   supervisor: string | null;
   emps: EmployeeVM[];
   isIdle?: boolean;
@@ -162,7 +165,7 @@ interface SiteSection {
 // Page
 // ---------------------------------------------------------------------------
 export function AttendancePage() {
-  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer']);
+  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer', 'profiles']);
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
 
@@ -174,6 +177,9 @@ export function AttendancePage() {
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [transfers, setTransfers] = useState<SiteTransfer[] | null>(null);
   const [records, setRecords] = useState<Attendance[] | null>(null);
+  // admin accounts assigned to mark specific sites (Admins → Site Access) —
+  // merged with each site's named marker for "View by Supervisors"
+  const [adminAssignments, setAdminAssignments] = useState<AdminSiteAssignment[] | null>(null);
   const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(isSuperAdmin ? null : new Set());
 
   // filters
@@ -215,10 +221,15 @@ export function AttendancePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, trs] = await Promise.all([
+        const [emps, sts, trs, asg] = await Promise.all([
           dataApi.listEmployees(), dataApi.listSites(), dataApi.listSiteTransfers(),
+          // marker assignments are cosmetic for the drill-down — never block
+          // the sheet if this call fails
+          dataApi.listAdminSiteAssignments().catch(() => [] as AdminSiteAssignment[]),
         ]);
-        if (!cancelled) { setEmployees(emps); setSites(sts); setTransfers(trs); }
+        if (!cancelled) {
+          setEmployees(emps); setSites(sts); setTransfers(trs); setAdminAssignments(asg);
+        }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
       }
@@ -294,6 +305,37 @@ export function AttendancePage() {
     });
   }, [employees, assignedSiteIds, timelines]);
 
+  // sites selectable in the filter (admins: only their assigned sites)
+  const selectableSites = useMemo(() => {
+    const active = (sites ?? []).filter((s) => s.is_active);
+    if (assignedSiteIds === null) return active;
+    return active.filter((s) => assignedSiteIds.has(s.id));
+  }, [sites, assignedSiteIds]);
+
+  // ---- supervisors (attendance markers) — powers "View by Supervisors" ------
+  // TWO sources are merged, deduped by name (case-insensitive):
+  //   1. the site's named marker (Sites → site form → Supervisor text field)
+  //   2. every admin account assigned to the site (Admins → Site Access) —
+  //      assigning sites to supervisors there is the main workflow
+  // → site id → ordered marker names (named marker first, then admins).
+  const siteSupervisors = useMemo(() => {
+    const map = new Map<string, string[]>();
+    const seen = new Set<string>(); // "siteId|lowercase name" — dedupe
+    const add = (siteId: string, name: string): void => {
+      const raw = name.trim();
+      if (!raw) return;
+      const key = `${siteId}|${raw.toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const names = map.get(siteId) ?? [];
+      names.push(raw);
+      map.set(siteId, names);
+    };
+    (sites ?? []).forEach((s) => add(s.id, s.supervisor ?? ''));
+    (adminAssignments ?? []).forEach((a) => add(a.siteId, a.profileName));
+    return map;
+  }, [sites, adminAssignments]);
+
   // ---- sitewise sections --------------------------------------------------------
   // Alphabetical inside each section; employees moved mid-month get a row at
   // the BOTTOM of EVERY site they spent days at this month (faded), so their
@@ -348,7 +390,7 @@ export function AttendancePage() {
         key: s.id,
         title: s.name,
         client: s.client_name,
-        supervisor: (s.supervisor ?? '').trim() || null,
+        supervisor: (siteSupervisors.get(s.id) ?? []).join(' · ') || null,
         emps: scoped
           .filter((e) => placements.get(e.id)?.sites.has(s.id) && matches(e))
           .sort(rowSort),
@@ -372,7 +414,7 @@ export function AttendancePage() {
       }
     }
     return result;
-  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines, assignedSiteIds]);
+  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines, assignedSiteIds, siteSupervisors]);
 
   // flat crew for the calendar view combobox (a moved employee sits in several
   // sections — the picker lists them once)
@@ -385,31 +427,23 @@ export function AttendancePage() {
     return out;
   }, [sections]);
 
-  // sites selectable in the filter (admins: only their assigned sites)
-  const selectableSites = useMemo(() => {
-    const active = (sites ?? []).filter((s) => s.is_active);
-    if (assignedSiteIds === null) return active;
-    return active.filter((s) => assignedSiteIds.has(s.id));
-  }, [sites, assignedSiteIds]);
-
-  // ---- supervisors (attendance markers) — powers "View by Supervisors" ------
-  // Groups the visible sites by their attendance marker so a super admin can
-  // see at a glance who is tracking which site (admins only ever see their own
-  // assigned sites here — selectableSites is already scope-limited).
+  // groups the visible sites by marker so a super admin can see at a glance
+  // who is tracking which site (admins only ever see their own assigned sites
+  // here — selectableSites is already scope-limited)
   const supervisorGroups = useMemo(() => {
     const map = new Map<string, { key: string; name: string; sites: SiteWithCount[] }>();
     for (const s of selectableSites) {
-      const name = (s.supervisor ?? '').trim();
-      if (!name) continue;
-      const key = name.toLowerCase();
-      const g = map.get(key);
-      if (g) g.sites.push(s);
-      else map.set(key, { key, name, sites: [s] });
+      for (const name of siteSupervisors.get(s.id) ?? []) {
+        const key = name.toLowerCase();
+        const g = map.get(key);
+        if (g) g.sites.push(s);
+        else map.set(key, { key, name, sites: [s] });
+      }
     }
     const list = [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
-    const unassigned = selectableSites.filter((s) => !(s.supervisor ?? '').trim());
+    const unassigned = selectableSites.filter((s) => (siteSupervisors.get(s.id) ?? []).length === 0);
     return { list, unassigned };
-  }, [selectableSites]);
+  }, [selectableSites, siteSupervisors]);
 
   // ---- record lookups ---------------------------------------------------------
   const recordMap = useMemo(() => {
@@ -791,10 +825,10 @@ export function AttendancePage() {
             {section.supervisor && (
               <span
                 className="inline-flex items-center gap-1 rounded-full border border-sky-500/25 bg-sky-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-sky-600 dark:text-sky-400"
-                title={`Attendance for ${section.title} is marked by ${section.supervisor} — assign / change it in Sites → Edit Site`}
+                title={`Attendance for ${section.title} is marked by ${section.supervisor} — change the named marker in Sites → Edit Site, or the assigned admins in Admin Management → Site Access`}
               >
                 <UserCheck size={11} />
-                <span className="max-w-44 truncate">Supervised by: {section.supervisor}</span>
+                <span className="max-w-56 truncate">Supervised by: {section.supervisor}</span>
               </span>
             )}
             <span
@@ -1131,7 +1165,7 @@ export function AttendancePage() {
                 <div className="border-b px-3 py-2.5">
                   <p className="text-sm font-semibold">Attendance markers</p>
                   <p className="text-[11px] leading-tight text-muted-foreground">
-                    Who marks which site — click a supervisor to see their sites, then a site to show it.
+                    Who marks which site — named markers (Sites form) and assigned admins (Admins → Site Access). Click a supervisor to see their sites, then a site to show it.
                   </p>
                 </div>
                 <div className="max-h-80 overflow-y-auto p-1.5">

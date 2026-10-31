@@ -529,6 +529,11 @@ end; $$;
 -- ============================================================================
 -- 7. SITE RPCs
 -- ============================================================================
+-- drop pre-supervisor signatures first: create or replace with a different
+-- parameter count creates an OVERLOAD, leaving a stale function PostgREST
+-- could still resolve to (no-ops on fresh databases)
+drop function if exists public.create_site(text, text, text);
+drop function if exists public.update_site(uuid, text, text, text, boolean);
 
 create or replace function public.create_site(p_name text, p_client_name text default null, p_project_name text default null, p_supervisor text default null)
 returns public.site language plpgsql

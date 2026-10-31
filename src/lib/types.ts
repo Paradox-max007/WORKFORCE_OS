@@ -31,6 +31,14 @@ export interface SiteWithCount extends Site {
   employee_count: number;
 }
 
+/** An admin account assigned to mark a site's attendance (Admins page).
+ *  Powers "View by Supervisors" alongside the free-text Site.supervisor. */
+export interface AdminSiteAssignment {
+  profileId: string;
+  profileName: string;
+  siteId: string;
+}
+
 // Accommodation camp where employees stay (one employee → at most one camp)
 export interface Camp {
   id: string;

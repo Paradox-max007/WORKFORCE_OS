@@ -8,6 +8,7 @@
 import { type RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase/client';
 import {
+  type AdminSiteAssignment,
   type Attendance,
   type BulkAttendanceEntry,
   type Camp,
@@ -263,6 +264,29 @@ export const prodApi = {
       p_profile_id: profileId, p_site_id: siteId, p_allowed: allowed,
     });
     assertOk(error);
+  },
+
+  /** All admin→site assignments with the admin's display name — powers the
+   *  "View by Supervisors" drill-down on the attendance page (super admins
+   *  see every assignment; normal admins only their own via RLS). */
+  async listAdminSiteAssignments(): Promise<AdminSiteAssignment[]> {
+    const { data, error } = await sb().from('admin_site')
+      .select('profile_id, site_id, profiles(name)');
+    assertOk(error);
+    // many-to-one embeds arrive as an object, but supabase-js types them
+    // loosely — accept both shapes
+    const rows = (data ?? []) as unknown as {
+      profile_id: string; site_id: string;
+      profiles: { name: string } | { name: string }[] | null;
+    }[];
+    return rows.map((r) => {
+      const p = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
+      return {
+        profileId: r.profile_id,
+        profileName: p?.name?.trim() || 'Unknown admin',
+        siteId: r.site_id,
+      };
+    });
   },
 
   // ---- sites -----------------------------------------------------------------

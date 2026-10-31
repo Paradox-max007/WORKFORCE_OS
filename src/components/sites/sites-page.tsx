@@ -939,7 +939,7 @@ function SiteFormDialog({
               }}
             />
             <p className="text-[11px] text-muted-foreground">
-              Shown as “Supervised by” on the site's attendance sheet — powers “View by Supervisors” on the Attendance page.
+              Shown as “Supervised by” on the site's attendance sheet — powers “View by Supervisors” on the Attendance page. Admins assigned to this site (Admins → Site Access) are listed there too.
             </p>
           </div>
         </div>

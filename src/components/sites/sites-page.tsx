@@ -297,7 +297,7 @@ export function SitesPage() {
 
   const matchesSearch = (s: SiteWithCount): boolean => {
     if (!debouncedSearch) return true;
-    const hay = `${s.name} ${s.client_name ?? ''} ${s.project_name ?? ''}`.toLowerCase();
+    const hay = `${s.name} ${s.client_name ?? ''} ${s.project_name ?? ''} ${s.supervisor ?? ''}`.toLowerCase();
     return hay.includes(debouncedSearch);
   };
 
@@ -333,6 +333,7 @@ export function SitesPage() {
         name: site.name,
         client_name: site.client_name,
         project_name: site.project_name,
+        supervisor: site.supervisor,
         is_active: true,
       });
       toast.success('Site activated', {
@@ -353,6 +354,7 @@ export function SitesPage() {
         name: deactivateTarget.name,
         client_name: deactivateTarget.client_name,
         project_name: deactivateTarget.project_name,
+        supervisor: deactivateTarget.supervisor,
         is_active: false,
       });
       toast.success('Site deactivated', {
@@ -745,7 +747,7 @@ function SiteCard({
       </div>
 
       {/* client / project meta */}
-      {(site.client_name || site.project_name) && (
+      {(site.client_name || site.project_name || site.supervisor) && (
         <div className="space-y-1">
           {site.client_name && (
             <p className="truncate text-xs text-muted-foreground">
@@ -755,6 +757,12 @@ function SiteCard({
           {site.project_name && (
             <p className="truncate text-xs text-muted-foreground">
               <span className="text-muted-foreground/60">Project:</span> {site.project_name}
+            </p>
+          )}
+          {site.supervisor && (
+            <p className="truncate text-xs text-muted-foreground">
+              <span className="text-muted-foreground/60">Supervised by:</span>{' '}
+              <span className="font-medium text-foreground/80">{site.supervisor}</span>
             </p>
           )}
         </div>
@@ -810,6 +818,7 @@ function SiteFormDialog({
   const [name, setName] = useState('');
   const [client, setClient] = useState('');
   const [project, setProject] = useState('');
+  const [supervisor, setSupervisor] = useState('');
   const [busy, setBusy] = useState(false);
 
   // Reset the form every time the dialog opens
@@ -818,6 +827,7 @@ function SiteFormDialog({
       setName(editing?.name ?? '');
       setClient(editing?.client_name ?? '');
       setProject(editing?.project_name ?? '');
+      setSupervisor(editing?.supervisor ?? '');
       setBusy(false);
     }
   }, [open, editing]);
@@ -827,7 +837,8 @@ function SiteFormDialog({
     !!editing &&
     trimmedName === editing.name &&
     client.trim() === (editing.client_name ?? '') &&
-    project.trim() === (editing.project_name ?? '');
+    project.trim() === (editing.project_name ?? '') &&
+    supervisor.trim() === (editing.supervisor ?? '');
 
   const submit = async () => {
     if (!trimmedName || busy || unchanged) return;
@@ -838,6 +849,7 @@ function SiteFormDialog({
           name: trimmedName,
           client_name: client.trim() || null,
           project_name: project.trim() || null,
+          supervisor: supervisor.trim() || null,
           is_active: editing.is_active,
         });
         toast.success('Site updated', { description: `Details for "${trimmedName}" were saved.` });
@@ -846,6 +858,7 @@ function SiteFormDialog({
           trimmedName,
           client.trim() || null,
           project.trim() || null,
+          supervisor.trim() || null,
         );
         toast.success('Site created', { description: `"${created.name}" has been added.` });
       }
@@ -910,6 +923,24 @@ function SiteFormDialog({
                 if (e.key === 'Enter') submit();
               }}
             />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="site-supervisor">
+              Supervisor <span className="text-muted-foreground/60">(attendance marker)</span>
+            </Label>
+            <Input
+              id="site-supervisor"
+              value={supervisor}
+              onChange={(e) => setSupervisor(e.target.value)}
+              placeholder="Who marks this site's attendance? e.g. Ibrahim Khalil"
+              className="h-11"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submit();
+              }}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Shown as “Supervised by” on the site's attendance sheet — powers “View by Supervisors” on the Attendance page.
+            </p>
           </div>
         </div>
 
@@ -1701,6 +1732,7 @@ function AttendanceSheetView({
           <p className="truncate text-sm font-semibold">Attendance Sheet — {site.name}</p>
           <p className="truncate text-[11px] text-muted-foreground">
             {sortedRows.length} employee(s) · {pages.length} page(s) · fields are editable before export · arrow keys / Enter move between cells
+            {site.supervisor ? ` · Supervised by ${site.supervisor}` : ''}
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">

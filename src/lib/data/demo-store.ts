@@ -90,7 +90,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 7,
+    version: 8,
     profiles: [],
     sites: [],
     camps: [],
@@ -122,12 +122,12 @@ function seedDB(): DemoDB {
   ];
 
   // ---- sites ---------------------------------------------------------------
-  const mkSite = (name: string, client: string, project: string, active = true): Site =>
-    ({ id: uid(), name, client_name: client, project_name: project, is_active: active, created_at: nowISO() });
-  const npc = mkSite('NPC – Umm Al Quwain', 'NPC', 'Warehouse Expansion');
-  const redCoast = mkSite('Red Coast Compound', 'Red Coast Dev.', 'Villa Cluster B');
-  const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works');
-  const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', false);
+  const mkSite = (name: string, client: string, project: string, supervisor: string | null = null, active = true): Site =>
+    ({ id: uid(), name, client_name: client, project_name: project, supervisor, is_active: active, created_at: nowISO() });
+  const npc = mkSite('NPC – Umm Al Quwain', 'NPC', 'Warehouse Expansion', 'Ibrahim Khalil');
+  const redCoast = mkSite('Red Coast Compound', 'Red Coast Dev.', 'Villa Cluster B', 'Deepak Nair');
+  const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works', 'Carlos Reyes');
+  const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', 'Deepak Nair', false);
   db.sites = [npc, redCoast, marina, depot];
 
   // site assignments — the two normal admins can only mark their assigned sites
@@ -413,7 +413,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 7) return parsed;
+      if (parsed.version === 8) return parsed;
     }
   } catch {
     // corrupted → reseed

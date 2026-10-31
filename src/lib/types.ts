@@ -21,6 +21,8 @@ export interface Site {
   name: string;
   client_name: string | null;
   project_name: string | null;
+  /** attendance marker who marks this site's sheet (free-text person name) */
+  supervisor: string | null;
   is_active: boolean;
   created_at: string;
 }

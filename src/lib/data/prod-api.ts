@@ -283,9 +283,11 @@ export const prodApi = {
     }));
   },
 
-  async createSite(name: string, clientName: string | null, projectName: string | null): Promise<Site> {
+  async createSite(
+    name: string, clientName: string | null, projectName: string | null, supervisor: string | null,
+  ): Promise<Site> {
     const { data, error } = await sb().rpc('create_site', {
-      p_name: name, p_client_name: clientName, p_project_name: projectName,
+      p_name: name, p_client_name: clientName, p_project_name: projectName, p_supervisor: supervisor,
     });
     assertOk(error);
     return data as unknown as Site;
@@ -293,11 +295,11 @@ export const prodApi = {
 
   async updateSite(
     id: string,
-    input: { name: string; client_name: string | null; project_name: string | null; is_active: boolean },
+    input: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean },
   ): Promise<{ unassignedCount: number }> {
     const { data, error } = await sb().rpc('update_site', {
       p_id: id, p_name: input.name, p_client_name: input.client_name,
-      p_project_name: input.project_name, p_is_active: input.is_active,
+      p_project_name: input.project_name, p_is_active: input.is_active, p_supervisor: input.supervisor,
     });
     assertOk(error);
     const json = (data ?? {}) as { unassignedCount?: number };

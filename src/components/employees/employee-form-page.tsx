@@ -203,7 +203,7 @@ export function EmployeeFormPage() {
     if (!newSiteName?.trim()) return;
     setAddingSite(true);
     try {
-      const site = await dataApi.createSite(newSiteName.trim(), null, null);
+      const site = await dataApi.createSite(newSiteName.trim(), null, null, null);
       toast.success('Site created', { description: site.name });
       setForm((f) => ({ ...f, current_site_id: site.id }));
       setNewSiteName(null);

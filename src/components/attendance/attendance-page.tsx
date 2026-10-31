@@ -37,12 +37,17 @@
 //   caret is at the edge of the value. Locked future dates and merged
 //   moved-away segments are skipped automatically. The bulk-day dialog's
 //   value cells support the same ↑/↓/Enter walking down the crew list.
+// • SUPERVISORS (attendance markers): every site can name the person who
+//   marks its attendance (Sites → site form → Supervisor). Each site section
+//   shows a "Supervised by" chip, and "View by Supervisors" at the top lists
+//   every marker with the sites + crews they cover — expanding one shows
+//   their sites and clicking a site jumps the sheet straight to it.
 // ============================================================================
 
 import { motion } from 'framer-motion';
 import {
   ArrowLeftRight, Building2, CalendarCheck, CalendarDays, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
-  Tent, UserX, Zap,
+  Tent, UserCheck, UserX, Users, Zap,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -147,6 +152,8 @@ interface SiteSection {
   key: string;
   title: string;
   client: string | null;
+  /** attendance marker responsible for this site (null = not assigned) */
+  supervisor: string | null;
   emps: EmployeeVM[];
   isIdle?: boolean;
 }
@@ -190,6 +197,10 @@ export function AttendancePage() {
   const [bulkInclude, setBulkInclude] = useState<Record<string, boolean>>({}); // empId → checked
   const [bulkSaving, setBulkSaving] = useState(false);
   const [bulkCalOpen, setBulkCalOpen] = useState(false); // date picker popover
+
+  // "View by Supervisors" popover state
+  const [supOpen, setSupOpen] = useState(false);
+  const [expandedSupervisor, setExpandedSupervisor] = useState<string | null>(null);
 
   const [year, month] = useMemo(() => {
     const [y, m] = monthKey.split('-').map(Number);
@@ -337,6 +348,7 @@ export function AttendancePage() {
         key: s.id,
         title: s.name,
         client: s.client_name,
+        supervisor: (s.supervisor ?? '').trim() || null,
         emps: scoped
           .filter((e) => placements.get(e.id)?.sites.has(s.id) && matches(e))
           .sort(rowSort),
@@ -353,6 +365,7 @@ export function AttendancePage() {
           key: '__idle__',
           title: 'Unassigned / Idle — no site',
           client: null,
+          supervisor: null,
           emps: idle,
           isIdle: true,
         });
@@ -378,6 +391,25 @@ export function AttendancePage() {
     if (assignedSiteIds === null) return active;
     return active.filter((s) => assignedSiteIds.has(s.id));
   }, [sites, assignedSiteIds]);
+
+  // ---- supervisors (attendance markers) — powers "View by Supervisors" ------
+  // Groups the visible sites by their attendance marker so a super admin can
+  // see at a glance who is tracking which site (admins only ever see their own
+  // assigned sites here — selectableSites is already scope-limited).
+  const supervisorGroups = useMemo(() => {
+    const map = new Map<string, { key: string; name: string; sites: SiteWithCount[] }>();
+    for (const s of selectableSites) {
+      const name = (s.supervisor ?? '').trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      const g = map.get(key);
+      if (g) g.sites.push(s);
+      else map.set(key, { key, name, sites: [s] });
+    }
+    const list = [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const unassigned = selectableSites.filter((s) => !(s.supervisor ?? '').trim());
+    return { list, unassigned };
+  }, [selectableSites]);
 
   // ---- record lookups ---------------------------------------------------------
   const recordMap = useMemo(() => {
@@ -756,6 +788,15 @@ export function AttendancePage() {
             )}
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {section.supervisor && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-sky-500/25 bg-sky-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-sky-600 dark:text-sky-400"
+                title={`Attendance for ${section.title} is marked by ${section.supervisor} — assign / change it in Sites → Edit Site`}
+              >
+                <UserCheck size={11} />
+                <span className="max-w-44 truncate">Supervised by: {section.supervisor}</span>
+              </span>
+            )}
             <span
               className={cn(
                 'rounded-full px-2.5 py-0.5 text-[11px] font-semibold tabular-nums',
@@ -1071,6 +1112,149 @@ export function AttendancePage() {
                 )}
               </SelectContent>
             </Select>
+            {/* View by Supervisors — who marks which site (drill-down:
+                supervisor → their sites → click a site to show only it) */}
+            <Popover
+              open={supOpen}
+              onOpenChange={(o) => {
+                setSupOpen(o);
+                if (!o) setExpandedSupervisor(null);
+              }}
+            >
+              <PopoverTrigger asChild>
+                <Button variant="outline" className="h-10 gap-1.5" disabled={loading}>
+                  <Users size={15} />
+                  View by Supervisors
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-80 p-0">
+                <div className="border-b px-3 py-2.5">
+                  <p className="text-sm font-semibold">Attendance markers</p>
+                  <p className="text-[11px] leading-tight text-muted-foreground">
+                    Who marks which site — click a supervisor to see their sites, then a site to show it.
+                  </p>
+                </div>
+                <div className="max-h-80 overflow-y-auto p-1.5">
+                  {supervisorGroups.list.length === 0 && supervisorGroups.unassigned.length === 0 ? (
+                    <p className="px-2.5 py-8 text-center text-xs text-muted-foreground">
+                      No sites available yet.
+                    </p>
+                  ) : (
+                    <>
+                      {supervisorGroups.list.map((g) => {
+                        const open = expandedSupervisor === g.key;
+                        const crew = g.sites.reduce((n, s) => n + s.employee_count, 0);
+                        return (
+                          <div key={g.key} className="mb-1 overflow-hidden rounded-lg border bg-card">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedSupervisor(open ? null : g.key)}
+                              aria-expanded={open}
+                              className="flex w-full items-center gap-2.5 px-2.5 py-2 text-left transition-colors hover:bg-brand/[0.06]"
+                            >
+                              <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+                                {initials(g.name)}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[13px] font-medium leading-tight">{g.name}</span>
+                                <span className="block text-[10px] leading-tight text-muted-foreground">
+                                  {g.sites.length} site{g.sites.length !== 1 ? 's' : ''} · {crew} employee{crew !== 1 ? 's' : ''}
+                                </span>
+                              </span>
+                              <ChevronRight
+                                size={14}
+                                className={cn('shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
+                              />
+                            </button>
+                            {open && (
+                              <div className="border-t bg-muted/30 p-1.5">
+                                {g.sites.map((s) => (
+                                  <button
+                                    key={s.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setSiteFilter(s.id);
+                                      setSearch('');
+                                      setSupOpen(false);
+                                    }}
+                                    className={cn(
+                                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-brand/10',
+                                      siteFilter === s.id && 'bg-brand/10 font-semibold text-brand',
+                                    )}
+                                    title={`Show only ${s.name} in the sheet`}
+                                  >
+                                    <Building2 size={12} className="shrink-0 text-muted-foreground" />
+                                    <span className="min-w-0 flex-1 truncate">{s.name}</span>
+                                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                                      {s.employee_count}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {supervisorGroups.unassigned.length > 0 && (
+                        <div className="mb-1 overflow-hidden rounded-lg border border-dashed bg-card">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedSupervisor(expandedSupervisor === '__none__' ? null : '__none__')}
+                            aria-expanded={expandedSupervisor === '__none__'}
+                            className="flex w-full items-center gap-2.5 px-2.5 py-2 text-left transition-colors hover:bg-brand/[0.06]"
+                          >
+                            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                              <UserX size={13} />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[13px] font-medium leading-tight text-muted-foreground">
+                                No supervisor assigned
+                              </span>
+                              <span className="block text-[10px] leading-tight text-muted-foreground">
+                                {supervisorGroups.unassigned.length} site{supervisorGroups.unassigned.length !== 1 ? 's' : ''}
+                              </span>
+                            </span>
+                            <ChevronRight
+                              size={14}
+                              className={cn(
+                                'shrink-0 text-muted-foreground transition-transform',
+                                expandedSupervisor === '__none__' && 'rotate-90',
+                              )}
+                            />
+                          </button>
+                          {expandedSupervisor === '__none__' && (
+                            <div className="border-t bg-muted/30 p-1.5">
+                              {supervisorGroups.unassigned.map((s) => (
+                                <button
+                                  key={s.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSiteFilter(s.id);
+                                    setSearch('');
+                                    setSupOpen(false);
+                                  }}
+                                  className={cn(
+                                    'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-brand/10',
+                                    siteFilter === s.id && 'bg-brand/10 font-semibold text-brand',
+                                  )}
+                                  title={`Show only ${s.name} in the sheet`}
+                                >
+                                  <Building2 size={12} className="shrink-0 text-muted-foreground" />
+                                  <span className="min-w-0 flex-1 truncate">{s.name}</span>
+                                  <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                                    {s.employee_count}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
             <Button
               className="h-10 gap-1.5"
               disabled={loading}

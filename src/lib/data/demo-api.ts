@@ -297,19 +297,22 @@ export const demoApi = {
     }));
   },
 
-  async createSite(name: string, clientName: string | null, projectName: string | null): Promise<Site> {
+  async createSite(
+    name: string, clientName: string | null, projectName: string | null, supervisor: string | null,
+  ): Promise<Site> {
     if (db.sites.some((s) => s.name.toLowerCase() === name.toLowerCase())) {
       throw new Error('A site with this name already exists');
     }
     const site: Site = {
-      id: uid(), name, client_name: clientName, project_name: projectName, is_active: true, created_at: nowISO(),
+      id: uid(), name, client_name: clientName, project_name: projectName,
+      supervisor: supervisor?.trim() || null, is_active: true, created_at: nowISO(),
     };
     db.sites.push(site);
     saveAndEmit(['site']);
     return site;
   },
 
-  async updateSite(id: string, input: { name: string; client_name: string | null; project_name: string | null; is_active: boolean }): Promise<{ unassignedCount: number }> {
+  async updateSite(id: string, input: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean }): Promise<{ unassignedCount: number }> {
     if (db.sites.some((s) => s.name.toLowerCase() === input.name.toLowerCase() && s.id !== id)) {
       throw new Error('A site with this name already exists');
     }
@@ -317,7 +320,8 @@ export const demoApi = {
     if (!site) throw new Error('Site not found');
     const wasActive = site.is_active;
     Object.assign(site, {
-      name: input.name, client_name: input.client_name, project_name: input.project_name, is_active: input.is_active,
+      name: input.name, client_name: input.client_name, project_name: input.project_name,
+      supervisor: input.supervisor?.trim() || null, is_active: input.is_active,
     });
 
     let unassignedCount = 0;

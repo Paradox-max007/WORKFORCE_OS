@@ -43,9 +43,14 @@ create table if not exists public.site (
   name         text not null unique,
   client_name  text,
   project_name text,
+  supervisor   text,                            -- attendance marker who marks this site's sheet
   is_active    boolean not null default true,
   created_at   timestamptz not null default now()
 );
+
+-- attendance marker (supervisor) — added for existing databases; the create
+-- table above already covers fresh ones
+alter table public.site add column if not exists supervisor text;
 
 -- Accommodation camps (where employees stay; one employee → at most one camp)
 -- NOTE: created BEFORE public.employee because employee.camp_id references it —
@@ -525,7 +530,7 @@ end; $$;
 -- 7. SITE RPCs
 -- ============================================================================
 
-create or replace function public.create_site(p_name text, p_client_name text default null, p_project_name text default null)
+create or replace function public.create_site(p_name text, p_client_name text default null, p_project_name text default null, p_supervisor text default null)
 returns public.site language plpgsql
 security definer set search_path = public
 as $$
@@ -535,14 +540,15 @@ begin
   if exists (select 1 from public.site where lower(name) = lower(p_name)) then
     raise exception 'A site with this name already exists';
   end if;
-  insert into public.site (name, client_name, project_name) values (p_name, p_client_name, p_project_name)
+  insert into public.site (name, client_name, project_name, supervisor) values (p_name, p_client_name, p_project_name, nullif(trim(p_supervisor), ''))
   returning * into result;
   return result;
 end; $$;
 
 -- Returns the site + how many employees got unassigned when deactivating.
 create or replace function public.update_site(
-  p_id uuid, p_name text, p_client_name text, p_project_name text, p_is_active boolean
+  p_id uuid, p_name text, p_client_name text, p_project_name text, p_is_active boolean,
+  p_supervisor text default null
 )
 returns jsonb language plpgsql
 security definer set search_path = public
@@ -557,7 +563,8 @@ begin
   end if;
 
   select is_active into was_active from public.site where id = p_id;
-  update public.site set name = p_name, client_name = p_client_name, project_name = p_project_name, is_active = p_is_active
+  update public.site set name = p_name, client_name = p_client_name, project_name = p_project_name,
+    supervisor = nullif(trim(p_supervisor), ''), is_active = p_is_active
   where id = p_id returning * into result;
 
   if was_active = true and p_is_active = false then

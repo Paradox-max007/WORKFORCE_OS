@@ -47,6 +47,20 @@ create table if not exists public.site (
   created_at   timestamptz not null default now()
 );
 
+-- Accommodation camps (where employees stay; one employee → at most one camp)
+-- NOTE: created BEFORE public.employee because employee.camp_id references it —
+-- on a fresh database a forward FK reference aborts the whole script with
+-- "relation public.camp does not exist".
+create table if not exists public.camp (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique,
+  location    text,
+  capacity    int check (capacity is null or capacity >= 0),
+  notes       text,
+  is_active   boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+
 -- Employees
 create table if not exists public.employee (
   id                  uuid primary key default gen_random_uuid(),
@@ -76,17 +90,6 @@ create table if not exists public.employee (
   team_leader_site_id uuid references public.site(id) on delete set null,
   created_at          timestamptz not null default now(),
   updated_at          timestamptz not null default now()
-);
-
--- Accommodation camps (where employees stay; one employee → at most one camp)
-create table if not exists public.camp (
-  id          uuid primary key default gen_random_uuid(),
-  name        text not null unique,
-  location    text,
-  capacity    int check (capacity is null or capacity >= 0),
-  notes       text,
-  is_active   boolean not null default true,
-  created_at  timestamptz not null default now()
 );
 
 -- Sites assigned to normal admins: they can only MARK ATTENDANCE for the crews

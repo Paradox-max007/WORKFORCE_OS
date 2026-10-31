@@ -48,7 +48,7 @@ export function useRealtimeStatus(): 'connecting' | 'live' {
     const client = supabase;
     if (client) {
       // Dedicated presence-free channel purely to track connection health
-      const channel = client.channel('pulse-status');
+      const channel = client.channel(`pulse-status-${Math.random().toString(36).slice(2, 9)}`);
       channel
         .on('broadcast', { event: 'ping' }, () => undefined)
         .subscribe((s) => {

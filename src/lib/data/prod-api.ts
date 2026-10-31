@@ -5,6 +5,7 @@
 // through the Postgres RPC functions defined in supabase/schema.sql.
 // ============================================================================
 
+import { type RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase/client';
 import {
   type Attendance,
@@ -49,6 +50,62 @@ const localTodayYMD = (): string => {
 // ---------------------------------------------------------------------------
 // API implementation
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shared Realtime channel & subscriber registry (avoids duplicate channels/listeners on hot reloads & multiple components)
+// ---------------------------------------------------------------------------
+let activeRealtimeChannel: RealtimeChannel | null = null;
+const realtimeListeners = new Set<(tables: RealtimeTable[] | string[]) => void>();
+let teardownTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function ensureRealtimeChannel(): void {
+  if (teardownTimeout) {
+    clearTimeout(teardownTimeout);
+    teardownTimeout = null;
+  }
+
+  if (activeRealtimeChannel || !supabase) return;
+
+  const client = supabase;
+  const tables: RealtimeTable[] = [
+    'profiles',
+    'menu_permission',
+    'admin_site',
+    'site',
+    'camp',
+    'employee',
+    'attendance',
+    'notification',
+    'warning',
+    'fine',
+    'leave_request',
+    'cancellation_request',
+    'uniform_registry',
+    'site_transfer',
+  ];
+
+  // Clean up any stale channel on the same topic before subscribing
+  const existing = client.getChannels().find((c) => c.topic === 'realtime:pulse-db-changes');
+  if (existing) {
+    client.removeChannel(existing);
+  }
+
+  const channel = client.channel('pulse-db-changes');
+  tables.forEach((t) => {
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, () => {
+      realtimeListeners.forEach((listener) => {
+        try {
+          listener([t]);
+        } catch (err) {
+          console.error('Realtime listener error:', err);
+        }
+      });
+    });
+  });
+
+  channel.subscribe();
+  activeRealtimeChannel = channel;
+}
 
 export const prodApi = {
   mode: 'supabase' as const,
@@ -618,19 +675,22 @@ export const prodApi = {
 
   // ---- realtime (Supabase postgres_changes) ------------------------------------------------
   subscribe(onChange: (tables: RealtimeTable[] | string[]) => void): () => void {
-    const client = supabase;
-    if (!client) return () => undefined;
-    const tables: RealtimeTable[] = [
-      'profiles', 'menu_permission', 'admin_site', 'site', 'camp', 'employee', 'attendance', 'notification',
-      'warning', 'fine', 'leave_request', 'cancellation_request', 'uniform_registry',
-    ];
-    const channel = client.channel('pulse-db-changes');
-    tables.forEach((t) => {
-      channel.on('postgres_changes', { event: '*', schema: 'public', table: t }, () => onChange([t]));
-    });
-    channel.subscribe();
+    if (!supabase) return () => undefined;
+
+    realtimeListeners.add(onChange);
+    ensureRealtimeChannel();
+
     return () => {
-      client.removeChannel(channel);
+      realtimeListeners.delete(onChange);
+      if (realtimeListeners.size === 0 && activeRealtimeChannel && supabase) {
+        if (teardownTimeout) clearTimeout(teardownTimeout);
+        teardownTimeout = setTimeout(() => {
+          if (realtimeListeners.size === 0 && activeRealtimeChannel && supabase) {
+            supabase.removeChannel(activeRealtimeChannel);
+            activeRealtimeChannel = null;
+          }
+        }, 5000);
+      }
     };
   },
 };

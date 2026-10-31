@@ -1233,8 +1233,9 @@ end; $$;
 -- ============================================================================
 
 create or replace function public.create_leave_request(
-  p_employee_id uuid, p_leave_type text, p_other_type_text text default null,
-  p_start_date date, p_end_date date, p_total_days int, p_reason text
+  p_employee_id uuid, p_leave_type text,
+  p_start_date date, p_end_date date, p_total_days int, p_reason text,
+  p_other_type_text text default null
 )
 returns public.leave_request language plpgsql
 security definer set search_path = public
@@ -1400,7 +1401,7 @@ end; $$;
 create or replace function public.update_uniform_entry(
   p_id uuid, p_token_number int, p_document_type text, p_document_number text,
   p_items jsonb, p_site_name text default null, p_team_leader_name text default null,
-  p_created_at timestamptz
+  p_created_at timestamptz default now()
 )
 returns public.uniform_registry language plpgsql
 security definer set search_path = public
@@ -1457,3 +1458,19 @@ begin
 exception
   when duplicate_object then null; -- already in publication
 end $$;
+
+-- ============================================================================
+-- 15. FUNCTION GRANTS (final pass)
+-- ============================================================================
+-- The grant block in section 3 only covers functions that existed when it ran.
+-- The RPCs in sections 6–13 are created AFTER it, so they fall back to the
+-- Postgres default (PUBLIC = everyone, including anon). Re-applying the grants
+-- here — at the very end — keeps the rule true for every function no matter
+-- where it lives in this file:
+--   • authenticated + service_role may call every business function
+--     (the permission guards live inside each function)
+--   • anonymous users may ONLY check whether initial setup is needed
+revoke execute on all functions in schema public from public;
+revoke execute on all functions in schema public from anon;
+grant execute on all functions in schema public to authenticated, service_role;
+grant execute on function public.has_any_profiles() to anon;

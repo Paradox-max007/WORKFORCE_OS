@@ -73,6 +73,11 @@ const selectableYears = (): number[] => {
   return [y - 2, y - 1, y];
 };
 const fmtHours = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+/** Decimal places to render a lifetime-hours figure with (0 / 1 / 2 — no trailing zeros). */
+const hoursDecimalsFor = (n: number): 0 | 1 | 2 => {
+  if (Number.isInteger(n)) return 0;
+  return Math.round(n * 10) / 10 === n ? 1 : 2;
+};
 
 const STATUS_LABEL: Record<EmployeeStatus, string> = {
   active: 'Active',
@@ -675,6 +680,13 @@ export function EmployeeDetailsPage() {
   const [shareOpen, setShareOpen] = useState(false);
   const [sharePreviewActive, setSharePreviewActive] = useState(false);
 
+  // Lifetime total hours shown in the Professional Information card
+  // (opening balance + attendance-tracked hours, aggregated by the
+  // get_employee_working_hours RPC — same source of truth as the Working
+  // Hours report).
+  const [hoursSummary, setHoursSummary] = useState<{ lifetime: number; opening: number; tracked: number } | null>(null);
+  const [hoursFailed, setHoursFailed] = useState(false);
+
   const trMonthKey = `${trYear}-${pad(trMonth)}`;
 
   // ---- resolve the employee ---------------------------------------------------
@@ -712,6 +724,28 @@ export function EmployeeDetailsPage() {
       });
     return () => { cancelled = true; };
   }, [selectedEmployeeId, trMonthKey, realtimeVersion]);
+
+  // ---- lifetime total hours -----------------------------------------------------
+  useEffect(() => {
+    const employeeId = selectedEmployeeId;
+    if (!employeeId) return;
+    let cancelled = false;
+    setHoursSummary(null);
+    setHoursFailed(false);
+    dataApi.getEmployeeWorkingHours(employeeId)
+      .then((report) => {
+        if (cancelled) return;
+        setHoursSummary({
+          lifetime: report.lifetimeHours,
+          opening: report.openingHours,
+          tracked: report.trackedHours,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setHoursFailed(true);
+      });
+    return () => { cancelled = true; };
+  }, [selectedEmployeeId, realtimeVersion]);
 
   const trTotals = useMemo(() => totalsFor(trRecords ?? []), [trRecords]);
 
@@ -851,6 +885,27 @@ export function EmployeeDetailsPage() {
         </InfoCard>
 
         <InfoCard index={1} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
+          <div className="sm:col-span-2">
+            <InfoRow
+              label="Total Hours"
+              value={hoursSummary ? (
+                <span
+                  className="inline-flex items-center gap-1 font-semibold text-brand"
+                  title={`Lifetime working hours = historical balance (${fmtHours(hoursSummary.opening)}) + attendance-tracked hours (${fmtHours(hoursSummary.tracked)})`}
+                >
+                  <Clock3 size={14} className="inline" aria-hidden="true" />
+                  <AnimatedCounter value={hoursSummary.lifetime} decimals={hoursDecimalsFor(hoursSummary.lifetime)} />
+                  <span className="text-xs font-medium text-muted-foreground">hrs</span>
+                </span>
+              ) : hoursFailed ? (
+                <span title="Total hours unavailable">—</span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+                  <Loader2 size={13} className="animate-spin" aria-hidden="true" /> Loading…
+                </span>
+              )}
+            />
+          </div>
           <InfoRow label="Position" value={emp.position ?? '—'} />
           <InfoRow label="Join Date" value={fmtDate(emp.join_date)} />
           <InfoRow label="Company" value={emp.company_name ?? '—'} />

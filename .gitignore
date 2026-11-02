@@ -56,3 +56,6 @@ server.log
 # local secrets & runtime artifacts (never commit)
 auth-*.json
 db/*.db
+
+# session tooling artifacts
+tool-results/

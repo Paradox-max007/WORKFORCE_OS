@@ -6,7 +6,7 @@
 
 import { motion } from 'framer-motion';
 import {
-  Ban, Bell, Building2, CalendarCheck, ChevronLeft, FileWarning, LayoutDashboard,
+  Ban, Bell, Building2, CalendarCheck, ChevronLeft, Clock, FileWarning, LayoutDashboard,
   LogOut, Moon, Shirt, Sun, Tent, Users, UserSquare2,
 } from 'lucide-react';
 import Image from 'next/image';
@@ -34,6 +34,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'sites', label: 'Sites', icon: Building2 },
   { id: 'camps', label: 'Camps', icon: Tent },
   { id: 'attendance', label: 'Attendance', icon: CalendarCheck },
+  { id: 'working_hours', label: 'Working Hours', icon: Clock },
   { id: 'uniform_registry', label: 'Uniform Registry', icon: Shirt },
   { id: 'leave_requests', label: 'Leave Requests', icon: FileWarning },
   { id: 'cancellation_requests', label: 'Cancellations', icon: Ban },
@@ -108,6 +109,9 @@ function SidebarContent({
     if (id === 'dashboard' || id === 'uniform_registry') return true;
     // the dedicated employee details / form pages belong to the Employees module
     if (id === 'employee_details' || id === 'employee_form') return perms ? perms.employees : false;
+    // Working Hours shares the Employees menu permission for now — it is an
+    // employee-centric report (a dedicated permission can come later)
+    if (id === 'working_hours') return perms ? perms.employees : false;
     return perms ? perms[id as keyof typeof perms] ?? false : false;
   };
 

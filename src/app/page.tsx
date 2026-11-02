@@ -23,6 +23,7 @@ import { LeaveRequestPage } from '@/components/leave-requests/leave-request-page
 import { NotificationPage } from '@/components/notifications/notification-page';
 import { SitesPage } from '@/components/sites/sites-page';
 import { UniformRegistryPage } from '@/components/uniform-registry/uniform-registry-page';
+import { WorkingHoursPage } from '@/components/working-hours/working-hours-page';
 import { dataApi, isDemoMode } from '@/lib/data';
 import { useAppStore, type AppView } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -68,6 +69,7 @@ function MainLayout() {
     sites: <SitesPage />,
     camps: <CampsPage />,
     attendance: <AttendancePage />,
+    working_hours: <WorkingHoursPage />,
     uniform_registry: <UniformRegistryPage />,
     leave_requests: <LeaveRequestPage />,
     cancellation_requests: <CancellationRequestPage />,

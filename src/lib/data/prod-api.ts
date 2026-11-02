@@ -16,6 +16,7 @@ import {
   type CancellationRequestVM,
   type EmployeeInput,
   type EmployeeVM,
+  type EmployeeWorkingHoursReport,
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
@@ -415,6 +416,51 @@ export const prodApi = {
     const { data, error } = await sb().from('site_transfer').select('*').order('created_at');
     assertOk(error);
     return (data ?? []) as SiteTransfer[];
+  },
+
+  /** Lifetime working-hours report — all aggregation happens in Postgres
+   *  (get_employee_working_hours RPC): opening balance + per-month/per-site
+   *  attendance totals with date-effective site attribution. */
+  async getEmployeeWorkingHours(employeeId: string): Promise<EmployeeWorkingHoursReport> {
+    const { data, error } = await sb().rpc('get_employee_working_hours', {
+      p_employee_id: employeeId,
+    });
+    assertOk(error);
+    const r = (data ?? {}) as {
+      employee_id: string; full_name: string; employee_code: string; position: string | null;
+      site_id: string | null; site_name: string | null; join_date: string | null;
+      status: EmployeeWorkingHoursReport['status']; photo: string | null;
+      opening_hours: number | string; tracked_hours: number | string; lifetime_hours: number | string;
+      monthly_breakdown: {
+        year: number; month: number; total_hours: number | string; attendance_days: number;
+        sites: { site_id: string | null; site_name: string; total_hours: number | string }[];
+      }[] | null;
+    };
+    return {
+      employeeId: r.employee_id,
+      fullName: r.full_name,
+      employeeCode: r.employee_code,
+      position: r.position,
+      siteId: r.site_id,
+      siteName: r.site_name,
+      joinDate: r.join_date,
+      status: r.status,
+      photo: r.photo,
+      openingHours: Number(r.opening_hours ?? 0),
+      trackedHours: Number(r.tracked_hours ?? 0),
+      lifetimeHours: Number(r.lifetime_hours ?? 0),
+      monthlyBreakdown: (r.monthly_breakdown ?? []).map((m) => ({
+        year: m.year,
+        month: m.month,
+        totalHours: Number(m.total_hours ?? 0),
+        attendanceDays: m.attendance_days ?? 0,
+        sites: (m.sites ?? []).map((s) => ({
+          siteId: s.site_id,
+          siteName: s.site_name,
+          totalHours: Number(s.total_hours ?? 0),
+        })),
+      })),
+    };
   },
 
   async createEmployee(input: EmployeeInput): Promise<EmployeeVM> {

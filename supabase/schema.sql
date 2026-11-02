@@ -93,6 +93,10 @@ create table if not exists public.employee (
   photo               text,                            -- base64 data-url
   is_team_leader      boolean not null default false,
   team_leader_site_id uuid references public.site(id) on delete set null,
+  -- lifetime working hours = opening_hours (accumulated before PULSE started
+  -- tracking attendance) + SUM(attendance.hours). Never written into the
+  -- attendance table — it stays a separate, super-admin-adjustable balance.
+  opening_hours       numeric(12,2) not null default 0 check (opening_hours >= 0),
   created_at          timestamptz not null default now(),
   updated_at          timestamptz not null default now()
 );
@@ -124,11 +128,15 @@ create table if not exists public.site_transfer (
 -- ---------------------------------------------------------------------------
 -- older installs created menu_permission without the 'camps' menu key
 alter table public.menu_permission drop constraint if exists menu_permission_menu_key_check;
-alter table public.menu_permission add constraint menu_permission_menu_key_check
-  check (menu_key in ('employees','sites','camps','attendance','leave_requests','cancellation_requests','notifications'));
+alter table public.menu_permission add constraint menu_permission_menu_key_check  check (menu_key in ('employees','sites','camps','attendance','leave_requests','cancellation_requests','notifications'));
 -- camp block / room columns for older installs
 alter table public.employee add column if not exists camp_block text;
 alter table public.employee add column if not exists camp_room text;
+-- historical opening-hours balance (Working Hours module) for older installs;
+-- the create table above already covers fresh ones
+alter table public.employee add column if not exists opening_hours numeric(12,2) not null default 0;
+alter table public.employee drop constraint if exists employee_opening_hours_check;
+alter table public.employee add constraint employee_opening_hours_check check (opening_hours >= 0);
 
 -- Daily attendance (Excel-style marking: hours worked, or absent)
 create table if not exists public.attendance (
@@ -239,6 +247,8 @@ create index if not exists idx_camp_active          on public.camp(is_active);
 create index if not exists idx_attendance_emp       on public.attendance(employee_id);
 create index if not exists idx_attendance_date      on public.attendance(date);
 create index if not exists idx_attendance_hidden    on public.attendance(is_hidden);
+-- working-hours aggregation scans one employee's visible records
+create index if not exists idx_attendance_emp_hours on public.attendance(employee_id, date) where is_hidden = false;
 create index if not exists idx_notification_profile on public.notification(profile_id);
 create index if not exists idx_notification_hidden  on public.notification(is_hidden);
 create index if not exists idx_warning_emp          on public.warning(employee_id);
@@ -705,6 +715,8 @@ declare v_block text := nullif(btrim(coalesce(p_employee->>'camp_block','')), ''
 declare v_room  text := nullif(btrim(coalesce(p_employee->>'camp_room','')), '');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
+-- historical opening balance: blank / missing / null → 0 (new employees)
+declare v_opening numeric := coalesce(nullif(p_employee->>'opening_hours','')::numeric, 0);
 -- manual employee ID: use it as-is; blank → auto-generate (PUL-YYYY-NNN)
 declare v_code text := nullif(btrim(coalesce(p_employee->>'employee_code','')), '');
 declare conflicting public.employee;
@@ -734,6 +746,14 @@ begin
     v_room := null;
   end if;
 
+  -- opening balance validation (frontend validates too — never trust it alone)
+  if v_opening < 0 or v_opening <> v_opening then
+    raise exception 'Previous working hours cannot be negative';
+  end if;
+  if v_opening > 9999999999.99 then
+    raise exception 'Previous working hours are unrealistically large';
+  end if;
+
   -- one team leader per site
   if v_is_leader and v_leader_site is not null then
     select * into conflicting from public.employee
@@ -747,7 +767,7 @@ begin
     full_name, employee_code, nationality, date_of_birth, phone, email, address,
     emergency_contact, position, join_date, company_name, passport_number, passport_status,
     id_number, id_status, current_site_id, rating, status, photo, is_team_leader, team_leader_site_id,
-    camp_id, camp_block, camp_room
+    camp_id, camp_block, camp_room, opening_hours
   ) values (
     p_employee->>'full_name', coalesce(v_code, public.next_employee_code()),
     nullif(p_employee->>'nationality',''), (p_employee->>'date_of_birth')::date,
@@ -757,7 +777,7 @@ begin
     nullif(p_employee->>'passport_number',''), nullif(p_employee->>'passport_status',''),
     nullif(p_employee->>'id_number',''), nullif(p_employee->>'id_status',''),
     v_site, 5.0, 'active', nullif(p_employee->>'photo',''), v_is_leader, v_leader_site, v_camp,
-    v_block, v_room
+    v_block, v_room, round(v_opening, 2)
   ) returning * into result;
   return result;
 end; $$;
@@ -773,7 +793,12 @@ declare v_block text := nullif(btrim(coalesce(p_employee->>'camp_block','')), ''
 declare v_room  text := nullif(btrim(coalesce(p_employee->>'camp_room','')), '');
 declare v_leader_site uuid := nullif(p_employee->>'team_leader_site_id','');
 declare v_is_leader boolean := coalesce((p_employee->>'is_team_leader')::boolean, false);
+-- opening balance: NULL/blank in the payload → keep the stored value; a number
+-- → set it, but only a super admin may actually CHANGE it (the form always
+-- sends the current value back, so normal edits pass through untouched)
+declare v_opening numeric := nullif(p_employee->>'opening_hours','')::numeric;
 declare v_prev_site uuid;
+declare v_prev_opening numeric;
 declare conflicting public.employee;
 begin
   if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
@@ -800,7 +825,21 @@ begin
   end if;
 
   -- remember the previous site so the move can be logged below
-  select current_site_id into v_prev_site from public.employee where id = p_id;
+  select current_site_id, opening_hours into v_prev_site, v_prev_opening from public.employee where id = p_id;
+
+  -- historical opening balance: validated like on create; changing it is a
+  -- super-admin-only adjustment so a lifetime total can never drift silently
+  if v_opening is not null then
+    if v_opening < 0 or v_opening <> v_opening then
+      raise exception 'Previous working hours cannot be negative';
+    end if;
+    if v_opening > 9999999999.99 then
+      raise exception 'Previous working hours are unrealistically large';
+    end if;
+    if v_opening <> v_prev_opening and not public.is_super_admin() then
+      raise exception 'Only super admins can adjust the historical opening balance';
+    end if;
+  end if;
 
   update public.employee set
     full_name         = p_employee->>'full_name',
@@ -824,6 +863,7 @@ begin
     photo             = nullif(p_employee->>'photo',''),
     is_team_leader    = v_is_leader,
     team_leader_site_id = case when v_is_leader then v_leader_site else null end,
+    opening_hours     = coalesce(round(v_opening, 2), public.employee.opening_hours),
     updated_at        = now()
   where id = p_id returning * into result;
 
@@ -1238,6 +1278,108 @@ begin
     where not a.is_hidden and e.status <> 'deleted' and a.status <> 'not_marked'
     group by months.m, a.status
     order by months.m;
+end; $$;
+
+-- ============================================================================
+-- 9b. WORKING HOURS REPORT RPC (Employee Working Hours module)
+-- ----------------------------------------------------------------------------
+-- One database-side aggregation answers "how many hours has this employee
+-- worked in their life, split by month and site":
+--   • opening_hours (historical balance from before PULSE tracking) +
+--   • SUM(attendance.hours) over every non-hidden record, where each record's
+--     site is resolved by emp_site_on_date() — the SAME date-effective transfer
+--     rule the marking sheet uses (a day already marked at the old site before
+--     the move was recorded stays at the old site).
+-- Reconciliation guarantees: monthly total = sum of its site totals, and
+-- lifetime = opening + sum of all monthly totals (never counted twice).
+-- Requires the 'employees' menu permission (Working Hours shares it).
+-- ============================================================================
+create or replace function public.get_employee_working_hours(p_employee_id uuid)
+returns jsonb language plpgsql
+stable
+security definer set search_path = public
+as $$
+declare
+  emp record;
+  v_opening numeric;
+  v_tracked numeric;
+  v_monthly jsonb;
+begin
+  if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+
+  select e.*, s.name as site_name into emp
+  from public.employee e
+  left join public.site s on s.id = e.current_site_id
+  where e.id = p_employee_id and e.status <> 'deleted';
+  if emp.id is null then raise exception 'Employee not found'; end if;
+
+  v_opening := coalesce(emp.opening_hours, 0);
+
+  with recs as (
+    select a.date,
+           a.hours,
+           public.emp_site_on_date(p_employee_id, a.date) as site_id
+    from public.attendance a
+    where a.employee_id = p_employee_id
+      and not a.is_hidden
+      and a.hours is not null
+      and a.hours > 0
+  ),
+  site_month as (
+    select extract(year from date)::int  as yr,
+           extract(month from date)::int as mo,
+           site_id,
+           sum(hours)  as hrs,
+           count(*)    as days
+    from recs
+    group by 1, 2, 3
+  ),
+  month_agg as (
+    select sm.yr, sm.mo,
+           sum(sm.hrs)::numeric  as total,
+           sum(sm.days)::int     as days,
+           jsonb_agg(
+             jsonb_build_object(
+               'site_id',     sm.site_id,
+               'site_name',   coalesce(s.name, 'No site'),
+               'total_hours', round(sm.hrs::numeric, 2)
+             ) order by sm.hrs desc
+           ) as sites
+    from site_month sm
+    left join public.site s on s.id = sm.site_id
+    group by sm.yr, sm.mo
+  )
+  select
+    coalesce((select round(sum(total), 2) from month_agg), 0),
+    coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'year',            yr,
+          'month',           mo,
+          'total_hours',     round(total, 2),
+          'attendance_days', days,
+          'sites',           sites
+        ) order by yr desc, mo desc
+      ) from month_agg
+    ), '[]'::jsonb)
+  into v_tracked, v_monthly;
+
+  return jsonb_build_object(
+    'employee_id',       emp.id,
+    'full_name',         emp.full_name,
+    'employee_code',     emp.employee_code,
+    'position',          emp.position,
+    'site_id',           emp.current_site_id,
+    'site_name',         emp.site_name,
+    'join_date',         emp.join_date,
+    'status',            emp.status,
+    'is_team_leader',    emp.is_team_leader,
+    'photo',             emp.photo,
+    'opening_hours',     round(v_opening, 2),
+    'tracked_hours',     v_tracked,
+    'lifetime_hours',    round(v_opening + v_tracked, 2),
+    'monthly_breakdown', v_monthly
+  );
 end; $$;
 
 -- ============================================================================

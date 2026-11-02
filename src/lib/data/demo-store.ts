@@ -90,7 +90,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 8,
+    version: 9,
     profiles: [],
     sites: [],
     camps: [],
@@ -189,20 +189,22 @@ function seedDB(): DemoDB {
     photo: null,
     is_team_leader: leaderSite !== null,
     team_leader_site_id: leaderSite?.id ?? null,
+    // historical hours from before PULSE tracking (Working Hours module)
+    opening_hours: 0,
     created_at: nowISO(),
     updated_at: nowISO(),
     ...extra,
   });
 
   db.employees = [
-    mkEmp(1, 'Rajesh Kumar', 'India', 'Electrician', npc, npc),
-    mkEmp(2, 'Muhammad Iqbal', 'Pakistan', 'Plumber', npc, null),
-    mkEmp(3, 'Arun Nair', 'India', 'AC Technician', npc, null),
+    mkEmp(1, 'Rajesh Kumar', 'India', 'Electrician', npc, npc, { opening_hours: 2400 }),
+    mkEmp(2, 'Muhammad Iqbal', 'Pakistan', 'Plumber', npc, null, { opening_hours: 1860.5 }),
+    mkEmp(3, 'Arun Nair', 'India', 'AC Technician', npc, null, { opening_hours: 920 }),
     mkEmp(4, 'Kamal Hussain', 'Bangladesh', 'Welder', npc, null),
-    mkEmp(5, 'Suresh Patel', 'India', 'Foreman', redCoast, redCoast),
+    mkEmp(5, 'Suresh Patel', 'India', 'Foreman', redCoast, redCoast, { opening_hours: 3120 }),
     mkEmp(6, 'Dilip Shrestha', 'Nepal', 'Mason', redCoast, null),
     mkEmp(7, 'Joseph Santos', 'Philippines', 'Painter', redCoast, null),
-    mkEmp(8, 'Ahmed Hassan', 'Egypt', 'Site Supervisor', redCoast, null),
+    mkEmp(8, 'Ahmed Hassan', 'Egypt', 'Site Supervisor', redCoast, null, { opening_hours: 450 }),
     mkEmp(9, 'Rahim Uddin', 'Bangladesh', 'Carpenter', marina, marina),
     mkEmp(10, 'Sandeep Singh', 'India', 'Steel Fixer', marina, null),
     mkEmp(11, 'John Mwangi', 'Kenya', 'Security Guard', marina, null),
@@ -413,7 +415,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 8) return parsed;
+      if (parsed.version === 9) return parsed;
     }
   } catch {
     // corrupted → reseed

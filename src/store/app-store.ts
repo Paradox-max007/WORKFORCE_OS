@@ -14,6 +14,7 @@ export type AppView =
   | 'sites'
   | 'camps'
   | 'attendance'
+  | 'working_hours'
   | 'uniform_registry'
   | 'leave_requests'
   | 'cancellation_requests'
@@ -28,6 +29,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   sites: 'Site Management',
   camps: 'Camp Management',
   attendance: 'Attendance',
+  working_hours: 'Working Hours',
   uniform_registry: 'Uniform Registry',
   leave_requests: 'Leave Requests',
   cancellation_requests: 'Cancellation Requests',

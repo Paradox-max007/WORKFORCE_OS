@@ -85,6 +85,10 @@ export interface Employee {
   photo: string | null;
   is_team_leader: boolean;
   team_leader_site_id: string | null;
+  /** Historical working hours accumulated BEFORE PULSE started tracking
+   *  attendance (opening balance). Lifetime hours = this + Σ attendance.hours.
+   *  Kept separate from attendance — never imported as fake daily records. */
+  opening_hours: number;
   created_at: string;
   updated_at: string;
 }
@@ -276,6 +280,52 @@ export interface EmployeeInput {
   photo: string | null;
   is_team_leader: boolean;
   team_leader_site_id: string | null;
+  /** Opening balance — blank/null keeps the stored value on update, 0 on create */
+  opening_hours?: number | null;
+}
+
+// ============================================================================
+// Working Hours report (Employee Working Hours module)
+// ============================================================================
+
+/** Hours one employee accumulated at one site within one month. */
+export interface WorkingHoursSiteTotal {
+  siteId: string | null; // null → recorded without a site (idle)
+  siteName: string;
+  totalHours: number;
+}
+
+/** One month of an employee's tracked working hours, split by site. */
+export interface WorkingHoursMonth {
+  year: number;
+  month: number; // 1–12
+  totalHours: number;
+  /** Days with recorded working hours (absent / unmarked days excluded) */
+  attendanceDays: number;
+  sites: WorkingHoursSiteTotal[];
+}
+
+/** Lifetime working-hours report for one employee (database-side aggregation).
+ *  Invariants: lifetimeHours = openingHours + Σ monthlyBreakdown.totalHours and
+ *  every month's totalHours = Σ its sites' totalHours. */
+export interface EmployeeWorkingHoursReport {
+  employeeId: string;
+  fullName: string;
+  employeeCode: string;
+  position: string | null;
+  siteId: string | null;
+  siteName: string | null;
+  joinDate: string | null;
+  status: EmployeeStatus;
+  photo: string | null;
+  /** historical balance from before PULSE tracking (never spread over months) */
+  openingHours: number;
+  /** Σ attendance.hours over all visible records (date-effective per site) */
+  trackedHours: number;
+  /** openingHours + trackedHours */
+  lifetimeHours: number;
+  /** newest month first; empty when the employee has no attendance history */
+  monthlyBreakdown: WorkingHoursMonth[];
 }
 
 export interface LeaveRequestInput {

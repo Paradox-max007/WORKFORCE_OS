@@ -12,6 +12,7 @@ import {
   type Employee,
   type EmployeeInput,
   type EmployeeVM,
+  type EmployeeWorkingHoursReport,
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
@@ -26,6 +27,7 @@ import {
   type UniformEntryUpdate,
   type WarningVM,
   type MenuPermissionMap,
+  type WorkingHoursMonth,
 } from '@/lib/types';
 import {
   addDaysStr,
@@ -39,7 +41,7 @@ import {
   toYMD,
   uid,
 } from './demo-store';
-import { getEmployeeSiteForDate } from '@/lib/site-timeline';
+import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
 type VM = Record<string, unknown>;
 
@@ -424,6 +426,88 @@ export const demoApi = {
     return [...db.siteTransfers];
   },
 
+  /** Lifetime working-hours report — mirrors the get_employee_working_hours
+   *  Postgres RPC: opening balance + Σ visible attendance hours, grouped by
+   *  month and site. Every record's site is resolved through the SAME shared
+   *  site-timeline engine (getEmployeeSiteForDate) the marking sheet uses, so
+   *  mid-month transfers and the "marked before the move" rule attribute
+   *  hours exactly like production. */
+  async getEmployeeWorkingHours(employeeId: string): Promise<EmployeeWorkingHoursReport> {
+    const e = db.employees.find((x) => x.id === employeeId && x.status !== 'deleted');
+    if (!e) throw new Error('Employee not found');
+
+    const opening = Math.round((e.opening_hours ?? 0) * 100) / 100;
+    // ALL records (hidden included) drive the pre-marked-day transfer rule —
+    // emp_site_on_date() in SQL looks at them the same way
+    const records = indexRecords(db.attendance);
+    const recs = db.attendance.filter(
+      (a) => a.employee_id === employeeId && !a.is_hidden && a.hours != null && a.hours > 0,
+    );
+
+    // month key → { sites: siteKey → {siteId, siteName, hours, days} }
+    const months = new Map<string, {
+      year: number; month: number;
+      sites: Map<string, { siteId: string | null; siteName: string; hours: number; days: number }>;
+    }>();
+    for (const a of recs) {
+      const [y, m] = a.date.split('-').map(Number);
+      const key = `${y}-${String(m).padStart(2, '0')}`;
+      let month = months.get(key);
+      if (!month) {
+        month = { year: y, month: m, sites: new Map() };
+        months.set(key, month);
+      }
+      const siteId = getEmployeeSiteForDate(employeeId, a.date, {
+        transfers: db.siteTransfers,
+        records,
+        currentSiteId: e.current_site_id ?? null,
+      });
+      const siteKey = siteId ?? '__none__';
+      let site = month.sites.get(siteKey);
+      if (!site) {
+        site = {
+          siteId,
+          siteName: siteId ? db.sites.find((s) => s.id === siteId)?.name ?? 'No site' : 'No site',
+          hours: 0,
+          days: 0,
+        };
+        month.sites.set(siteKey, site);
+      }
+      site.hours += a.hours as number;
+      site.days += 1;
+    }
+
+    const round2 = (n: number): number => Math.round(n * 100) / 100;
+    const monthly: WorkingHoursMonth[] = [...months.values()]
+      .sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month))
+      .map((month) => ({
+        year: month.year,
+        month: month.month,
+        totalHours: round2([...month.sites.values()].reduce((n, s) => n + s.hours, 0)),
+        attendanceDays: [...month.sites.values()].reduce((n, s) => n + s.days, 0),
+        sites: [...month.sites.values()]
+          .sort((a, b) => b.hours - a.hours)
+          .map((s) => ({ siteId: s.siteId, siteName: s.siteName, totalHours: round2(s.hours) })),
+      }));
+    const tracked = round2(monthly.reduce((n, m) => n + m.totalHours, 0));
+
+    return {
+      employeeId: e.id,
+      fullName: e.full_name,
+      employeeCode: e.employee_code,
+      position: e.position,
+      siteId: e.current_site_id ?? null,
+      siteName: e.current_site_id ? db.sites.find((s) => s.id === e.current_site_id)?.name ?? null : null,
+      joinDate: e.join_date,
+      status: e.status,
+      photo: e.photo,
+      openingHours: opening,
+      trackedHours: tracked,
+      lifetimeHours: round2(opening + tracked),
+      monthlyBreakdown: monthly,
+    };
+  },
+
   async createEmployee(input: EmployeeInput): Promise<EmployeeVM> {
     if (input.current_site_id) {
       const site = db.sites.find((s) => s.id === input.current_site_id);
@@ -445,6 +529,11 @@ export const demoApi = {
       const dup = db.employees.find((e) => e.employee_code.toLowerCase() === manualCode.toLowerCase());
       if (dup) throw new Error(`Employee ID "${manualCode}" is already taken by ${dup.full_name} — use another ID or leave it blank to auto-generate.`);
     }
+    // historical opening balance (blank → 0, negative rejected — mirrors the RPC)
+    if (input.opening_hours != null && (!Number.isFinite(input.opening_hours) || input.opening_hours < 0)) {
+      throw new Error('Previous working hours cannot be negative');
+    }
+    const opening = Math.round((input.opening_hours ?? 0) * 100) / 100;
     const e: Employee = {
       id: uid(),
       full_name: input.full_name,
@@ -471,6 +560,7 @@ export const demoApi = {
       photo: input.photo || null,
       is_team_leader: input.is_team_leader,
       team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
+      opening_hours: opening,
       created_at: nowISO(),
       updated_at: nowISO(),
     };
@@ -501,6 +591,20 @@ export const demoApi = {
     // site across the merged moved-days cells)
     const prevSiteId = e.current_site_id ?? null;
     const nextSiteId = input.current_site_id || null;
+    // historical opening balance: blank → keep the stored value; an actual
+    // CHANGE is a super-admin-only adjustment (mirrors update_employee RPC)
+    if (input.opening_hours != null && (!Number.isFinite(input.opening_hours) || input.opening_hours < 0)) {
+      throw new Error('Previous working hours cannot be negative');
+    }
+    const openingNext = typeof input.opening_hours === 'number'
+      ? Math.round(input.opening_hours * 100) / 100
+      : e.opening_hours;
+    if (openingNext !== (e.opening_hours ?? 0)) {
+      const me = currentProfile();
+      if (me?.role !== 'super_admin') {
+        throw new Error('Only super admins can adjust the historical opening balance');
+      }
+    }
     Object.assign(e, {
       full_name: input.full_name,
       nationality: input.nationality || null,
@@ -523,6 +627,7 @@ export const demoApi = {
       photo: input.photo || null,
       is_team_leader: input.is_team_leader,
       team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
+      opening_hours: openingNext,
       updated_at: nowISO(),
     });
     if (prevSiteId !== nextSiteId) {

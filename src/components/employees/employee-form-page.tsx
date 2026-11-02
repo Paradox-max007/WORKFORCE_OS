@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import {
-  ArrowLeft, Building2, Crown, HeartPulse, IdCard,
+  ArrowLeft, Building2, Clock, Crown, HeartPulse, IdCard,
   ImagePlus, Loader2, Plus, Save, Tent, UserRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -32,6 +32,7 @@ import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { CampWithCount, DocumentStatus, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
+import { useAuthStore } from '@/store/auth-store';
 
 const EMPTY_FORM: EmployeeInput = {
   full_name: '', employee_code: null, nationality: null, date_of_birth: null,
@@ -107,11 +108,16 @@ export function EmployeeFormPage() {
   const returnTo = useAppStore((s) => s.employeeFormReturnTo);
   const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
   const navigateToEmployeeDetails = useAppStore((s) => s.navigateToEmployeeDetails);
+  const user = useAuthStore((s) => s.user);
+  const isSuperAdmin = user?.role === 'super_admin';
 
   const isEdit = mode === 'edit' && !!employeeId;
 
   const [form, setForm] = useState<EmployeeInput>(EMPTY_FORM);
   const [existingCode, setExistingCode] = useState<string | null>(null);
+  // historical opening balance as raw text ('' = blank) — parsed at submit so
+  // half-typed decimals never break the form state
+  const [openingHours, setOpeningHours] = useState('');
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [allEmployees, setAllEmployees] = useState<EmployeeVM[]>([]);
@@ -146,6 +152,7 @@ export function EmployeeFormPage() {
             return;
           }
           setExistingCode(emp.employee_code);
+          setOpeningHours(emp.opening_hours ? String(emp.opening_hours) : '');
           setForm({
             full_name: emp.full_name,
             employee_code: null,
@@ -263,9 +270,28 @@ export function EmployeeFormPage() {
       }
     }
 
+    // historical opening balance — optional, decimal, never negative
+    const openingText = openingHours.trim();
+    let parsedOpening: number | null = null;
+    if (openingText !== '') {
+      parsedOpening = Number(openingText);
+      if (!Number.isFinite(parsedOpening) || parsedOpening < 0) {
+        toast.error('Previous working hours must be a number of 0 or more (decimals allowed, e.g. 2000 or 1860.5)');
+        return;
+      }
+      if (parsedOpening > 9999999999.99) {
+        toast.error('Previous working hours are unrealistically large');
+        return;
+      }
+    } else if (isEdit && editingEmployee) {
+      // blank on edit → keep the stored balance (type 0 to reset it to zero)
+      parsedOpening = editingEmployee.opening_hours ?? 0;
+    }
+
     setSaving(true);
     const payload: EmployeeInput = {
       ...form,
+      opening_hours: parsedOpening,
       full_name: form.full_name.trim(),
       employee_code: isEdit ? undefined : (manualCode || null),
       nationality: nullify(form.nationality),
@@ -551,6 +577,48 @@ export function EmployeeFormPage() {
                   </Select>
                 </div>
               )}
+            </div>
+          </FormSection>
+
+          {/* ---------------- Historical Working Hours ---------------- */}
+          <FormSection
+            icon={<Clock size={16} />}
+            title="Historical Working Hours"
+            hint="For employees who worked before PULSE started tracking attendance"
+          >
+            <div className="space-y-2">
+              <Label htmlFor="opening-hours">
+                Previous Total Working Hours <span className="text-muted-foreground/60">(opening balance)</span>
+              </Label>
+              <div className="relative">
+                <Input
+                  id="opening-hours"
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step="any"
+                  value={openingHours}
+                  onChange={(e) => setOpeningHours(e.target.value)}
+                  disabled={isEdit && !isSuperAdmin}
+                  placeholder="Enter previous hours, e.g. 2000"
+                  className="h-11 pr-12"
+                />
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                  hrs
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Optional — leave blank for new employees. Added to attendance-recorded hours for the
+                lifetime total on the Working Hours page; it is never spread across months or sites.
+              </p>
+              <div className="flex items-center gap-2 rounded-lg border border-brand/15 bg-brand/5 px-3 py-2 text-[11px] text-muted-foreground">
+                <Clock size={12} className="shrink-0 text-brand" />
+                <span>
+                  Lifetime hours = opening balance + attendance-recorded hours.
+                  {isEdit && !isSuperAdmin && ' Only super admins can adjust this balance.'}
+                  {isEdit && isSuperAdmin && ' Blank keeps the current balance; type 0 to reset it.'}
+                </span>
+              </div>
             </div>
           </FormSection>
 

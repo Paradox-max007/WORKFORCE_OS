@@ -33,7 +33,9 @@ import { fmtDate, fmtDateTime, initials } from '@/lib/format';
 import { downloadEmployeeCv } from '@/lib/pdf';
 import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
 import { cn } from '@/lib/utils';
-import type { Attendance, DocumentStatus, EmployeeStatus, EmployeeVM } from '@/lib/types';
+import type {
+  Attendance, DocumentStatus, EmployeeStatus, EmployeeVM, SalaryEligibility,
+} from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -83,6 +85,12 @@ const STATUS_LABEL: Record<EmployeeStatus, string> = {
   active: 'Active',
   pending_deletion: 'Pending Deletion',
   deleted: 'Deleted',
+};
+
+const SALARY_ROLE_LABELS: Record<string, string> = {
+  standard: 'Standard',
+  team_leader: 'Team Leader',
+  supervisor: 'Supervisor',
 };
 
 /** "1, 2, 3, 5" → [1, 2, 3, 5] (validated, deduped, sorted) */
@@ -687,6 +695,11 @@ export function EmployeeDetailsPage() {
   const [hoursSummary, setHoursSummary] = useState<{ lifetime: number; opening: number; tracked: number } | null>(null);
   const [hoursFailed, setHoursFailed] = useState(false);
 
+  // Salary eligibility (trade, role, 1,000-hour progress, six-month milestone,
+  // applicable rate) — Q = min(join + 6 months, 1,000 lifetime hours).
+  const [eligibility, setEligibility] = useState<SalaryEligibility | null>(null);
+  const [eligibilityFailed, setEligibilityFailed] = useState(false);
+
   const trMonthKey = `${trYear}-${pad(trMonth)}`;
 
   // ---- resolve the employee ---------------------------------------------------
@@ -744,6 +757,19 @@ export function EmployeeDetailsPage() {
       .catch(() => {
         if (!cancelled) setHoursFailed(true);
       });
+    return () => { cancelled = true; };
+  }, [selectedEmployeeId, realtimeVersion]);
+
+  // ---- salary eligibility (Professional Information card) ------------------------
+  useEffect(() => {
+    const employeeId = selectedEmployeeId;
+    if (!employeeId) return;
+    let cancelled = false;
+    setEligibility(null);
+    setEligibilityFailed(false);
+    dataApi.getEmployeeSalaryEligibility(employeeId)
+      .then((report) => { if (!cancelled) setEligibility(report); })
+      .catch(() => { if (!cancelled) setEligibilityFailed(true); });
     return () => { cancelled = true; };
   }, [selectedEmployeeId, realtimeVersion]);
 
@@ -907,6 +933,10 @@ export function EmployeeDetailsPage() {
             />
           </div>
           <InfoRow label="Position" value={emp.position ?? '—'} />
+          <InfoRow label="Trade" value={eligibility ? (eligibility.trade_name ?? 'No trade assigned') : (emp.trade_name ?? '—')} />
+          <InfoRow label="Salary Role" value={
+            <span>{SALARY_ROLE_LABELS[eligibility?.salary_role ?? emp.salary_role ?? 'standard']}</span>
+          } />
           <InfoRow label="Join Date" value={fmtDate(emp.join_date)} />
           <InfoRow label="Company" value={emp.company_name ?? '—'} />
           <InfoRow label="Site" value={<SiteBadge name={emp.site_name} />} />
@@ -932,6 +962,111 @@ export function EmployeeDetailsPage() {
                 )
               : 'No'}
           />
+          {/* ---- salary eligibility (spec section 6) ---- */}
+          <div className="sm:col-span-2">
+            {eligibility ? (
+              <div className="space-y-3 rounded-xl border border-brand/15 bg-brand/[0.04] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <Clock3 size={12} className="text-brand" /> Salary eligibility — experienced rate at 1,000 hours or 6 months
+                  </p>
+                  {eligibility.qualified ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-500"
+                      title={`Qualified via ${eligibility.qualification_reason === 'six_months' ? 'six calendar months of employment' : eligibility.qualification_reason === 'thousand_hours' ? '1,000 lifetime working hours' : 'opening balance of 1,000+ hours'} on ${fmtDate(eligibility.qualification_date ?? '')}`}
+                    >
+                      <Crown size={11} /> Qualified
+                      {eligibility.qualification_date && <> · {fmtDate(eligibility.qualification_date)}</>}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                      Not yet qualified
+                    </span>
+                  )}
+                </div>
+
+                {/* 1,000-hour milestone — always visible, even after six-month
+                    eligibility (independent milestone) */}
+                <div>
+                  <div className="mb-1 flex items-baseline justify-between text-xs">
+                    <span className="font-medium">
+                      {fmtHours(eligibility.lifetime_hours)} / {eligibility.threshold_hours} lifetime hours
+                    </span>
+                    <span className="text-muted-foreground">
+                      {eligibility.hours_to_threshold > 0
+                        ? `${Math.round(eligibility.progress_percent)}% · ${fmtHours(eligibility.hours_to_threshold)} h remaining`
+                        : 'Milestone reached'}
+                    </span>
+                  </div>
+                  <div
+                    className="h-2 overflow-hidden rounded-full bg-muted"
+                    role="progressbar"
+                    aria-valuenow={Math.round(eligibility.progress_percent)}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label="1,000-hour milestone progress"
+                  >
+                    <div
+                      className={cn('h-full rounded-full transition-all duration-700', eligibility.hours_to_threshold > 0 ? 'brand-gradient' : 'bg-emerald-500')}
+                      style={{ width: `${Math.min(100, Math.max(0, eligibility.progress_percent))}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Six-month milestone</p>
+                    <p className="mt-0.5 font-medium">
+                      {eligibility.six_month_date
+                        ? (eligibility.as_of >= eligibility.six_month_date
+                          ? <span className="text-emerald-500">Reached · {fmtDate(eligibility.six_month_date)}</span>
+                          : <span title={`Due ${fmtDate(eligibility.six_month_date)}`}>Due {fmtDate(eligibility.six_month_date)}</span>)
+                        : '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Hours milestone</p>
+                    <p className="mt-0.5 font-medium">
+                      {eligibility.threshold_date
+                        ? <span className="text-emerald-500">Reached · {fmtDate(eligibility.threshold_date)}</span>
+                        : `${fmtHours(eligibility.hours_to_threshold)} h to go`}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Applicable rate</p>
+                    <p className="mt-0.5 font-medium">
+                      {eligibility.current_rate != null
+                        ? <span className="font-semibold text-brand">AED {eligibility.current_rate.toFixed(2)}/hour</span>
+                        : <span className="text-amber-600 dark:text-amber-400" title="Assign a trade with configured rates to price this employee's hours.">
+                            {eligibility.trade_id ? 'Rate not configured' : 'No trade assigned'}
+                          </span>}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Qualified via</p>
+                    <p className="mt-0.5 font-medium">
+                      {eligibility.qualified
+                        ? (eligibility.qualification_reason === 'six_months'
+                          ? '6 months employment'
+                          : eligibility.qualification_reason === 'thousand_hours'
+                            ? '1,000 hours'
+                            : 'Opening balance')
+                        : '—'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : eligibilityFailed ? (
+              <p className="rounded-xl border bg-muted/30 p-3 text-xs text-muted-foreground" title="Requires the Salary Sheet or Employees permission">
+                Salary eligibility is not available for this account.
+              </p>
+            ) : (
+              <div className="flex items-center gap-2 rounded-xl border bg-muted/20 p-3 text-xs text-muted-foreground">
+                <Loader2 size={13} className="animate-spin" aria-hidden="true" /> Loading salary eligibility…
+              </div>
+            )}
+          </div>
+
         </InfoCard>
 
         <InfoCard index={2} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">

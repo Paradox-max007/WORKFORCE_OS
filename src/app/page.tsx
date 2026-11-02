@@ -21,7 +21,9 @@ import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
 import { LeaveRequestPage } from '@/components/leave-requests/leave-request-page';
 import { NotificationPage } from '@/components/notifications/notification-page';
+import { SalarySheetPage } from '@/components/salary-sheet/salary-sheet-page';
 import { SitesPage } from '@/components/sites/sites-page';
+import { TradePage } from '@/components/trades/trade-page';
 import { UniformRegistryPage } from '@/components/uniform-registry/uniform-registry-page';
 import { WorkingHoursPage } from '@/components/working-hours/working-hours-page';
 import { dataApi, isDemoMode } from '@/lib/data';
@@ -70,6 +72,8 @@ function MainLayout() {
     camps: <CampsPage />,
     attendance: <AttendancePage />,
     working_hours: <WorkingHoursPage />,
+    salary_sheet: <SalarySheetPage />,
+    trade_management: <TradePage />,
     uniform_registry: <UniformRegistryPage />,
     leave_requests: <LeaveRequestPage />,
     cancellation_requests: <CancellationRequestPage />,

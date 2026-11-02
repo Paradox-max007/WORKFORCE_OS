@@ -11,17 +11,27 @@ import {
   type CancellationRequestVM,
   type Employee,
   type EmployeeInput,
+  type EmployeeSalaryAssignment,
   type EmployeeVM,
   type EmployeeWorkingHoursReport,
+  type ExperienceTier,
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
   type MonthlySummaryRow,
   type Notification,
+  type PayrollAdjustmentInput,
   type Profile,
+  type SalaryEligibility,
+  type SalarySheetReport,
+  type SalaryRole,
   type Site,
   type SiteTransfer,
   type SiteWithCount,
+  type Trade,
+  type TradeInput,
+  type TradeRate,
+  type TradeRateInput,
   type UniformEntry,
   type UniformEntryInput,
   type UniformEntryUpdate,
@@ -41,6 +51,19 @@ import {
   toYMD,
   uid,
 } from './demo-store';
+import {
+  applyAssignment,
+  applyTradeRates,
+  assignmentHistoryOf,
+  buildSalarySheet,
+  calcEligibility,
+  currentRatesOf,
+  localTodayYMD,
+  rateHistoryOf,
+  refreshPayrollPeriod,
+  round2,
+  tradesWithRates,
+} from './demo-salary';
 import { defaultPermissionMap } from '@/lib/menus';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
@@ -75,6 +98,7 @@ const attachEmployeeVM = (e: Employee): EmployeeVM => ({
   site_name: e.current_site_id ? db.sites.find((s) => s.id === e.current_site_id)?.name ?? null : null,
   leader_site_name: e.team_leader_site_id ? db.sites.find((s) => s.id === e.team_leader_site_id)?.name ?? null : null,
   camp_name: e.camp_id ? db.camps.find((c) => c.id === e.camp_id)?.name ?? null : null,
+  trade_name: e.trade_id ? db.trades.find((t) => t.id === e.trade_id)?.name ?? null : null,
 });
 
 const profileName = (id: string | null): string | null =>
@@ -561,11 +585,29 @@ export const demoApi = {
       is_team_leader: input.is_team_leader,
       team_leader_site_id: input.is_team_leader ? input.team_leader_site_id || null : null,
       opening_hours: opening,
+      trade_id: input.trade_id || null,
+      salary_role: input.salary_role ?? 'standard',
       created_at: nowISO(),
       updated_at: nowISO(),
     };
+    if (e.trade_id && !db.trades.some((t) => t.id === e.trade_id && t.is_active)) {
+      throw new Error('The selected trade does not exist or is inactive');
+    }
     db.employees.push(e);
-    saveAndEmit(['employee']);
+    // first salary assignment runs from the join date (mirrors create_employee RPC)
+    if (e.trade_id) {
+      db.salaryAssignments.push({
+        id: uid(),
+        employee_id: e.id,
+        trade_id: e.trade_id,
+        salary_role: e.salary_role,
+        effective_from: e.join_date ?? toYMD(new Date()),
+        effective_to: null,
+        created_by: currentProfile()?.id ?? null,
+        created_at: nowISO(),
+      });
+    }
+    saveAndEmit(['employee', 'employee_salary_assignment']);
     return attachEmployeeVM(e);
   },
 
@@ -591,6 +633,8 @@ export const demoApi = {
     // site across the merged moved-days cells)
     const prevSiteId = e.current_site_id ?? null;
     const nextSiteId = input.current_site_id || null;
+    const prevTradeId = e.trade_id ?? null;
+    const prevRole = e.salary_role ?? 'standard';
     // historical opening balance: blank → keep the stored value; an actual
     // CHANGE is a super-admin-only adjustment (mirrors update_employee RPC)
     if (input.opening_hours != null && (!Number.isFinite(input.opening_hours) || input.opening_hours < 0)) {
@@ -630,6 +674,18 @@ export const demoApi = {
       opening_hours: openingNext,
       updated_at: nowISO(),
     });
+    // trade / salary-role change → replace the assignment from today (old work
+    // keeps the old classification — mirrors update_employee RPC)
+    const nextTradeId = input.trade_id || null;
+    const nextRole = input.salary_role ?? 'standard';
+    if (prevTradeId !== nextTradeId || prevRole !== nextRole) {
+      if (nextTradeId && !db.trades.some((t) => t.id === nextTradeId)) {
+        throw new Error('The selected trade does not exist');
+      }
+      applyAssignment(db, id, nextTradeId, nextRole, toYMD(new Date()), currentProfile()?.id ?? null);
+      e.trade_id = nextTradeId;
+      e.salary_role = nextRole;
+    }
     if (prevSiteId !== nextSiteId) {
       db.siteTransfers.push({
         id: uid(),
@@ -640,7 +696,7 @@ export const demoApi = {
         created_at: nowISO(),
       });
     }
-    saveAndEmit(['employee', 'site_transfer']);
+    saveAndEmit(['employee', 'site_transfer', 'employee_salary_assignment']);
     return attachEmployeeVM(e);
   },
 
@@ -1065,6 +1121,207 @@ export const demoApi = {
     if (!u) return;
     u.is_deleted = true;
     saveAndEmit(['uniform_registry']);
+  },
+
+  // ---- trades & salary ---------------------------------------------------------
+  async listTrades(): Promise<(Trade & { current_rates: TradeRate[] })[]> {
+    return tradesWithRates(db);
+  },
+
+  async getTradeRateHistory(tradeId: string): Promise<TradeRate[]> {
+    return rateHistoryOf(db, tradeId);
+  },
+
+  async createTrade(input: TradeInput): Promise<Trade> {
+    const name = input.name.trim();
+    if (!name) throw new Error('Trade name is required');
+    if (db.trades.some((t) => t.name.trim().toLowerCase() === name.toLowerCase())) {
+      throw new Error(`A trade named "${name}" already exists`);
+    }
+    const me = currentProfile();
+    const cells = new Set(
+      input.rates
+        .filter((r) => Number.isFinite(r.hourly_rate) && r.hourly_rate >= 0)
+        .map((r) => `${r.salary_role}:${r.experience_tier}`),
+    );
+    const activate = input.is_active ?? true;
+    if (activate && cells.size < 6) {
+      throw new Error('Configure all six rate cells (3 salary roles × 2 experience tiers) before activating the trade');
+    }
+    const trade: Trade = {
+      id: uid(), name, description: input.description?.trim() || null,
+      is_active: activate, created_at: nowISO(), updated_at: nowISO(),
+    };
+    db.trades.push(trade);
+    input.rates.forEach((r) => {
+      if (!Number.isFinite(r.hourly_rate) || r.hourly_rate < 0) return;
+      db.tradeRates.push({
+        id: uid(), trade_id: trade.id, salary_role: r.salary_role,
+        experience_tier: r.experience_tier, hourly_rate: round2(r.hourly_rate),
+        effective_from: localTodayYMD(), effective_to: null,
+        created_by: me?.id ?? null, created_at: nowISO(),
+      });
+    });
+    db.tradeRateAudit.push({
+      id: uid(), period_id: null, trade_id: trade.id, action: 'create',
+      actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+      details: `Trade "${trade.name}" created with ${cells.size} rate cells`,
+      created_at: nowISO(),
+    });
+    saveAndEmit(['trades', 'trade_rate_history']);
+    return { ...trade };
+  },
+
+  async updateTrade(tradeId: string, input: { name: string; description: string | null; is_active: boolean }): Promise<void> {
+    const trade = db.trades.find((t) => t.id === tradeId);
+    if (!trade) throw new Error('Trade not found');
+    const name = input.name.trim();
+    if (!name) throw new Error('Trade name is required');
+    if (db.trades.some((t) => t.name.trim().toLowerCase() === name.toLowerCase() && t.id !== tradeId)) {
+      throw new Error(`A trade named "${name}" already exists`);
+    }
+    trade.name = name;
+    trade.description = input.description?.trim() || null;
+    trade.is_active = input.is_active;
+    trade.updated_at = nowISO();
+    saveAndEmit(['trades']);
+  },
+
+  async saveTradeRates(tradeId: string, rates: TradeRateInput[], effectiveFrom: string): Promise<void> {
+    const trade = db.trades.find((t) => t.id === tradeId);
+    if (!trade) throw new Error('Trade not found');
+    if (rates.length === 0) return;
+    const me = currentProfile();
+    if (effectiveFrom < localTodayYMD() && me?.role !== 'super_admin') {
+      throw new Error('Only super admins can backdate rate changes');
+    }
+    rates.forEach((r) => {
+      if (!Number.isFinite(r.hourly_rate) || r.hourly_rate < 0) {
+        throw new Error('Hourly rate must be 0 or more');
+      }
+    });
+    applyTradeRates(db, tradeId, rates, effectiveFrom, me?.id ?? null);
+    rates.forEach((r) => {
+      db.tradeRateAudit.push({
+        id: uid(), period_id: null, trade_id: tradeId, action: 'rate_change',
+        actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+        details: `${r.salary_role}/${r.experience_tier} = ${round2(r.hourly_rate)} AED/h effective ${effectiveFrom}`,
+        created_at: nowISO(),
+      });
+    });
+    saveAndEmit(['trade_rate_history', 'payroll_period', 'payroll_employee']);
+  },
+
+  async getEmployeeSalaryEligibility(employeeId: string, asOfDate?: string): Promise<SalaryEligibility> {
+    return calcEligibility(db, employeeId, asOfDate);
+  },
+
+  async getEmployeeSalaryHistory(employeeId: string): Promise<EmployeeSalaryAssignment[]> {
+    return assignmentHistoryOf(db, employeeId);
+  },
+
+  async getSalarySheet(year: number, month: number): Promise<SalarySheetReport> {
+    // drafts stay live: attendance edits recalculate on every view
+    return buildSalarySheet(db, year, month, (y, m) => {
+      refreshPayrollPeriod(db, y, m, currentProfile()?.id ?? null, uid);
+    });
+  },
+
+  async generatePayroll(year: number, month: number): Promise<void> {
+    refreshPayrollPeriod(db, year, month, currentProfile()?.id ?? null, uid);
+    saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
+  async updatePayrollAdjustment(payrollEmployeeId: string, input: PayrollAdjustmentInput): Promise<void> {
+    const pe = db.payrollEmployees.find((x) => x.id === payrollEmployeeId);
+    if (!pe) throw new Error('Payroll employee not found');
+    if (pe.payment_status === 'paid') {
+      throw new Error('This employee is already marked paid — reopen the payroll to correct it');
+    }
+    if (!Number.isFinite(input.advance) || input.advance < 0) throw new Error('Advance must be 0 or more');
+    if (!Number.isFinite(input.deduction) || input.deduction < 0) throw new Error('Deduction must be 0 or more');
+    pe.advance = round2(input.advance);
+    pe.deduction = round2(input.deduction);
+    pe.notes = input.notes?.trim() || null;
+    pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction);
+    saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
+  async finalizePayroll(payrollPeriodId: string): Promise<void> {
+    const me = currentProfile();
+    if (me?.role !== 'super_admin') throw new Error('Access denied');
+    const period = db.payrollPeriods.find((p) => p.id === payrollPeriodId);
+    if (!period) throw new Error('Payroll period not found');
+    if (period.status === 'finalized') throw new Error('Payroll is already finalized');
+    period.status = 'finalized';
+    period.finalized_by = me.id;
+    period.finalized_at = nowISO();
+    db.payrollAudit.push({
+      id: uid(), period_id: period.id, trade_id: null, action: 'finalize',
+      actor_id: me.id, actor_name: me.name,
+      details: `Payroll ${period.year}/${period.month} finalized — calculation locked`,
+      created_at: nowISO(),
+    });
+    saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
+  async reopenPayroll(payrollPeriodId: string, reason: string): Promise<void> {
+    const me = currentProfile();
+    if (me?.role !== 'super_admin') throw new Error('Access denied');
+    if (!reason.trim()) throw new Error('A reason is required to reopen a payroll period');
+    const period = db.payrollPeriods.find((p) => p.id === payrollPeriodId);
+    if (!period) throw new Error('Payroll period not found');
+    if (period.status !== 'finalized') throw new Error('Payroll is not finalized');
+
+    const pes = db.payrollEmployees.filter((pe) => pe.payroll_period_id === period.id);
+    const totals = `employees=${pes.length}, gross=${round2(pes.reduce((n, p) => n + p.gross_salary, 0))}` +
+      `, advances=${round2(pes.reduce((n, p) => n + p.advance, 0))}` +
+      `, deductions=${round2(pes.reduce((n, p) => n + p.deduction, 0))}` +
+      `, net=${round2(pes.reduce((n, p) => n + p.net_salary, 0))}` +
+      `, paid=${pes.filter((p) => p.payment_status === 'paid').length}`;
+
+    period.status = 'draft';
+    period.finalized_by = null;
+    period.finalized_at = null;
+    db.payrollAudit.push({
+      id: uid(), period_id: period.id, trade_id: null, action: 'reopen',
+      actor_id: me.id, actor_name: me.name,
+      details: `Reopened: ${reason.trim()} — previous snapshot: ${totals}`,
+      created_at: nowISO(),
+    });
+    saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
+  async markPayrollPaid(
+    payrollEmployeeId: string,
+    input: PayrollAdjustmentInput & { paid?: boolean },
+  ): Promise<void> {
+    const me = currentProfile();
+    const pe = db.payrollEmployees.find((x) => x.id === payrollEmployeeId);
+    if (!pe) throw new Error('Payroll employee not found');
+    if (pe.payment_status === 'paid') throw new Error('Already marked paid');
+    const period = db.payrollPeriods.find((p) => p.id === pe.payroll_period_id);
+    if (!period || period.status !== 'finalized') {
+      throw new Error('Finalize the payroll before marking salaries paid');
+    }
+    // optional last-second adjustment values from the payment dialog
+    if (input.advance != null || input.deduction != null || input.notes != null) {
+      await this.updatePayrollAdjustment(payrollEmployeeId, {
+        advance: input.advance ?? pe.advance,
+        deduction: input.deduction ?? pe.deduction,
+        notes: input.notes ?? pe.notes,
+      });
+    }
+    pe.payment_status = 'paid';
+    pe.paid_at = nowISO();
+    pe.paid_by = me?.id ?? null;
+    db.payrollAudit.push({
+      id: uid(), period_id: period.id, trade_id: null, action: 'payment',
+      actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+      details: `Employee ${pe.employee_id} marked paid`,
+      created_at: nowISO(),
+    });
+    saveAndEmit(['payroll_period', 'payroll_employee']);
   },
 
   // ---- realtime ------------------------------------------------------------------------------

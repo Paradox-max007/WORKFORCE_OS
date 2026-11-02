@@ -94,6 +94,10 @@ export interface Employee {
    *  attendance (opening balance). Lifetime hours = this + Σ attendance.hours.
    *  Kept separate from attendance — never imported as fake daily records. */
   opening_hours: number;
+  /** Trade driving the salary rate (Trade Management list) */
+  trade_id: string | null;
+  /** Salary classification: standard / team_leader / supervisor */
+  salary_role: SalaryRole;
   created_at: string;
   updated_at: string;
 }
@@ -102,6 +106,7 @@ export interface EmployeeVM extends Employee {
   site_name: string | null;
   leader_site_name: string | null;
   camp_name: string | null;
+  trade_name: string | null;
 }
 
 export type AttendanceStatus = 'present' | 'absent' | 'not_marked';
@@ -281,6 +286,10 @@ export interface EmployeeInput {
   team_leader_site_id: string | null;
   /** Opening balance — blank/null keeps the stored value on update, 0 on create */
   opening_hours?: number | null;
+  /** Trade (from the Trade Management list) driving the salary rate */
+  trade_id?: string | null;
+  /** Salary classification: standard / team_leader / supervisor */
+  salary_role?: SalaryRole | null;
 }
 
 // ============================================================================
@@ -361,6 +370,235 @@ export interface UniformEntryUpdate {
 }
 
 // ============================================================================
+// Trade & Salary system
+// ============================================================================
+
+export type SalaryRole = 'standard' | 'team_leader' | 'supervisor';
+export type ExperienceTier = 'below_threshold' | 'qualified';
+
+export const SALARY_ROLES: { value: SalaryRole; label: string }[] = [
+  { value: 'standard', label: 'Standard' },
+  { value: 'team_leader', label: 'Team Leader' },
+  { value: 'supervisor', label: 'Supervisor' },
+];
+
+export const EXPERIENCE_TIERS: { value: ExperienceTier; label: string }[] = [
+  { value: 'below_threshold', label: 'Below threshold' },
+  { value: 'qualified', label: 'Qualified' },
+];
+
+/** Hours at which an employee qualifies for the experienced rate (lifetime) */
+export const SALARY_THRESHOLD_HOURS = 1000;
+
+/** Calendar months of employment after which the experienced rate applies */
+export const SALARY_THRESHOLD_MONTHS = 6;
+
+export interface Trade {
+  id: string;
+  name: string;
+  description: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One effective-dated rate cell (trade × salary role × experience tier) */
+export interface TradeRate {
+  id: string;
+  trade_id: string;
+  salary_role: SalaryRole;
+  experience_tier: ExperienceTier;
+  hourly_rate: number;
+  effective_from: string; // YYYY-MM-DD
+  effective_to: string | null;
+  created_at: string;
+}
+
+export interface TradeRateInput {
+  salary_role: SalaryRole;
+  experience_tier: ExperienceTier;
+  hourly_rate: number;
+}
+
+export interface TradeInput {
+  name: string;
+  description: string | null;
+  /** false → inactive draft (hidden from new employee selection, not used for salary) */
+  is_active?: boolean;
+  /** initial effective-dated rates (today); may be partial when is_active=false */
+  rates: TradeRateInput[];
+}
+
+/** Effective-dated employee trade/role assignment (historical payroll accuracy) */
+export interface EmployeeSalaryAssignment {
+  id: string;
+  employee_id: string;
+  employee_name: string;
+  trade_id: string;
+  trade_name: string;
+  salary_role: SalaryRole;
+  effective_from: string;
+  effective_to: string | null;
+  created_at: string;
+}
+
+/** Eligibility snapshot for the experienced (qualified) rate.
+ *  Q = min(join_date + 6 calendar months, date lifetime hours reach 1,000). */
+export interface SalaryEligibility {
+  employee_id: string;
+  full_name: string;
+  employee_code: string;
+  join_date: string | null;
+  opening_hours: number;
+  tracked_hours: number;
+  lifetime_hours: number;
+  /** join_date + 6 calendar months (month-end clamped) */
+  six_month_date: string | null;
+  threshold_hours: number;
+  /** date on which cumulative lifetime hours reach the threshold (null if never) */
+  threshold_date: string | null;
+  /** hours still needed to reach the threshold (0 when reached) */
+  hours_to_threshold: number;
+  /** 0–100 progress toward the threshold */
+  progress_percent: number;
+  qualified: boolean;
+  qualification_date: string | null;
+  qualification_reason: 'opening_balance' | 'six_months' | 'thousand_hours' | null;
+  as_of: string;
+  trade_id: string | null;
+  trade_name: string | null;
+  salary_role: SalaryRole;
+  /** rate applicable right now for trade × role × current tier */
+  current_rate: number | null;
+}
+
+export type PayrollPeriodStatus = 'draft' | 'finalized';
+export type PaymentStatus = 'unpaid' | 'paid';
+
+export interface PayrollPeriodVM {
+  id: string;
+  year: number;
+  month: number;
+  status: PayrollPeriodStatus;
+  created_by: string | null;
+  finalized_by: string | null;
+  finalized_at: string | null;
+  created_at: string;
+}
+
+/** One rate-segment salary line (explainable, auditable payroll) */
+export interface PayrollSalaryLineVM {
+  site_id: string | null;
+  site_name: string;
+  date: string;
+  trade_id: string | null;
+  trade_name: string;
+  salary_role: SalaryRole;
+  experience_tier: ExperienceTier;
+  hours: number;
+  hourly_rate: number;
+  gross_amount: number;
+}
+
+/** Employee × site × month aggregate (Salary Sheet site group row) */
+export interface PayrollEmployeeSiteVM {
+  site_id: string | null;
+  site_name: string;
+  total_hours: number;
+  below_threshold_hours: number;
+  qualified_hours: number;
+  standard_hours: number;
+  team_leader_hours: number;
+  supervisor_hours: number;
+  gross_salary: number;
+  has_missing_rate: boolean;
+  lines: PayrollSalaryLineVM[];
+}
+
+/** Employee × month consolidated settlement (advance/deduction/net once) */
+export interface PayrollEmployeeVM {
+  id: string;
+  payroll_period_id: string;
+  employee_id: string;
+  full_name: string;
+  employee_code: string;
+  nationality: string | null;
+  photo: string | null;
+  status: EmployeeStatus;
+  trade_id: string | null;
+  trade_name: string | null;
+  salary_role: SalaryRole;
+  total_hours: number;
+  opening_lifetime_hours: number;
+  closing_lifetime_hours: number;
+  below_threshold_hours: number;
+  qualified_hours: number;
+  /** hours with a trade but no effective rate on that date */
+  unrated_hours: number;
+  /** hours without any trade assigned */
+  unassigned_hours: number;
+  gross_salary: number;
+  advance: number;
+  deduction: number;
+  net_salary: number;
+  payment_status: PaymentStatus;
+  paid_at: string | null;
+  paid_by: string | null;
+  paid_by_name: string | null;
+  notes: string | null;
+  sites: PayrollEmployeeSiteVM[];
+}
+
+export interface SalarySheetTotals {
+  employees: number;
+  total_hours: number;
+  gross_salary: number;
+  advances: number;
+  deductions: number;
+  net_payable: number;
+  paid_count: number;
+  unpaid_count: number;
+}
+
+export interface SalarySheetSiteGroup {
+  site_id: string | null;
+  site_name: string;
+  employees: number;
+  total_hours: number;
+  gross_salary: number;
+  rows: (PayrollEmployeeSiteVM & {
+    employee_id: string;
+    full_name: string;
+    employee_code: string;
+    nationality: string | null;
+    photo: string | null;
+    trade_name: string | null;
+    salary_role: SalaryRole;
+  })[];
+}
+
+export interface SalarySheetReport {
+  exists: boolean;
+  period: PayrollPeriodVM | null;
+  totals: SalarySheetTotals;
+  sites: SalarySheetSiteGroup[];
+  employees: PayrollEmployeeVM[];
+  audit: {
+    id: string;
+    action: string;
+    actor_name: string | null;
+    details: string | null;
+    created_at: string;
+  }[];
+}
+
+export interface PayrollAdjustmentInput {
+  advance: number;
+  deduction: number;
+  notes: string | null;
+}
+
+// ============================================================================
 // Realtime
 // ============================================================================
 
@@ -378,7 +616,12 @@ export type RealtimeTable =
   | 'leave_request'
   | 'cancellation_request'
   | 'uniform_registry'
-  | 'site_transfer';
+  | 'site_transfer'
+  | 'trades'
+  | 'trade_rate_history'
+  | 'employee_salary_assignment'
+  | 'payroll_period'
+  | 'payroll_employee';
 
 export interface MonthlySummaryRow {
   month: string; // YYYY-MM

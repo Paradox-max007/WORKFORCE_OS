@@ -16,12 +16,15 @@ import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import {
   ArrowLeft, Building2, Clock, Crown, HeartPulse, IdCard,
-  ImagePlus, Loader2, Plus, Save, Tent, UserRound,
+  ImagePlus, Loader2, Plus, Save, Tent, UserRound, Wrench,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -30,7 +33,11 @@ import { RatingStars } from '@/components/shared/primitives';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { CampWithCount, DocumentStatus, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+import {
+  EXPERIENCE_TIERS, SALARY_ROLES, type CampWithCount, type DocumentStatus,
+  type EmployeeInput, type EmployeeVM, type ExperienceTier, type SalaryRole,
+  type SiteWithCount, type Trade, type TradeRateInput,
+} from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 
@@ -41,6 +48,7 @@ const EMPTY_FORM: EmployeeInput = {
   passport_number: null, passport_status: null, id_number: null, id_status: null,
   current_site_id: null, camp_id: null, camp_block: null, camp_room: null,
   photo: null, is_team_leader: false, team_leader_site_id: null,
+  trade_id: null, salary_role: 'standard',
 };
 
 const DOC_STATUSES: { value: DocumentStatus; label: string; cls: string }[] = [
@@ -50,6 +58,122 @@ const DOC_STATUSES: { value: DocumentStatus; label: string; cls: string }[] = [
 ];
 
 const nullify = (v: string | null | undefined): string | null => (v && v.trim() !== '' ? v.trim() : null);
+
+// ---------------------------------------------------------------------------
+// Inline trade creation dialog (spec §7): create a trade WITH its six rate
+// cells without leaving the employee form — the new trade is selected
+// automatically on save.
+// ---------------------------------------------------------------------------
+function NewTradeDialog({ open, onOpenChange, onCreated }: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onCreated: (trade: Trade) => void;
+}) {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [rates, setRates] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  const cellKey = (role: SalaryRole, tier: ExperienceTier): string => `${role}:${tier}`;
+  const filled = Object.values(rates).filter((v) => v.trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0).length;
+  const allSix = filled >= 6;
+
+  const submit = async (): Promise<void> => {
+    if (!name.trim()) { toast.error('Trade name is required'); return; }
+    if (!allSix) {
+      toast.error('Configure all six rate cells', {
+        description: '3 salary roles × 2 experience tiers — a trade without rates cannot price salary.',
+      });
+      return;
+    }
+    setSaving(true);
+    try {
+      const payload: TradeRateInput[] = SALARY_ROLES.flatMap((role) =>
+        EXPERIENCE_TIERS.map((tier) => ({
+          salary_role: role.value,
+          experience_tier: tier.value,
+          hourly_rate: Number(rates[cellKey(role.value, tier.value)]),
+        })));
+      const trade = await dataApi.createTrade({
+        name: name.trim(), description: description.trim() || null, is_active: true, rates: payload,
+      });
+      toast.success('Trade created & selected', { description: trade.name });
+      setName(''); setDescription(''); setRates({});
+      onOpenChange(false);
+      onCreated(trade);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create trade');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!saving) onOpenChange(v); }}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Wrench size={16} className="text-brand" /> Add New Trade</DialogTitle>
+          <DialogDescription>
+            All six rate cells (3 salary roles × 2 experience tiers) must be configured — the new
+            trade is selected automatically once saved.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Trade Name *</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Scaffolder" className="h-11" />
+            </div>
+            <div className="space-y-2">
+              <Label>Description</Label>
+              <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional" className="h-11" />
+            </div>
+          </div>
+          <div className="overflow-hidden rounded-xl border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/40">
+                  <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Role / Tier</th>
+                  {EXPERIENCE_TIERS.map((t) => (
+                    <th key={t.value} className="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {SALARY_ROLES.map((role) => (
+                  <tr key={role.value} className="border-b last:border-0">
+                    <td className="px-3 py-2 text-xs font-medium">{role.label}</td>
+                    {EXPERIENCE_TIERS.map((tier) => (
+                      <td key={tier.value} className="px-3 py-2">
+                        <Input
+                          type="number" min={0} step="0.25" inputMode="decimal"
+                          className="h-9 bg-card text-right font-mono" placeholder="AED/h"
+                          value={rates[cellKey(role.value, tier.value)] ?? ''}
+                          onChange={(e) => setRates({ ...rates, [cellKey(role.value, tier.value)]: e.target.value })}
+                          aria-label={`${role.label} ${tier.label} rate`}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className={cn('text-xs', allSix ? 'text-emerald-500' : 'text-muted-foreground')}>
+            {allSix ? 'All rate cells configured.' : `${filled}/6 rate cells configured.`}
+          </p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
+          <Button onClick={submit} disabled={saving} className="brand-gradient font-semibold text-white">
+            {saving ? <Loader2 size={15} className="mr-1 animate-spin" /> : <Plus size={15} className="mr-1" />}
+            Save & Select
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 // client-side photo compression (max 300px, JPEG 0.8) — same as before
 function compressPhoto(file: File): Promise<string> {
@@ -118,6 +242,9 @@ export function EmployeeFormPage() {
   // historical opening balance as raw text ('' = blank) — parsed at submit so
   // half-typed decimals never break the form state
   const [openingHours, setOpeningHours] = useState('');
+  // trades for the dropdown + inline creation dialog
+  const [trades, setTrades] = useState<(Trade & { current_rates: unknown[] })[]>([]);
+  const [tradeDialogOpen, setTradeDialogOpen] = useState(false);
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [allEmployees, setAllEmployees] = useState<EmployeeVM[]>([]);
@@ -135,15 +262,17 @@ export function EmployeeFormPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps] = await Promise.all([
+        const [emps, sts, cps, trs] = await Promise.all([
           dataApi.listEmployees(),
           dataApi.listSites(),
           dataApi.listCamps(),
+          dataApi.listTrades().catch(() => []),
         ]);
         if (cancelled) return;
         setAllEmployees(emps);
         setSites(sts);
         setCamps(cps);
+        setTrades(trs);
         if (isEdit && employeeId) {
           const emp = emps.find((e) => e.id === employeeId);
           if (!emp) {
@@ -176,6 +305,8 @@ export function EmployeeFormPage() {
             photo: emp.photo,
             is_team_leader: emp.is_team_leader,
             team_leader_site_id: emp.team_leader_site_id,
+            trade_id: emp.trade_id ?? null,
+            salary_role: emp.salary_role ?? 'standard',
           });
         }
       } catch (err) {
@@ -189,6 +320,7 @@ export function EmployeeFormPage() {
 
   const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
   const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
+  const activeTrades = useMemo(() => trades.filter((t) => t.is_active), [trades]);
 
   // ---- navigation ---------------------------------------------------------------
   const goBack = () => {
@@ -452,10 +584,52 @@ export function EmployeeFormPage() {
           </FormSection>
 
           {/* ---------------- Work & Accommodation ---------------- */}
-          <FormSection icon={<Building2 size={16} />} title="Work & Accommodation" hint="Site, trade, camp with block & room">
+          <FormSection icon={<Building2 size={16} />} title="Work & Accommodation" hint="Trade, site, camp with block & room">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>Position (Trade)</Label>
+                <Label>Trade</Label>
+                <Select
+                  value={form.trade_id ?? 'none'}
+                  onValueChange={(v) => {
+                    if (v === '__add_new') { setTradeDialogOpen(true); return; }
+                    setForm((f) => ({ ...f, trade_id: v === 'none' ? null : v }));
+                  }}
+                >
+                  <SelectTrigger className="h-11 bg-card" aria-label="Trade"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No trade assigned</SelectItem>
+                    {activeTrades.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                    ))}
+                    <SelectItem value="__add_new" className="text-brand">+ Add New Trade…</SelectItem>
+                  </SelectContent>
+                </Select>
+                {mode === 'edit' && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Changing the trade or salary role takes effect today — earlier work keeps its
+                    original classification for accurate historical payroll.
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label>Salary Role</Label>
+                <Select
+                  value={form.salary_role ?? 'standard'}
+                  onValueChange={(v) => setForm((f) => ({ ...f, salary_role: v as SalaryRole }))}
+                >
+                  <SelectTrigger className="h-11 bg-card" aria-label="Salary role"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {SALARY_ROLES.map((r) => (
+                      <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  Rate category inside the trade (Standard / Team Leader / Supervisor).
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Position (free text)</Label>
                 <Input value={form.position ?? ''} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))} placeholder="e.g. Electrician, Plumber" className="h-11" />
               </div>
               <div className="space-y-2">
@@ -689,6 +863,16 @@ export function EmployeeFormPage() {
           </Button>
         </div>
       </div>
+
+      {/* inline new-trade creation (spec §7) */}
+      <NewTradeDialog
+        open={tradeDialogOpen}
+        onOpenChange={setTradeDialogOpen}
+        onCreated={(trade) => {
+          setTrades((prev) => [...prev, trade as Trade & { current_rates: unknown[] }]);
+          setForm((f) => ({ ...f, trade_id: trade.id }));
+        }}
+      />
     </div>
   );
 }

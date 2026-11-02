@@ -22,7 +22,8 @@ const emp = (id: string, name: string, siteId: string | null, opening = 0): Empl
   company_name: null, passport_number: null, passport_status: null, id_number: null, id_status: null,
   current_site_id: siteId, camp_id: null, camp_block: null, camp_room: null, rating: 5,
   status: 'active', photo: null, is_team_leader: false, team_leader_site_id: null,
-  opening_hours: opening, created_at: T0, updated_at: T0,
+  opening_hours: opening, trade_id: null, salary_role: 'standard',
+  created_at: T0, updated_at: T0,
 });
 
 let attSeq = 0;
@@ -36,6 +37,9 @@ function reset(): void {
   db.notifications = []; db.warnings = []; db.fines = []; db.leaveRequests = [];
   db.cancellationRequests = []; db.uniforms = []; db.menuPermissions = [];
   db.siteAssignments = []; db.siteTransfers = []; db.counters = { uniform_id: 0, token_number: 0 };
+  db.trades = []; db.tradeRates = []; db.salaryAssignments = [];
+  db.payrollPeriods = []; db.payrollEmployees = []; db.payrollSites = [];
+  db.payrollLines = []; db.payrollAudit = []; db.tradeRateAudit = [];
 }
 
 async function main(): Promise<void> {

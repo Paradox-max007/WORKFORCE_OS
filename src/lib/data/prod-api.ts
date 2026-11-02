@@ -15,19 +15,29 @@ import {
   type CampWithCount,
   type CancellationRequestVM,
   type EmployeeInput,
+  type EmployeeSalaryAssignment,
   type EmployeeVM,
   type EmployeeWorkingHoursReport,
+  type ExperienceTier,
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
   type MenuPermissionMap,
   type MonthlySummaryRow,
   type Notification,
+  type PayrollAdjustmentInput,
   type Profile,
   type RealtimeTable,
+  type SalaryEligibility,
+  type SalarySheetReport,
+  type SalaryRole,
   type Site,
   type SiteTransfer,
   type SiteWithCount,
+  type Trade,
+  type TradeInput,
+  type TradeRate,
+  type TradeRateInput,
   type UniformEntry,
   type UniformEntryInput,
   type UniformEntryUpdate,
@@ -85,6 +95,11 @@ function ensureRealtimeChannel(): void {
     'cancellation_request',
     'uniform_registry',
     'site_transfer',
+    'trades',
+    'trade_rate_history',
+    'employee_salary_assignment',
+    'payroll_period',
+    'payroll_employee',
   ];
 
   // Clean up any stale channel on the same topic before subscribing
@@ -397,18 +412,20 @@ export const prodApi = {
   // ---- employees ---------------------------------------------------------------
   async listEmployees(): Promise<EmployeeVM[]> {
     const { data, error } = await sb().from('employee')
-      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name), camp:camp_id(name)')
+      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name)')
       .neq('status', 'deleted')
       .order('created_at');
     assertOk(error);
     return ((data ?? []) as unknown as {
       site: { name: string } | null; leader_site: { name: string } | null; camp: { name: string } | null;
+      trade: { name: string } | null;
       [k: string]: unknown;
     }[]).map((row) => ({
       ...(row as unknown as EmployeeVM),
       site_name: row.site?.name ?? null,
       leader_site_name: row.leader_site?.name ?? null,
       camp_name: row.camp?.name ?? null,
+      trade_name: row.trade?.name ?? null,
     }));
   },
 
@@ -749,6 +766,172 @@ export const prodApi = {
 
   async deleteUniformEntry(id: string): Promise<void> {
     const { error } = await sb().rpc('delete_uniform_entry', { p_id: id });
+    assertOk(error);
+  },
+
+  // ---- trades & salary --------------------------------------------------------
+  async listTrades(): Promise<(Trade & { current_rates: TradeRate[] })[]> {
+    const { data, error } = await sb().rpc('list_trades');
+    assertOk(error);
+    return ((data ?? []) as unknown as Record<string, unknown>[]).map((row) => ({
+      id: row.id as string,
+      name: row.name as string,
+      description: (row.description as string | null) ?? null,
+      is_active: Boolean(row.is_active),
+      created_at: row.created_at as string,
+      updated_at: row.updated_at as string,
+      current_rates: ((row.current_rates ?? []) as Record<string, unknown>[]).map((r) => ({
+        id: r.id as string,
+        trade_id: r.trade_id as string,
+        salary_role: r.salary_role as SalaryRole,
+        experience_tier: r.experience_tier as ExperienceTier,
+        hourly_rate: Number(r.hourly_rate ?? 0),
+        effective_from: r.effective_from as string,
+        effective_to: (r.effective_to as string | null) ?? null,
+        created_at: r.created_at as string,
+      })),
+    }));
+  },
+
+  async getTradeRateHistory(tradeId: string): Promise<TradeRate[]> {
+    const { data, error } = await sb().rpc('get_trade_rate_history', { p_trade_id: tradeId });
+    assertOk(error);
+    return ((data ?? []) as unknown as Record<string, unknown>[]).map((r) => ({
+      id: r.id as string,
+      trade_id: r.trade_id as string,
+      salary_role: r.salary_role as SalaryRole,
+      experience_tier: r.experience_tier as ExperienceTier,
+      hourly_rate: Number(r.hourly_rate ?? 0),
+      effective_from: r.effective_from as string,
+      effective_to: (r.effective_to as string | null) ?? null,
+      created_at: r.created_at as string,
+    }));
+  },
+
+  async createTrade(input: TradeInput): Promise<Trade> {
+    const { data, error } = await sb().rpc('create_trade', {
+      p_name: input.name,
+      p_description: input.description,
+      // plain array for the jsonb param (double-encoding breaks it)
+      p_rates: input.rates,
+      p_activate: input.is_active ?? true,
+    });
+    assertOk(error);
+    return data as unknown as Trade;
+  },
+
+  async updateTrade(tradeId: string, input: { name: string; description: string | null; is_active: boolean }): Promise<void> {
+    const { error } = await sb().rpc('update_trade', {
+      p_trade_id: tradeId,
+      p_name: input.name,
+      p_description: input.description,
+      p_is_active: input.is_active,
+    });
+    assertOk(error);
+  },
+
+  async saveTradeRates(tradeId: string, rates: TradeRateInput[], effectiveFrom: string): Promise<void> {
+    if (rates.length === 0) return;
+    const { error } = await sb().rpc('update_trade_rates', {
+      p_trade_id: tradeId,
+      p_rates: rates,
+      p_effective_from: effectiveFrom,
+    });
+    assertOk(error);
+  },
+
+  async getEmployeeSalaryEligibility(employeeId: string, asOfDate?: string): Promise<SalaryEligibility> {
+    const { data, error } = await sb().rpc('get_employee_salary_eligibility', {
+      p_employee_id: employeeId,
+      p_as_of: asOfDate ?? null,
+    });
+    assertOk(error);
+    const r = (data ?? {}) as Record<string, unknown>;
+    return {
+      employee_id: r.employee_id as string,
+      full_name: r.full_name as string,
+      employee_code: r.employee_code as string,
+      join_date: (r.join_date as string | null) ?? null,
+      opening_hours: Number(r.opening_hours ?? 0),
+      tracked_hours: Number(r.tracked_hours ?? 0),
+      lifetime_hours: Number(r.lifetime_hours ?? 0),
+      six_month_date: (r.six_month_date as string | null) ?? null,
+      threshold_hours: Number(r.threshold_hours ?? 1000),
+      threshold_date: (r.threshold_date as string | null) ?? null,
+      hours_to_threshold: Number(r.hours_to_threshold ?? 0),
+      progress_percent: Number(r.progress_percent ?? 0),
+      qualified: Boolean(r.qualified),
+      qualification_date: (r.qualification_date as string | null) ?? null,
+      qualification_reason: (r.qualification_reason as SalaryEligibility['qualification_reason']) ?? null,
+      as_of: r.as_of as string,
+      trade_id: (r.trade_id as string | null) ?? null,
+      trade_name: (r.trade_name as string | null) ?? null,
+      salary_role: (r.salary_role as SalaryRole) ?? 'standard',
+      current_rate: r.current_rate == null ? null : Number(r.current_rate),
+    };
+  },
+
+  async getEmployeeSalaryHistory(employeeId: string): Promise<EmployeeSalaryAssignment[]> {
+    const { data, error } = await sb().rpc('get_employee_salary_history', {
+      p_employee_id: employeeId,
+    });
+    assertOk(error);
+    return ((data ?? []) as unknown as Record<string, unknown>[]).map((r) => ({
+      id: r.id as string,
+      employee_id: r.employee_id as string,
+      employee_name: r.employee_name as string,
+      trade_id: r.trade_id as string,
+      trade_name: r.trade_name as string,
+      salary_role: r.salary_role as SalaryRole,
+      effective_from: r.effective_from as string,
+      effective_to: (r.effective_to as string | null) ?? null,
+      created_at: r.created_at as string,
+    }));
+  },
+
+  async getSalarySheet(year: number, month: number): Promise<SalarySheetReport> {
+    const { data, error } = await sb().rpc('get_salary_sheet', { p_year: year, p_month: month });
+    assertOk(error);
+    return data as unknown as SalarySheetReport;
+  },
+
+  async generatePayroll(year: number, month: number): Promise<void> {
+    const { error } = await sb().rpc('generate_payroll_period', { p_year: year, p_month: month });
+    assertOk(error);
+  },
+
+  async updatePayrollAdjustment(payrollEmployeeId: string, input: PayrollAdjustmentInput): Promise<void> {
+    const { error } = await sb().rpc('update_payroll_adjustment', {
+      p_payroll_employee_id: payrollEmployeeId,
+      p_advance: input.advance,
+      p_deduction: input.deduction,
+      p_notes: input.notes,
+    });
+    assertOk(error);
+  },
+
+  async finalizePayroll(payrollPeriodId: string): Promise<void> {
+    const { error } = await sb().rpc('finalize_payroll_period', { p_payroll_period_id: payrollPeriodId });
+    assertOk(error);
+  },
+
+  async reopenPayroll(payrollPeriodId: string, reason: string): Promise<void> {
+    const { error } = await sb().rpc('reopen_payroll_period', {
+      p_payroll_period_id: payrollPeriodId, p_reason: reason,
+    });
+    assertOk(error);
+  },
+
+  async markPayrollPaid(
+    payrollEmployeeId: string,
+    input: PayrollAdjustmentInput & { paid?: boolean },
+  ): Promise<void> {
+    const { error } = await sb().rpc('mark_employee_salary_paid', {
+      p_payroll_employee_id: payrollEmployeeId,
+      p_advance: input.advance,
+      p_deduction: input.deduction,
+      p_notes: input.notes,
+    });
     assertOk(error);
   },
 

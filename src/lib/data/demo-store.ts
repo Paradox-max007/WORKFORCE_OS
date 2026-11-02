@@ -12,19 +12,120 @@ import {
   type CancellationRequest,
   type Camp,
   type Employee,
+  type ExperienceTier,
   type Fine,
   type LeaveRequest,
   type MenuKey,
   type Notification,
   type Profile,
+  type SalaryRole,
   type Site,
   type SiteTransfer,
+  type Trade,
   type UniformEntry,
   type Warning,
 } from '@/lib/types';
 
 export interface DemoProfile extends Profile {
   password: string;
+}
+
+// ---- trade & salary demo rows (mirror the Postgres tables) --------------------
+
+export interface DemoTradeRate {
+  id: string;
+  trade_id: string;
+  salary_role: SalaryRole;
+  experience_tier: ExperienceTier;
+  hourly_rate: number;
+  effective_from: string; // YYYY-MM-DD
+  effective_to: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface DemoSalaryAssignment {
+  id: string;
+  employee_id: string;
+  trade_id: string;
+  salary_role: SalaryRole;
+  effective_from: string;
+  effective_to: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface DemoPayrollPeriod {
+  id: string;
+  year: number;
+  month: number;
+  status: 'draft' | 'finalized';
+  created_by: string | null;
+  finalized_by: string | null;
+  finalized_at: string | null;
+  created_at: string;
+}
+
+export interface DemoPayrollEmployee {
+  id: string;
+  payroll_period_id: string;
+  employee_id: string;
+  opening_lifetime_hours: number;
+  closing_lifetime_hours: number;
+  total_hours: number;
+  unrated_hours: number;
+  unassigned_hours: number;
+  gross_salary: number;
+  advance: number;
+  deduction: number;
+  net_salary: number;
+  payment_status: 'unpaid' | 'paid';
+  paid_at: string | null;
+  paid_by: string | null;
+  notes: string | null;
+  trade_id_snapshot: string | null;
+  salary_role_snapshot: SalaryRole;
+}
+
+export interface DemoPayrollSite {
+  id: string;
+  payroll_employee_id: string;
+  site_id: string | null;
+  site_name_snapshot: string;
+  total_hours: number;
+  below_threshold_hours: number;
+  qualified_hours: number;
+  standard_hours: number;
+  team_leader_hours: number;
+  supervisor_hours: number;
+  gross_salary: number;
+  has_missing_rate: boolean;
+}
+
+export interface DemoPayrollLine {
+  id: string;
+  payroll_employee_id: string;
+  site_id: string | null;
+  site_name_snapshot: string;
+  attendance_date: string;
+  trade_id: string | null;
+  trade_name_snapshot: string;
+  salary_role_snapshot: SalaryRole;
+  experience_tier: ExperienceTier;
+  hours: number;
+  hourly_rate: number;
+  gross_amount: number;
+}
+
+export interface DemoAuditEntry {
+  id: string;
+  period_id: string | null;
+  trade_id: string | null;
+  action: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  details: string | null;
+  created_at: string;
 }
 
 export interface DemoDB {
@@ -44,6 +145,16 @@ export interface DemoDB {
   siteAssignments: { profile_id: string; site_id: string }[];
   siteTransfers: SiteTransfer[];
   counters: { uniform_id: number; token_number: number };
+  // trade & salary system
+  trades: Trade[];
+  tradeRates: DemoTradeRate[];
+  salaryAssignments: DemoSalaryAssignment[];
+  payrollPeriods: DemoPayrollPeriod[];
+  payrollEmployees: DemoPayrollEmployee[];
+  payrollSites: DemoPayrollSite[];
+  payrollLines: DemoPayrollLine[];
+  payrollAudit: DemoAuditEntry[];
+  tradeRateAudit: DemoAuditEntry[];
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +201,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 9,
+    version: 10,
     profiles: [],
     sites: [],
     camps: [],
@@ -106,6 +217,15 @@ function seedDB(): DemoDB {
     siteAssignments: [],
     siteTransfers: [],
     counters: { uniform_id: 0, token_number: 0 },
+    trades: [],
+    tradeRates: [],
+    salaryAssignments: [],
+    payrollPeriods: [],
+    payrollEmployees: [],
+    payrollSites: [],
+    payrollLines: [],
+    payrollAudit: [],
+    tradeRateAudit: [],
   };
 
   // ---- profiles -----------------------------------------------------------
@@ -148,6 +268,51 @@ function seedDB(): DemoDB {
   const muweilah = mkCamp('Muweilah Workers Village', 'Muweilah, Sharjah', 45);
   const closed = mkCamp('Old Jebel Ali Camp', 'Jebel Ali, Dubai', 30, 'Closed for renovation', false);
   db.camps = [alNahda, sonapur, muweilah, closed];
+
+  // ---- trades & salary rates ----------------------------------------------
+  // One trade per demo position. Rates are effective-dated from 2026-01-01 so
+  // the whole seeded attendance history is rated; the 3×2 grid per trade is
+  // salary role (standard / team_leader / supervisor) × experience tier
+  // (below_threshold / qualified).
+  const TRADE_BASE: Record<string, [number, number]> = {
+    // position → [below-threshold standard rate, qualified standard rate]
+    Electrician: [8, 10],
+    Plumber: [7.5, 9.5],
+    'AC Technician': [8, 10],
+    Welder: [9, 11],
+    Foreman: [10, 12],
+    Mason: [7, 9],
+    Painter: [6.5, 8],
+    'Site Supervisor': [11, 13],
+    Carpenter: [7.5, 9.5],
+    'Steel Fixer': [8, 10],
+    'Security Guard': [5, 6.5],
+    Helper: [5, 6.5],
+    Cleaner: [4.5, 6],
+    'General Helper': [5, 6.5],
+    'Store Keeper': [6, 8],
+  };
+  const mkTrade = (name: string, description: string): Trade => ({
+    id: uid(), name, description, is_active: true,
+    created_at: nowISO(), updated_at: nowISO(),
+  });
+  const ROLES: SalaryRole[] = ['standard', 'team_leader', 'supervisor'];
+  const TIERS: ExperienceTier[] = ['below_threshold', 'qualified'];
+  Object.entries(TRADE_BASE).forEach(([name, [below, qualified]]) => {
+    const t = mkTrade(name, `${name} trade`);
+    db.trades.push(t);
+    ROLES.forEach((role, ri) => {
+      TIERS.forEach((tier) => {
+        const base = tier === 'below_threshold' ? below : qualified;
+        db.tradeRates.push({
+          id: uid(), trade_id: t.id, salary_role: role, experience_tier: tier,
+          hourly_rate: Math.round((base + ri) * 100) / 100,
+          effective_from: '2026-01-01', effective_to: null,
+          created_by: superP.id, created_at: nowISO(),
+        });
+      });
+    });
+  });
 
   // ---- employees -------------------------------------------------------------
   const year = new Date().getFullYear();
@@ -194,6 +359,8 @@ function seedDB(): DemoDB {
     team_leader_site_id: leaderSite?.id ?? null,
     // historical hours from before PULSE tracking (Working Hours module)
     opening_hours: 0,
+    trade_id: null,
+    salary_role: 'standard',
     created_at: nowISO(),
     updated_at: nowISO(),
     ...extra,
@@ -228,6 +395,27 @@ function seedDB(): DemoDB {
       }
     });
   };
+
+  // map every employee to their trade + salary role and record the FIRST
+  // salary assignment from the join date (mirrors create_employee RPC)
+  db.employees.forEach((e) => {
+    const trade = db.trades.find((t) => t.name === e.position);
+    if (!trade) return;
+    e.trade_id = trade.id;
+    e.salary_role = e.position === 'Site Supervisor'
+      ? 'supervisor'
+      : e.is_team_leader ? 'team_leader' : 'standard';
+    db.salaryAssignments.push({
+      id: uid(),
+      employee_id: e.id,
+      trade_id: trade.id,
+      salary_role: e.salary_role,
+      effective_from: e.join_date ?? toYMD(new Date()),
+      effective_to: null,
+      created_by: superP.id,
+      created_at: nowISO(),
+    });
+  });
   inCamp(sonapur, ['Muhammad Iqbal', 'Kamal Hussain', 'Rahim Uddin', 'Sandeep Singh', 'Tharindu Perera', 'Ibrahim Toure'], 'B', ['204', '205', '206', '207', '208', '209']);
   inCamp(alNahda, ['Arun Nair', 'Joseph Santos', 'Ahmed Hassan', 'John Mwangi'], 'A', ['101', '102', '103', '104']);
   inCamp(muweilah, ['Suresh Patel', 'Dilip Shrestha', 'Ramesh Yadav', 'Omar Farooq'], 'C', ['12', '14', '16', '18']);
@@ -418,7 +606,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 9) return parsed;
+      if (parsed.version === 10) return parsed;
     }
   } catch {
     // corrupted → reseed

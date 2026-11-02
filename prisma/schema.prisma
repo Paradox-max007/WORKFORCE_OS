@@ -1,0 +1,22 @@
+// POLARIS→PULSE note: this scaffold file is intentionally UNUSED.
+// PULSE Workforce OS does not use Prisma — the production database is
+// Supabase PostgreSQL, created via supabase/schema.sql, and accessed through
+// supabase-js (src/lib/data/prod-api.ts). This minimal schema only keeps the
+// sandbox tooling (db:push) functional.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

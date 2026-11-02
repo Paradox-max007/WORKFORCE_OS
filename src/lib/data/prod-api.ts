@@ -464,8 +464,12 @@ export const prodApi = {
   },
 
   async createEmployee(input: EmployeeInput): Promise<EmployeeVM> {
+    // NOTE: jsonb params must be passed as plain objects — pre-stringifying
+    // (JSON.stringify) double-encodes them: PostgREST then delivers a jsonb
+    // STRING scalar, `p_employee->>'full_name'` returns null and the insert
+    // fails with a not-null violation.
     const { data, error } = await sb().rpc('create_employee', {
-      p_employee: JSON.stringify(input),
+      p_employee: input,
     });
     assertOk(error);
     const created = data as unknown as Record<string, unknown>;
@@ -477,8 +481,9 @@ export const prodApi = {
   },
 
   async updateEmployee(id: string, input: EmployeeInput): Promise<EmployeeVM> {
+    // plain object for the jsonb param — see the note in createEmployee
     const { data, error } = await sb().rpc('update_employee', {
-      p_id: id, p_employee: JSON.stringify(input), p_effective_date: localTodayYMD(),
+      p_id: id, p_employee: input, p_effective_date: localTodayYMD(),
     });
     assertOk(error);
     const updated = data as unknown as Record<string, unknown>;
@@ -713,7 +718,8 @@ export const prodApi = {
       p_employee_id: input.employee_id,
       p_document_type: input.document_type,
       p_document_number: input.document_number,
-      p_items: JSON.stringify(input.items),
+      // plain object for the jsonb param (double-encoding breaks item flags)
+      p_items: input.items,
       p_site_name: input.site_name,
       p_team_leader_name: input.team_leader_name,
       p_created_at: input.created_at,
@@ -731,7 +737,8 @@ export const prodApi = {
       p_token_number: input.token_number,
       p_document_type: input.document_type,
       p_document_number: input.document_number,
-      p_items: JSON.stringify(input.items),
+      // plain object for the jsonb param (double-encoding breaks item flags)
+      p_items: input.items,
       p_site_name: input.site_name,
       p_team_leader_name: input.team_leader_name,
       p_created_at: input.created_at,

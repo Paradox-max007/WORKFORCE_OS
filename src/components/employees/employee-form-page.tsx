@@ -498,12 +498,13 @@ export function EmployeeFormPage() {
               )}
             </div>
 
-            {/* camp + block + room — one clean row */}
+            {/* camp on its own full-width row; block + room share the row
+                below — nothing can crowd or overlap at any breakpoint */}
             <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-4">
               <Label className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
                 <Tent size={13} /> Accommodation Camp
               </Label>
-              <div className="mt-2 grid gap-3 sm:grid-cols-3">
+              <div className="mt-2 space-y-3">
                 <Select
                   value={form.camp_id ?? 'none'}
                   onValueChange={(v) => {
@@ -515,7 +516,7 @@ export function EmployeeFormPage() {
                     }));
                   }}
                 >
-                  <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="h-11 w-full bg-card" aria-label="Accommodation camp"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">No camp assigned</SelectItem>
                     {activeCamps.map((c) => (
@@ -525,20 +526,24 @@ export function EmployeeFormPage() {
                     ))}
                   </SelectContent>
                 </Select>
-                <Input
-                  value={form.camp_block ?? ''}
-                  onChange={(e) => setForm((f) => ({ ...f, camp_block: e.target.value }))}
-                  disabled={!form.camp_id}
-                  placeholder={form.camp_id ? 'Block no. (e.g. B)' : 'Block — pick a camp first'}
-                  className="h-11 disabled:opacity-50"
-                />
-                <Input
-                  value={form.camp_room ?? ''}
-                  onChange={(e) => setForm((f) => ({ ...f, camp_room: e.target.value }))}
-                  disabled={!form.camp_id}
-                  placeholder={form.camp_id ? 'Room no. (e.g. 204)' : 'Room — pick a camp first'}
-                  className="h-11 disabled:opacity-50"
-                />
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    value={form.camp_block ?? ''}
+                    onChange={(e) => setForm((f) => ({ ...f, camp_block: e.target.value }))}
+                    disabled={!form.camp_id}
+                    placeholder={form.camp_id ? 'Block no. (e.g. B)' : 'Block — pick a camp first'}
+                    className="h-11 disabled:opacity-50"
+                    aria-label="Camp block number"
+                  />
+                  <Input
+                    value={form.camp_room ?? ''}
+                    onChange={(e) => setForm((f) => ({ ...f, camp_room: e.target.value }))}
+                    disabled={!form.camp_id}
+                    placeholder={form.camp_id ? 'Room no. (e.g. 204)' : 'Room — pick a camp first'}
+                    className="h-11 disabled:opacity-50"
+                    aria-label="Camp room number"
+                  />
+                </div>
               </div>
               <p className="mt-2 text-[11px] text-muted-foreground">
                 Where the employee stays — camp, block and room number. One employee belongs to exactly one camp; change it anytime here or from the Camps page.

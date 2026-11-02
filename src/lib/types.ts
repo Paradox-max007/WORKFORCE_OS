@@ -2,6 +2,11 @@
 // PULSE Workforce OS — Shared domain types
 // ============================================================================
 
+// Menu configuration lives in lib/menus.ts (single source of truth) — the
+// key type is re-exported here for convenience.
+import type { MenuKey } from './menus';
+export type { MenuKey };
+
 export type Role = 'super_admin' | 'admin' | 'pending';
 export type ThemeMode = 'dark' | 'light';
 export type AccentColor = 'violet' | 'emerald' | 'amber' | 'rose';
@@ -242,15 +247,9 @@ export interface UniformEntry {
   renewal_date: string;
 }
 
-export interface MenuPermissionMap {
-  employees: boolean;
-  sites: boolean;
-  camps: boolean;
-  attendance: boolean;
-  leave_requests: boolean;
-  cancellation_requests: boolean;
-  notifications: boolean;
-}
+export type MenuPermissionMap = {
+  [K in MenuKey]: boolean;
+};
 
 // ============================================================================
 // Input payloads
@@ -428,14 +427,5 @@ export const ATTENDANCE_STATUSES: {
   { value: 'absent', label: 'Absent', short: 'A', color: '#ef4444' },
 ];
 
-export const MENU_KEYS = [
-  'employees',
-  'sites',
-  'camps',
-  'attendance',
-  'leave_requests',
-  'cancellation_requests',
-  'notifications',
-] as const;
-
-export type MenuKey = (typeof MENU_KEYS)[number];
+// MENU_KEYS / MenuKey now live in lib/menus.ts (auto-synced with the sidebar).
+export { MENU_KEYS } from './menus';

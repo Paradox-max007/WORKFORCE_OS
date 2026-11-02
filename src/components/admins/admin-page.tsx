@@ -11,9 +11,9 @@
 
 import { motion } from 'framer-motion';
 import {
-  Ban, Bell, Building2, Calendar, CalendarCheck, Crown, Eye, EyeOff, FileText,
-  KeyRound, LayoutDashboard, Loader2, Lock, Mail, Pencil, Plus, Search, Shield,
-  Shirt, Tent, Trash2, User, Users, X,
+  Building2, Calendar, Crown, Eye, EyeOff,
+  KeyRound, Loader2, Lock, Mail, Pencil, Plus, Search, Shield,
+  Trash2, User, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -40,7 +40,10 @@ import {
 } from '@/components/ui/table';
 import { dataApi } from '@/lib/data';
 import { fmtDate, initials } from '@/lib/format';
-import { MENU_KEYS, type MenuKey, type MenuPermissionMap, type Profile, type Role, type SiteWithCount } from '@/lib/types';
+import {
+  ALWAYS_ON_MENUS, MENU_BY_ID, MENU_KEYS, defaultPermissionMap,
+} from '@/lib/menus';
+import type { MenuKey, MenuPermissionMap, Profile, Role, SiteWithCount } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -53,32 +56,18 @@ import { useRealtimeVersion } from '@/store/realtime';
 const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const EMPTY_PERMS: MenuPermissionMap = {
-  employees: false,
-  sites: false,
-  camps: false,
-  attendance: false,
-  leave_requests: false,
-  cancellation_requests: false,
-  notifications: false,
-};
+const EMPTY_PERMS: MenuPermissionMap = defaultPermissionMap();
 
-/** Friendly metadata for the permission keys defined in MENU_KEYS. */
-const MENU_META: Record<MenuKey, { label: string; hint: string; icon: LucideIcon }> = {
-  employees: { label: 'Employees', hint: 'Directory, records & ratings', icon: Users },
-  sites: { label: 'Sites', hint: 'Work sites & client projects', icon: Building2 },
-  camps: { label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent },
-  attendance: { label: 'Attendance', hint: 'Sitewise hours marking — assigned sites only', icon: CalendarCheck },
-  leave_requests: { label: 'Leave Requests', hint: 'Leave applications & review', icon: FileText },
-  cancellation_requests: { label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban },
-  notifications: { label: 'Notifications', hint: 'Alerts & announcements', icon: Bell },
-};
-
-/** Menus every admin can always reach (mirrors the sidebar visibility rules). */
-const ALWAYS_ON_MENUS: { label: string; hint: string; icon: LucideIcon }[] = [
-  { label: 'Dashboard', hint: 'Operations overview & stats', icon: LayoutDashboard },
-  { label: 'Uniform Registry', hint: 'Uniform tokens & renewals', icon: Shirt },
-];
+/** Friendly metadata for the permission toggles — auto-derived from the
+ *  sidebar menu config (lib/menus.ts). New sidebar menus appear here
+ *  automatically with label/hint/icon; super admins toggle them on/off. */
+const MENU_META: Record<MenuKey, { label: string; hint: string; icon: LucideIcon }> =
+  Object.fromEntries(
+    MENU_KEYS.map((k) => {
+      const m = MENU_BY_ID[k];
+      return [k, { label: m.label, hint: m.hint, icon: m.icon }];
+    }),
+  ) as Record<MenuKey, { label: string; hint: string; icon: LucideIcon }>;
 
 /** Create or edit target for the account dialog. */
 type AccountTarget =
@@ -554,7 +543,7 @@ export function AdminPage() {
                         <RoleBadge role={p.role} />
                       </div>
                       <p className="mt-2.5 text-xs text-muted-foreground">
-                        Access — Dashboard &amp; Uniform Registry
+                        Access — {ALWAYS_ON_MENUS.map((m) => m.label).join(' & ')}
                         {grantedLabels.length > 0 ? ` plus ${grantedLabels.join(', ')}` : ' only'}
                       </p>
                       <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
@@ -739,17 +728,17 @@ function SearchBox({
 /** Summary of what an admin can reach (base menus + granted keys). */
 function AccessChips({ map }: { map: MenuPermissionMap | undefined }) {
   const granted = MENU_KEYS.filter((k) => map?.[k] === true);
+  const baseLabels = ALWAYS_ON_MENUS.map((m) => m.label).join(' & ');
   return (
     <div
       className="flex max-w-[260px] flex-wrap items-center gap-1"
-      title="Dashboard and Uniform Registry are always available"
+      title={`${baseLabels || 'No base menus'} always available`}
     >
-      <span className="rounded-full border bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
-        Dashboard
-      </span>
-      <span className="rounded-full border bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
-        Uniform Registry
-      </span>
+      {ALWAYS_ON_MENUS.map((m) => (
+        <span key={m.id} className="rounded-full border bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+          {m.label}
+        </span>
+      ))}
       {granted.map((k) => (
         <span
           key={k}

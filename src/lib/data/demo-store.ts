@@ -119,6 +119,9 @@ function seedDB(): DemoDB {
   db.menuPermissions = [
     { profile_id: raviP.id, menu_key: 'employees' as MenuKey, allowed: true },
     { profile_id: raviP.id, menu_key: 'attendance' as MenuKey, allowed: true },
+    // Working Hours used to piggyback on the Employees grant — keep that
+    // access in the demo seed now that it is its own toggleable menu.
+    { profile_id: raviP.id, menu_key: 'working_hours' as MenuKey, allowed: true },
   ];
 
   // ---- sites ---------------------------------------------------------------

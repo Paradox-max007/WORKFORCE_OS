@@ -95,7 +95,11 @@ begin
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000002', 'leave_requests', true);
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000002', 'cancellation_requests', true);
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000002', 'notifications', true);
+  -- Working Hours is its own toggleable menu now; the seeded admins keep it
+  -- (it used to piggyback on their Employees grant)
+  insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000002', 'working_hours', true);
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000003', 'employees', true);
+  insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000003', 'working_hours', true);
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000003', 'sites', true);
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000003', 'camps', false);
   insert into public.menu_permission (profile_id, menu_key, allowed) values ('a0000000-0000-4000-8000-000000000003', 'attendance', true);

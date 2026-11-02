@@ -8,6 +8,7 @@ import { create } from 'zustand';
 import { dataApi } from '@/lib/data';
 import { isSupabaseConfigured } from '@/lib/supabase/client';
 import type { AccentColor, MenuPermissionMap, Profile, ThemeMode } from '@/lib/types';
+import { defaultPermissionMap } from '@/lib/menus';
 
 interface AuthStore {
   user: Profile | null;
@@ -23,10 +24,9 @@ interface AuthStore {
   refreshPermissions: () => Promise<void>;
 }
 
-const DEFAULT_PERMISSIONS: MenuPermissionMap = {
-  employees: false, sites: false, camps: false, attendance: false,
-  leave_requests: false, cancellation_requests: false, notifications: false,
-};
+// Config-driven defaults (lib/menus.ts): menus with defaultOn true are
+// visible to every admin until a super admin toggles them off.
+const DEFAULT_PERMISSIONS: MenuPermissionMap = defaultPermissionMap();
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
   user: null,

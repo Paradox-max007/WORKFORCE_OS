@@ -6,8 +6,7 @@
 
 import { motion } from 'framer-motion';
 import {
-  Ban, Bell, Building2, CalendarCheck, ChevronLeft, Clock, FileWarning, LayoutDashboard,
-  LogOut, Moon, Shirt, Sun, Tent, Users, UserSquare2,
+  Bell, ChevronLeft, LogOut, Moon, Sun,
 } from 'lucide-react';
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
@@ -16,31 +15,17 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTr
 import { cn } from '@/lib/utils';
 import { dataApi } from '@/lib/data';
 import { initials, fmtTimeAgo } from '@/lib/format';
+import { MENUS, menuAllows } from '@/lib/menus';
 import type { AccentColor, Profile } from '@/lib/types';
 import { useAppStore, type AppView } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 import { toast } from 'sonner';
 
-interface NavItem {
-  id: AppView;
-  label: string;
-  icon: typeof LayoutDashboard;
-}
+// Sidebar menus come from lib/menus.ts — the single source of truth shared
+// with Admin Management permissions. Adding a menu there is all it takes.
 
-const NAV_ITEMS: NavItem[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'employees', label: 'Employees', icon: Users },
-  { id: 'sites', label: 'Sites', icon: Building2 },
-  { id: 'camps', label: 'Camps', icon: Tent },
-  { id: 'attendance', label: 'Attendance', icon: CalendarCheck },
-  { id: 'working_hours', label: 'Working Hours', icon: Clock },
-  { id: 'uniform_registry', label: 'Uniform Registry', icon: Shirt },
-  { id: 'leave_requests', label: 'Leave Requests', icon: FileWarning },
-  { id: 'cancellation_requests', label: 'Cancellations', icon: Ban },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'admins', label: 'Admin Management', icon: UserSquare2 },
-];
+// (NAV_ITEMS removed — see lib/menus.ts MENUS)
 
 const ACCENTS: { id: AccentColor; cls: string }[] = [
   { id: 'violet', cls: 'bg-violet-500' },
@@ -106,16 +91,12 @@ function SidebarContent({
 
   const allowed = (id: AppView): boolean => {
     if (user.role === 'super_admin') return true;
-    if (id === 'dashboard' || id === 'uniform_registry') return true;
-    // the dedicated employee details / form pages belong to the Employees module
-    if (id === 'employee_details' || id === 'employee_form') return perms ? perms.employees : false;
-    // Working Hours shares the Employees menu permission for now — it is an
-    // employee-centric report (a dedicated permission can come later)
-    if (id === 'working_hours') return perms ? perms.employees : false;
-    return perms ? perms[id as keyof typeof perms] ?? false : false;
+    // config-driven: unmanaged menus follow their defaultOn flag, managed
+    // menus follow the permission row (falling back to defaultOn)
+    return menuAllows(perms, id);
   };
 
-  const visibleItems = NAV_ITEMS.filter((item) => allowed(item.id));
+  const visibleItems = MENUS.filter((item) => allowed(item.id));
 
   const handleNav = (id: AppView) => {
     if (id === 'employees') navigateToEmployees();

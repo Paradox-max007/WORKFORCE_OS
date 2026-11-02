@@ -33,6 +33,7 @@ import {
   type UniformEntryUpdate,
   type WarningVM,
 } from '@/lib/types';
+import { defaultPermissionMap } from '@/lib/menus';
 
 const sb = () => {
   if (!supabase) throw new Error('Supabase is not configured');
@@ -235,12 +236,11 @@ export const prodApi = {
     const { data, error } = await sb().from('menu_permission')
       .select('menu_key, allowed').eq('profile_id', profileId);
     assertOk(error);
-    const map: MenuPermissionMap = {
-      employees: false, sites: false, camps: false, attendance: false,
-      leave_requests: false, cancellation_requests: false, notifications: false,
-    };
+    // start from the menu config defaults (lib/menus.ts) so newly added
+    // sidebar menus appear for every admin until a super admin toggles them
+    const map = defaultPermissionMap();
     (data ?? []).forEach((row: { menu_key: keyof MenuPermissionMap; allowed: boolean }) => {
-      map[row.menu_key] = row.allowed;
+      if (row.menu_key in map) map[row.menu_key] = row.allowed;
     });
     return map;
   },

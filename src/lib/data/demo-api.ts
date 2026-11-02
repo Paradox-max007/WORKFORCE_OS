@@ -41,6 +41,7 @@ import {
   toYMD,
   uid,
 } from './demo-store';
+import { defaultPermissionMap } from '@/lib/menus';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
 type VM = Record<string, unknown>;
@@ -251,13 +252,12 @@ export const demoApi = {
   },
 
   async getMenuPermissions(profileId: string): Promise<MenuPermissionMap> {
-    const map = {
-      employees: false, sites: false, camps: false, attendance: false,
-      leave_requests: false, cancellation_requests: false, notifications: false,
-    };
+    // config defaults first (lib/menus.ts) — new sidebar menus automatically
+    // visible per their defaultOn flag until a super admin toggles them
+    const map = defaultPermissionMap();
     db.menuPermissions
       .filter((x) => x.profile_id === profileId)
-      .forEach((x) => { map[x.menu_key] = x.allowed; });
+      .forEach((x) => { if (x.menu_key in map) map[x.menu_key] = x.allowed; });
     return map;
   },
 

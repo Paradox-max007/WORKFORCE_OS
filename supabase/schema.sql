@@ -32,7 +32,10 @@ create table if not exists public.profiles (
 create table if not exists public.menu_permission (
   id          uuid primary key default gen_random_uuid(),
   profile_id  uuid not null references public.profiles(id) on delete cascade,
-  menu_key    text not null check (menu_key in ('employees','sites','camps','attendance','leave_requests','cancellation_requests','notifications')),
+  -- menu keys are driven by the client config (src/lib/menus.ts) — no CHECK
+  -- constraint here, so newly added sidebar menus can be toggled without a
+  -- schema change
+  menu_key    text not null,
   allowed     boolean not null default false,
   unique (profile_id, menu_key)
 );
@@ -126,9 +129,9 @@ create table if not exists public.site_transfer (
 -- ---------------------------------------------------------------------------
 -- Migration guards (make re-running this file safe on older installs)
 -- ---------------------------------------------------------------------------
--- older installs created menu_permission without the 'camps' menu key
+-- older installs created menu_permission with a hardcoded menu key CHECK —
+-- drop it so any menu key from the client config (src/lib/menus.ts) is valid
 alter table public.menu_permission drop constraint if exists menu_permission_menu_key_check;
-alter table public.menu_permission add constraint menu_permission_menu_key_check  check (menu_key in ('employees','sites','camps','attendance','leave_requests','cancellation_requests','notifications'));
 -- camp block / room columns for older installs
 alter table public.employee add column if not exists camp_block text;
 alter table public.employee add column if not exists camp_room text;
@@ -286,16 +289,22 @@ security definer set search_path = public
 as $$ select exists(select 1 from public.profiles where id = auth.uid() and role in ('super_admin','admin')); $$;
 
 -- Does the current admin hold a given menu permission (super admins always true)?
+-- A missing row falls back to the default-allow set: menus that ship visible to
+-- every admin (keep in sync with defaultOn:true in src/lib/menus.ts).
 create or replace function public.has_menu_permission(p_menu_key text)
 returns boolean language sql stable
 security definer set search_path = public
 as $$
   select
     exists(select 1 from public.profiles where id = auth.uid() and role = 'super_admin')
-    or exists(
-      select 1 from public.menu_permission mp
-      join public.profiles p on p.id = mp.profile_id
-      where mp.profile_id = auth.uid() and mp.menu_key = p_menu_key and mp.allowed and p.role = 'admin'
+    or coalesce(
+      (
+        select mp.allowed
+        from public.menu_permission mp
+        join public.profiles p on p.id = mp.profile_id
+        where mp.profile_id = auth.uid() and mp.menu_key = p_menu_key and p.role = 'admin'
+      ),
+      p_menu_key in ('uniform_registry')
     );
 $$;
 
@@ -1333,7 +1342,9 @@ declare
   v_tracked numeric;
   v_monthly jsonb;
 begin
-  if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+  if not public.has_menu_permission('working_hours') and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
 
   select e.*, s.name as site_name into emp
   from public.employee e
@@ -1560,7 +1571,9 @@ declare
   v_items jsonb := case when jsonb_typeof(p_items) = 'string'
                         then (p_items #>> '{}')::jsonb else p_items end;
 begin
-  if not public.is_staff() then raise exception 'Access denied'; end if;
+  if not public.has_menu_permission('uniform_registry') and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
   if p_document_type not in ('id','passport') then raise exception 'Invalid document type'; end if;
   select * into emp from public.employee where id = p_employee_id;
   if emp.id is null then raise exception 'Employee not found'; end if;
@@ -1596,7 +1609,9 @@ declare result public.uniform_registry;
 declare v_items jsonb := case when jsonb_typeof(p_items) = 'string'
                                then (p_items #>> '{}')::jsonb else p_items end;
 begin
-  if not public.is_staff() then raise exception 'Access denied'; end if;
+  if not public.has_menu_permission('uniform_registry') and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
   if p_document_type not in ('id','passport') then raise exception 'Invalid document type'; end if;
   update public.uniform_registry set
     token_number = p_token_number,
@@ -1618,7 +1633,9 @@ returns void language plpgsql
 security definer set search_path = public
 as $$
 begin
-  if not public.is_staff() then raise exception 'Access denied'; end if;
+  if not public.has_menu_permission('uniform_registry') and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
   update public.uniform_registry set is_deleted = true where id = p_id and not is_deleted;
 end; $$;
 

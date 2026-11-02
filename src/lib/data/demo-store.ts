@@ -85,6 +85,8 @@ export interface DemoPayrollEmployee {
   notes: string | null;
   trade_id_snapshot: string | null;
   salary_role_snapshot: SalaryRole;
+  /** true → hand-edited in the Salary Sheet; recalculation never touches it */
+  manually_edited: boolean;
 }
 
 export interface DemoPayrollSite {
@@ -100,6 +102,7 @@ export interface DemoPayrollSite {
   supervisor_hours: number;
   gross_salary: number;
   has_missing_rate: boolean;
+  manually_edited: boolean;
 }
 
 export interface DemoPayrollLine {
@@ -201,7 +204,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 10,
+    version: 11,
     profiles: [],
     sites: [],
     camps: [],
@@ -421,6 +424,22 @@ function seedDB(): DemoDB {
   inCamp(muweilah, ['Suresh Patel', 'Dilip Shrestha', 'Ramesh Yadav', 'Omar Farooq'], 'C', ['12', '14', '16', '18']);
   const emp = (name: string): Employee => db.employees.find((e) => e.full_name === name)!;
 
+  // ---- site transfer (historical attribution demo) ---------------------------
+  // Kamal Hussain (Welder) moved NPC Tower → Marina Bay 12 days ago: his
+  // Salary Sheet shows him at BOTH sites — hours before the move at NPC Tower,
+  // hours after it at Marina Bay (moved-out employees stay on the site list
+  // with the hours worked there).
+  const kamal = emp('Kamal Hussain');
+  kamal.current_site_id = marina.id;
+  db.siteTransfers.push({
+    id: uid(),
+    employee_id: kamal.id,
+    from_site_id: npc.id,
+    to_site_id: marina.id,
+    effective_date: addDaysStr(toYMD(new Date()), -12),
+    created_at: nowISO(),
+  });
+
   // ---- attendance (last 6 months incl. current, up to today) ----------------
   // Excel-style: each worked day carries custom hours; 'A' marks an absence.
   const today = new Date();
@@ -606,7 +625,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 10) return parsed;
+      if (parsed.version === 11) return parsed;
     }
   } catch {
     // corrupted → reseed

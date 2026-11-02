@@ -10,7 +10,12 @@
 //   • month selector + status (Draft recalculation live / Finalized snapshot)
 //   • summary cards: employees, total hours, gross, advances, deductions, net
 //   • site groups: per-employee hours & gross AT THAT SITE (historical site
-//     attribution), with a click-through rate breakdown
+//     attribution — moved-out employees stay on every site they worked at),
+//     with a click-through rate breakdown
+//   • EDIT MODE: pick the trade from a dropdown, override hours / rate /
+//     gross / advance / deduction. THE SHEET RECORD HAS PRIORITY — saved
+//     values overwrite the stored data and never get overwritten by the
+//     automatic recalculation (reset returns an employee to auto pricing)
 //   • consolidated Employee Settlement table: advance / deduction / net are
 //     settled exactly ONCE per employee per month (never repeated per site)
 //   • payment + adjustment + finalize + audited reopen dialogs
@@ -18,10 +23,11 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, ChevronDown, ChevronRight, Clock, FileSpreadsheet,
-  Loader2, Lock, LockOpen, PencilLine, TriangleAlert, Users, Wallet,
+  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, Clock, Eye,
+  FileSpreadsheet, Loader2, Lock, LockOpen, PencilLine, RotateCcw,
+  TriangleAlert, Users, Wallet,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { EmptyState, SectionTitle } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
@@ -42,6 +48,7 @@ import { fmtDate, fmtDateTime, initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
   type PayrollEmployeeVM, type PayrollSalaryLineVM, type SalarySheetReport,
+  type SalarySheetSiteGroup, type Trade,
 } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -62,7 +69,21 @@ const ROLE_LABEL: Record<string, string> = {
   standard: 'Standard', team_leader: 'Team Leader', supervisor: 'Supervisor',
 };
 const TIER_LABEL: Record<string, string> = {
-  below_threshold: 'Below eligibility', qualified: 'Qualified',
+  below_threshold: 'Below eligibility', qualified: 'Qualified', manual: 'Manual',
+};
+
+/** sentinel for "no trade" in the edit-mode dropdown (Radix needs non-empty values) */
+const NO_TRADE = '__none__';
+
+type SiteRow = SalarySheetSiteGroup['rows'][number];
+type SiteDraft = { hours: string; rate: string; gross: string };
+type EmpDraft = { trade: string; advance: string; deduction: string };
+
+/** effective (volume-weighted) rate of a site row — the edit-mode prefill */
+const effRateOf = (r: SiteRow): number => {
+  if (r.lines.length === 1) return r.lines[0].hourly_rate;
+  if (r.total_hours > 0) return Math.round((r.gross_salary / r.total_hours) * 100) / 100;
+  return r.lines[0]?.hourly_rate ?? 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -467,12 +488,20 @@ function ReopenDialog({ report, open, onOpenChange, onDone }: {
 }
 
 // ---------------------------------------------------------------------------
-// Site group (collapsible)
+// Site group (collapsible) — read mode + edit mode (hours / rate / gross)
 // ---------------------------------------------------------------------------
-function SiteGroup({ group, index, onShowLines }: {
-  group: SalarySheetReport['sites'][number];
+function SiteGroup({
+  group, index, onShowLines, editMode, peIdOf, siteDraftOf, onSiteDraftChange, onSaveSite, busyKey,
+}: {
+  group: SalarySheetSiteGroup;
   index: number;
   onShowLines: (employeeId: string, siteName: string) => void;
+  editMode: boolean;
+  peIdOf: (employeeId: string) => string | undefined;
+  siteDraftOf: (peId: string, row: SiteRow) => SiteDraft;
+  onSiteDraftChange: (peId: string, siteId: string | null, next: SiteDraft) => void;
+  onSaveSite: (peId: string, row: SiteRow, draft: SiteDraft) => void;
+  busyKey: string | null;
 }) {
   const [open, setOpen] = useState(true);
   const employeeById = useMemo(() => new Map(group.rows.map((r) => [r.employee_id, r])), [group]);
@@ -521,15 +550,28 @@ function SiteGroup({ group, index, onShowLines }: {
                     <TableHead className="text-right">Hours</TableHead>
                     <TableHead className="text-right">Rate</TableHead>
                     <TableHead className="text-right">Gross (site)</TableHead>
+                    {editMode && <TableHead className="w-14 text-right">Save</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {group.rows.map((r, i) => {
                     const emp = employeeById.get(r.employee_id);
+                    const peId = peIdOf(r.employee_id);
+                    const draft = peId ? siteDraftOf(peId, r) : null;
+                    const rowKey = `${peId ?? ''}|${r.site_id ?? 'none'}`;
+                    const busy = busyKey === `site:${rowKey}`;
                     const multiRate = new Set(r.lines.map((l) => `${l.salary_role}|${l.experience_tier}|${l.hourly_rate}`)).size > 1;
                     const firstRate = r.lines[0]?.hourly_rate;
+                    const editable = editMode && peId != null && draft != null;
                     return (
-                      <TableRow key={`${r.employee_id}-${r.site_id ?? 'none'}`} className="cursor-pointer" onClick={() => onShowLines(r.employee_id, group.site_name)}>
+                      <TableRow
+                        key={`${r.employee_id}-${r.site_id ?? 'none'}`}
+                        className={cn(
+                          !editMode && 'cursor-pointer',
+                          r.manually_edited && 'bg-amber-500/[0.04]',
+                        )}
+                        onClick={editMode ? undefined : () => onShowLines(r.employee_id, group.site_name)}
+                      >
                         <TableCell className="text-muted-foreground">{i + 1}</TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2.5">
@@ -537,7 +579,14 @@ function SiteGroup({ group, index, onShowLines }: {
                               {emp?.photo ? <img src={emp.photo} alt="" className="size-full object-cover" /> : initials(r.full_name)}
                             </span>
                             <div className="min-w-0">
-                              <p className="truncate text-sm font-medium">{r.full_name}</p>
+                              <p className="truncate text-sm font-medium">
+                                {r.full_name}
+                                {r.manually_edited && (
+                                  <span className="ml-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 align-middle text-[9px] font-semibold uppercase tracking-wide text-amber-500">
+                                    manual
+                                  </span>
+                                )}
+                              </p>
                               <p className="truncate font-mono text-[10px] text-muted-foreground">{r.employee_code}</p>
                             </div>
                           </div>
@@ -547,19 +596,83 @@ function SiteGroup({ group, index, onShowLines }: {
                           {r.trade_name ?? <span className="text-amber-500">no trade</span>}
                         </TableCell>
                         <TableCell className="hidden text-xs text-muted-foreground xl:table-cell">{r.nationality ?? '—'}</TableCell>
-                        <TableCell className="text-right font-mono text-sm">{fmtHrs(r.total_hours)}</TableCell>
-                        <TableCell className="text-right font-mono text-xs">
-                          {r.has_missing_rate ? (
-                            <span className="text-amber-500">missing rate</span>
-                          ) : r.lines.length === 0 ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : (
-                            <span className="underline decoration-dotted underline-offset-4">
-                              {multiRate ? `${new Set(r.lines.map((l) => l.hourly_rate)).size} rates` : `AED ${fmtMoney(firstRate ?? 0)}`}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm font-semibold">AED {fmtMoney(r.gross_salary)}</TableCell>
+                        {editable && draft ? (
+                          <>
+                            <TableCell className="text-right">
+                              <Input
+                                type="number" min={0} step="0.25" inputMode="decimal"
+                                className="h-8 w-20 border-border/70 bg-card text-right font-mono text-sm"
+                                value={draft.hours}
+                                onChange={(e) => {
+                                  const hours = e.target.value;
+                                  const h = Number(hours);
+                                  const rt = Number(draft.rate);
+                                  onSiteDraftChange(peId!, r.site_id, {
+                                    hours, rate: draft.rate,
+                                    gross: Number.isFinite(h) && Number.isFinite(rt) ? (h * rt).toFixed(2) : draft.gross,
+                                  });
+                                }}
+                                aria-label={`Hours at ${group.site_name}`}
+                              />
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Input
+                                type="number" min={0} step="0.25" inputMode="decimal"
+                                className="h-8 w-20 border-border/70 bg-card text-right font-mono text-xs"
+                                value={draft.rate}
+                                onChange={(e) => {
+                                  const rate = e.target.value;
+                                  const h = Number(draft.hours);
+                                  const rt = Number(rate);
+                                  onSiteDraftChange(peId!, r.site_id, {
+                                    hours: draft.hours, rate,
+                                    gross: Number.isFinite(h) && Number.isFinite(rt) ? (h * rt).toFixed(2) : draft.gross,
+                                  });
+                                }}
+                                aria-label={`Hourly rate at ${group.site_name}`}
+                              />
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Input
+                                type="number" min={0} step="0.01" inputMode="decimal"
+                                className="h-8 w-24 border-border/70 bg-card text-right font-mono text-sm"
+                                value={draft.gross}
+                                onChange={(e) => onSiteDraftChange(peId!, r.site_id, {
+                                  hours: draft.hours, rate: draft.rate, gross: e.target.value,
+                                })}
+                                aria-label={`Gross at ${group.site_name}`}
+                              />
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                variant="outline" size="icon"
+                                className="size-8 text-emerald-500 hover:text-emerald-400"
+                                disabled={busy}
+                                title="Save this site row (the sheet record wins)"
+                                onClick={() => onSaveSite(peId!, r, draft)}
+                              >
+                                {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                              </Button>
+                            </TableCell>
+                          </>
+                        ) : (
+                          <>
+                            <TableCell className="text-right font-mono text-sm">{fmtHrs(r.total_hours)}</TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              {r.has_missing_rate ? (
+                                <span className="text-amber-500">missing rate</span>
+                              ) : r.lines.length === 0 ? (
+                                <span className="text-muted-foreground">—</span>
+                              ) : (
+                                <span className="underline decoration-dotted underline-offset-4">
+                                  {multiRate ? `${new Set(r.lines.map((l) => l.hourly_rate)).size} rates` : `AED ${fmtMoney(firstRate ?? 0)}`}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-sm font-semibold">AED {fmtMoney(r.gross_salary)}</TableCell>
+                            {editMode && <TableCell />}
+                          </>
+                        )}
                       </TableRow>
                     );
                   })}
@@ -594,6 +707,13 @@ export function SalarySheetPage() {
   const [finalizeOpen, setFinalizeOpen] = useState(false);
   const [reopenOpen, setReopenOpen] = useState(false);
 
+  // ---- edit mode (the sheet record has priority) ---------------------------
+  const [editMode, setEditMode] = useState(false);
+  const [tradeOptions, setTradeOptions] = useState<Trade[]>([]);
+  const [siteDrafts, setSiteDrafts] = useState<Record<string, SiteDraft>>({});
+  const [empDrafts, setEmpDrafts] = useState<Record<string, EmpDraft>>({});
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
   const load = (): void => {
     setLoading(true);
     dataApi.getSalarySheet(year, month)
@@ -606,6 +726,16 @@ export function SalarySheetPage() {
   };
 
   useEffect(load, [year, month, realtimeVersion]);
+
+  // trades for the edit-mode dropdown
+  useEffect(() => {
+    if (!editMode) return;
+    let cancelled = false;
+    dataApi.listTrades()
+      .then((rows) => { if (!cancelled) setTradeOptions(rows); })
+      .catch(() => { if (!cancelled) setTradeOptions([]); });
+    return () => { cancelled = true; };
+  }, [editMode, realtimeVersion]);
 
   const generate = async (): Promise<void> => {
     setGenerating(true);
@@ -625,6 +755,109 @@ export function SalarySheetPage() {
     [report],
   );
   const linesEmployee = linesTarget ? employeeById.get(linesTarget.employeeId) ?? null : null;
+
+  /** employee_id → payroll_employee id (the settlement row id) */
+  const peIdOf = useCallback(
+    (employeeId: string): string | undefined => employeeById.get(employeeId)?.id,
+    [employeeById],
+  );
+
+  const siteDraftOf = useCallback((peId: string, r: SiteRow): SiteDraft =>
+    siteDrafts[`${peId}|${r.site_id ?? 'none'}`] ?? {
+      hours: String(r.total_hours),
+      rate: String(effRateOf(r)),
+      gross: r.gross_salary.toFixed(2),
+    }, [siteDrafts]);
+
+  const onSiteDraftChange = useCallback((peId: string, siteId: string | null, next: SiteDraft): void => {
+    setSiteDrafts((prev) => ({ ...prev, [`${peId}|${siteId ?? 'none'}`]: next }));
+  }, []);
+
+  const onSaveSite = async (peId: string, r: SiteRow, draft: SiteDraft): Promise<void> => {
+    const key = `${peId}|${r.site_id ?? 'none'}`;
+    const hours = Number(draft.hours);
+    const rate = Number(draft.rate);
+    const gross = Number(draft.gross);
+    if (!Number.isFinite(hours) || hours < 0) { toast.error('Hours must be 0 or more'); return; }
+    if (!Number.isFinite(gross) || gross < 0) { toast.error('Gross must be 0 or more'); return; }
+    setBusyKey(`site:${key}`);
+    try {
+      await dataApi.updateSalarySheetRow({
+        payroll_employee_id: peId,
+        sites: [{
+          site_id: r.site_id,
+          total_hours: Math.round(hours * 100) / 100,
+          hourly_rate: Number.isFinite(rate) && rate >= 0 ? Math.round(rate * 100) / 100 : null,
+          gross_salary: Math.round(gross * 100) / 100,
+        }],
+      });
+      toast.success('Site row saved', {
+        description: `${r.full_name} @ ${r.site_name} — ${fmtHrs(hours)} h · AED ${fmtMoney(gross)} (protected from recalculation)`,
+      });
+      setSiteDrafts((prev) => { const n = { ...prev }; delete n[key]; return n; });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const empDraftOf = (e: PayrollEmployeeVM): EmpDraft =>
+    empDrafts[e.id] ?? {
+      trade: e.trade_id ?? NO_TRADE,
+      advance: String(e.advance),
+      deduction: String(e.deduction),
+    };
+
+  const onSaveEmployee = async (e: PayrollEmployeeVM, d: EmpDraft): Promise<void> => {
+    const adv = Number(d.advance);
+    const ded = Number(d.deduction);
+    if (!Number.isFinite(adv) || adv < 0 || !Number.isFinite(ded) || ded < 0) {
+      toast.error('Advance and deduction must be 0 or more');
+      return;
+    }
+    setBusyKey(`emp:${e.id}`);
+    try {
+      await dataApi.updateSalarySheetRow({
+        payroll_employee_id: e.id,
+        trade_id: d.trade === NO_TRADE ? null : d.trade,
+        advance: Math.round(adv * 100) / 100,
+        deduction: Math.round(ded * 100) / 100,
+      });
+      toast.success('Sheet row saved', {
+        description: `${e.full_name}${e.trade_id !== (d.trade === NO_TRADE ? null : d.trade) ? ' — trade updated & month re-priced' : ''}`,
+      });
+      setEmpDrafts((prev) => { const n = { ...prev }; delete n[e.id]; return n; });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const onResetAuto = async (e: PayrollEmployeeVM): Promise<void> => {
+    setBusyKey(`emp:${e.id}`);
+    try {
+      await dataApi.resetPayrollEmployeeAuto(e.id);
+      toast.success('Back to automatic calculation', {
+        description: `${e.full_name} was re-priced from attendance, trades & rates.`,
+      });
+      setEmpDrafts((prev) => { const n = { ...prev }; delete n[e.id]; return n; });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to reset');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const toggleEditMode = (): void => {
+    setEditMode((o) => !o);
+    setSiteDrafts({});
+    setEmpDrafts({});
+  };
 
   const period = report?.period ?? null;
   const finalized = period?.status === 'finalized';
@@ -686,6 +919,18 @@ export function SalarySheetPage() {
             </SelectContent>
           </Select>
           {report?.exists && (
+            <Button
+              variant={editMode ? 'default' : 'outline'}
+              size="sm"
+              onClick={toggleEditMode}
+              className={cn(editMode && 'brand-gradient font-semibold text-white')}
+            >
+              {editMode
+                ? <><Eye size={14} /> Done</>
+                : <><PencilLine size={14} /> Edit</>}
+            </Button>
+          )}
+          {report?.exists && (
             <Button variant="outline" size="sm" onClick={exportCsv}>
               <FileSpreadsheet size={14} /> CSV
             </Button>
@@ -724,6 +969,18 @@ export function SalarySheetPage() {
         />
       ) : (
         <>
+          {/* edit-mode banner */}
+          {editMode && (
+            <p className="flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-2.5 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+              <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+              <span>
+                <b>Edit mode</b> — pick the trade from the dropdown, override hours / rate / gross / advance / deduction.
+                Saved values <b>overwrite the stored data</b> and are protected from automatic recalculation
+                (attendance edits will no longer change them). Use the ↺ button to return an employee to automatic pricing.
+              </span>
+            </p>
+          )}
+
           {/* summary cards */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <StatCard index={0} icon={<Users size={12} />} label="Employees"
@@ -748,8 +1005,18 @@ export function SalarySheetPage() {
           ) : (
             <div className="space-y-4">
               {report.sites.map((g, i) => (
-                <SiteGroup key={`${g.site_id ?? 'none'}`} group={g} index={i}
-                  onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })} />
+                <SiteGroup
+                  key={`${g.site_id ?? 'none'}`}
+                  group={g}
+                  index={i}
+                  editMode={editMode}
+                  peIdOf={peIdOf}
+                  siteDraftOf={siteDraftOf}
+                  onSiteDraftChange={onSiteDraftChange}
+                  onSaveSite={(peId, row, draft) => { void onSaveSite(peId, row, draft); }}
+                  busyKey={busyKey}
+                  onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
+                />
               ))}
             </div>
           )}
@@ -778,55 +1045,149 @@ export function SalarySheetPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {report.employees.map((e, i) => (
-                    <TableRow key={e.id} className={e.payment_status === 'paid' ? 'opacity-80' : undefined}>
-                      <TableCell className="text-muted-foreground">{i + 1}</TableCell>
-                      <TableCell>
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium">{e.full_name}</p>
-                          <p className="truncate font-mono text-[10px] text-muted-foreground">{e.employee_code}</p>
-                        </div>
-                      </TableCell>
-                      <TableCell className="hidden text-xs md:table-cell">{e.trade_name ?? <span className="text-amber-500">no trade</span>}</TableCell>
-                      <TableCell className="text-right font-mono text-sm">{fmtHrs(e.total_hours)}</TableCell>
-                      <TableCell className="text-right font-mono text-sm font-semibold">AED {fmtMoney(e.gross_salary)}</TableCell>
-                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(e.advance)}</TableCell>
-                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(e.deduction)}</TableCell>
-                      <TableCell className="text-right font-mono text-sm font-semibold text-brand">AED {fmtMoney(e.net_salary)}</TableCell>
-                      <TableCell>
-                        {e.payment_status === 'paid' ? (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-500"
-                            title={`Paid ${e.paid_at ? fmtDateTime(e.paid_at) : ''}${e.paid_by_name ? ` by ${e.paid_by_name}` : ''}`}>
-                            <BadgeCheck size={11} /> Paid
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                            Unpaid
-                          </span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          <Button
-                            variant="ghost" size="icon" className="size-8"
-                            title={e.payment_status === 'paid' ? 'Paid — protected' : 'Adjust advance / deduction'}
-                            disabled={e.payment_status === 'paid'}
-                            onClick={() => setAdjustTarget(e)}
-                          >
-                            <PencilLine size={14} />
-                          </Button>
-                          <Button
-                            variant="ghost" size="icon" className="size-8 text-emerald-500 hover:text-emerald-400"
-                            title={finalized ? 'Mark salary paid' : 'Finalize the payroll first'}
-                            disabled={!finalized || e.payment_status === 'paid'}
-                            onClick={() => setPayTarget(e)}
-                          >
-                            <BadgeCheck size={14} />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {report.employees.map((e, i) => {
+                    const draft = empDraftOf(e);
+                    const canEdit = editMode && e.payment_status !== 'paid' && e.status !== 'deleted';
+                    const busy = busyKey === `emp:${e.id}`;
+                    const advNum = Number.isFinite(Number(draft.advance)) ? Number(draft.advance) : e.advance;
+                    const dedNum = Number.isFinite(Number(draft.deduction)) ? Number(draft.deduction) : e.deduction;
+                    const draftNet = Math.round((e.gross_salary - advNum - dedNum) * 100) / 100;
+                    return (
+                      <TableRow key={e.id} className={cn(
+                        e.payment_status === 'paid' && 'opacity-80',
+                        editMode && e.manually_edited && 'bg-amber-500/[0.04]',
+                      )}>
+                        <TableCell className="text-muted-foreground">{i + 1}</TableCell>
+                        <TableCell>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">
+                              {e.full_name}
+                              {e.manually_edited && (
+                                <span className="ml-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 align-middle text-[9px] font-semibold uppercase tracking-wide text-amber-500">
+                                  manual
+                                </span>
+                              )}
+                            </p>
+                            <p className="truncate font-mono text-[10px] text-muted-foreground">{e.employee_code}</p>
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden md:table-cell">
+                          {canEdit ? (
+                            <Select
+                              value={draft.trade}
+                              onValueChange={(v) => setEmpDrafts((prev) => ({
+                                ...prev,
+                                [e.id]: { ...draft, trade: v },
+                              }))}
+                            >
+                              <SelectTrigger className="h-8 w-40 bg-card text-xs" aria-label={`Trade of ${e.full_name}`}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value={NO_TRADE}>No trade</SelectItem>
+                                {tradeOptions.map((t) => (
+                                  <SelectItem key={t.id} value={t.id}>
+                                    {t.name}{t.is_active ? '' : ' (inactive)'}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <span className="text-xs">{e.trade_name ?? <span className="text-amber-500">no trade</span>}</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm">{fmtHrs(e.total_hours)}</TableCell>
+                        <TableCell className="text-right font-mono text-sm font-semibold">AED {fmtMoney(e.gross_salary)}</TableCell>
+                        <TableCell className="text-right">
+                          {canEdit ? (
+                            <Input
+                              type="number" min={0} step="0.01" inputMode="decimal"
+                              className="h-8 w-24 border-border/70 bg-card text-right font-mono text-sm"
+                              value={draft.advance}
+                              onChange={(ev) => setEmpDrafts((prev) => ({
+                                ...prev,
+                                [e.id]: { ...draft, advance: ev.target.value },
+                              }))}
+                              aria-label={`Advance of ${e.full_name}`}
+                            />
+                          ) : (
+                            <span className="font-mono text-sm">AED {fmtMoney(e.advance)}</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {canEdit ? (
+                            <Input
+                              type="number" min={0} step="0.01" inputMode="decimal"
+                              className="h-8 w-24 border-border/70 bg-card text-right font-mono text-sm"
+                              value={draft.deduction}
+                              onChange={(ev) => setEmpDrafts((prev) => ({
+                                ...prev,
+                                [e.id]: { ...draft, deduction: ev.target.value },
+                              }))}
+                              aria-label={`Deduction of ${e.full_name}`}
+                            />
+                          ) : (
+                            <span className="font-mono text-sm">AED {fmtMoney(e.deduction)}</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm font-semibold text-brand">
+                          AED {fmtMoney(editMode && e.payment_status !== 'paid' ? draftNet : e.net_salary)}
+                        </TableCell>
+                        <TableCell>
+                          {e.payment_status === 'paid' ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-500"
+                              title={`Paid ${e.paid_at ? fmtDateTime(e.paid_at) : ''}${e.paid_by_name ? ` by ${e.paid_by_name}` : ''}`}>
+                              <BadgeCheck size={11} /> Paid
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                              Unpaid
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex justify-end gap-1">
+                            {canEdit && (
+                              <Button
+                                variant="outline" size="icon" className="size-8 text-emerald-500 hover:text-emerald-400"
+                                disabled={busy}
+                                title="Save trade / advance / deduction (the sheet record wins)"
+                                onClick={() => { void onSaveEmployee(e, draft); }}
+                              >
+                                {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                              </Button>
+                            )}
+                            {editMode && e.manually_edited && (
+                              <Button
+                                variant="ghost" size="icon" className="size-8"
+                                disabled={busy || finalized || e.payment_status === 'paid'}
+                                title={finalized ? 'Reopen the payroll first' : 'Return to automatic calculation'}
+                                onClick={() => { void onResetAuto(e); }}
+                              >
+                                <RotateCcw size={14} />
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost" size="icon" className="size-8"
+                              title={e.payment_status === 'paid' ? 'Paid — protected' : 'Adjust advance / deduction'}
+                              disabled={e.payment_status === 'paid'}
+                              onClick={() => setAdjustTarget(e)}
+                            >
+                              <PencilLine size={14} />
+                            </Button>
+                            <Button
+                              variant="ghost" size="icon" className="size-8 text-emerald-500 hover:text-emerald-400"
+                              title={finalized ? 'Mark salary paid' : 'Finalize the payroll first'}
+                              disabled={!finalized || e.payment_status === 'paid'}
+                              onClick={() => setPayTarget(e)}
+                            >
+                              <BadgeCheck size={14} />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>

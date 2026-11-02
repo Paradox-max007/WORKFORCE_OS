@@ -374,7 +374,8 @@ export interface UniformEntryUpdate {
 // ============================================================================
 
 export type SalaryRole = 'standard' | 'team_leader' | 'supervisor';
-export type ExperienceTier = 'below_threshold' | 'qualified';
+/** 'manual' marks a salary line created by a Salary Sheet manual edit */
+export type ExperienceTier = 'below_threshold' | 'qualified' | 'manual';
 
 export const SALARY_ROLES: { value: SalaryRole; label: string }[] = [
   { value: 'standard', label: 'Standard' },
@@ -386,7 +387,6 @@ export const EXPERIENCE_TIERS: { value: ExperienceTier; label: string }[] = [
   { value: 'below_threshold', label: 'Below threshold' },
   { value: 'qualified', label: 'Qualified' },
 ];
-
 /** Hours at which an employee qualifies for the experienced rate (lifetime) */
 export const SALARY_THRESHOLD_HOURS = 1000;
 
@@ -512,6 +512,8 @@ export interface PayrollEmployeeSiteVM {
   supervisor_hours: number;
   gross_salary: number;
   has_missing_rate: boolean;
+  /** true → hand-edited in the Salary Sheet; recalculation never touches it */
+  manually_edited?: boolean;
   lines: PayrollSalaryLineVM[];
 }
 
@@ -546,6 +548,8 @@ export interface PayrollEmployeeVM {
   paid_by: string | null;
   paid_by_name: string | null;
   notes: string | null;
+  /** true → hand-edited in the Salary Sheet; recalculation never touches it */
+  manually_edited?: boolean;
   sites: PayrollEmployeeSiteVM[];
 }
 
@@ -596,6 +600,29 @@ export interface PayrollAdjustmentInput {
   advance: number;
   deduction: number;
   notes: string | null;
+}
+
+/** One manually overridden employee × site row of the Salary Sheet */
+export interface SalarySheetSiteUpdate {
+  /** null → the "No site" row */
+  site_id: string | null;
+  total_hours: number;
+  hourly_rate: number | null;
+  gross_salary: number;
+}
+
+/** Salary Sheet edit-mode save. THE SHEET RECORD HAS PRIORITY: manual site
+ *  values overwrite the calculated data and are preserved on recalculation;
+ *  a trade picked here overwrites the employee's stored trade. */
+export interface SalarySheetRowUpdate {
+  payroll_employee_id: string;
+  /** present → overwrite the stored trade (null = no trade) */
+  trade_id?: string | null;
+  advance?: number;
+  deduction?: number;
+  notes?: string | null;
+  /** manual site-row overrides; any entry freezes the settlement */
+  sites?: SalarySheetSiteUpdate[];
 }
 
 // ============================================================================

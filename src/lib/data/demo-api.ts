@@ -24,6 +24,7 @@ import {
   type Profile,
   type SalaryEligibility,
   type SalarySheetReport,
+  type SalarySheetRowUpdate,
   type SalaryRole,
   type Site,
   type SiteTransfer,
@@ -53,6 +54,7 @@ import {
 } from './demo-store';
 import {
   applyAssignment,
+  applySalarySheetRow,
   applyTradeRates,
   assignmentHistoryOf,
   buildSalarySheet,
@@ -61,6 +63,7 @@ import {
   localTodayYMD,
   rateHistoryOf,
   refreshPayrollPeriod,
+  resetPayrollEmployeeAuto,
   round2,
   tradesWithRates,
 } from './demo-salary';
@@ -1158,7 +1161,9 @@ export const demoApi = {
       db.tradeRates.push({
         id: uid(), trade_id: trade.id, salary_role: r.salary_role,
         experience_tier: r.experience_tier, hourly_rate: round2(r.hourly_rate),
-        effective_from: localTodayYMD(), effective_to: null,
+        // the FIRST rate set covers all history (mirrors create_trade RPC) —
+        // past attendance of assigned employees finds a rate immediately
+        effective_from: '1970-01-01', effective_to: null,
         created_by: me?.id ?? null, created_at: nowISO(),
       });
     });
@@ -1289,6 +1294,21 @@ export const demoApi = {
       details: `Reopened: ${reason.trim()} — previous snapshot: ${totals}`,
       created_at: nowISO(),
     });
+    saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
+  /** Salary Sheet edit-mode save — the sheet record has priority (mirrors
+   *  update_salary_sheet_row RPC). */
+  async updateSalarySheetRow(input: SalarySheetRowUpdate): Promise<void> {
+    const me = currentProfile();
+    applySalarySheetRow(db, input, me?.id ?? null, me?.name ?? null, uid);
+    saveAndEmit(['payroll_period', 'payroll_employee', 'employee', 'employee_salary_assignment', 'trades']);
+  },
+
+  /** Return a hand-edited settlement to automatic calculation (draft only). */
+  async resetPayrollEmployeeAuto(payrollEmployeeId: string): Promise<void> {
+    const me = currentProfile();
+    resetPayrollEmployeeAuto(db, payrollEmployeeId, me?.id ?? null, me?.name ?? null, uid);
     saveAndEmit(['payroll_period', 'payroll_employee']);
   },
 

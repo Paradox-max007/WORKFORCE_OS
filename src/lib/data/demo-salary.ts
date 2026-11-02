@@ -28,6 +28,7 @@ import type {
   SalaryEligibility,
   SalaryRole,
   SalarySheetReport,
+  SalarySheetRowUpdate,
   SalarySheetSiteGroup,
   SalarySheetTotals,
   Trade,
@@ -211,9 +212,20 @@ export interface PayrollCalc {
   closing_lifetime_hours: number;
   unrated_hours: number;
   unassigned_hours: number;
+  /** site key (site id or '__none__') → unassigned hours worked at that site */
+  unassigned_sites: Map<string, number>;
+  /** site key → unrated hours (trade but no effective rate) at that site */
+  unrated_sites: Map<string, number>;
   gross_salary: number;
   lines: PayrollSalaryLineVM[];
 }
+
+const siteKeyOf = (siteId: string | null): string => siteId ?? '__none__';
+
+const addToSiteMap = (map: Map<string, number>, siteId: string | null, hours: number): void => {
+  const key = siteKeyOf(siteId);
+  map.set(key, round2((map.get(key) ?? 0) + hours));
+};
 
 export const calcEmployeePayroll = (
   database: DemoDB, employeeId: string, year: number, month: number,
@@ -239,6 +251,8 @@ export const calcEmployeePayroll = (
   let closingLifetime = 0;
   let unrated = 0;
   let unassigned = 0;
+  const unassignedSites = new Map<string, number>();
+  const unratedSites = new Map<string, number>();
   let gross = 0;
   const lines: PayrollSalaryLineVM[] = [];
 
@@ -271,16 +285,19 @@ export const calcEmployeePayroll = (
     totalHours = round2(totalHours + hours);
     closingLifetime = cum;
 
-    if (tradeId == null) {
-      unassigned = round2(unassigned + hours);
-      return;
-    }
-    const tradeName = database.trades.find((t) => t.id === tradeId)?.name ?? 'Unknown trade';
     const siteId = getEmployeeSiteForDate(employeeId, a.date, {
       transfers: database.siteTransfers,
       records: siteIndex,
       currentSiteId: emp.current_site_id ?? null,
     });
+
+    if (tradeId == null) {
+      unassigned = round2(unassigned + hours);
+      // no trade: the hours still belong to the site where they were worked
+      addToSiteMap(unassignedSites, siteId, hours);
+      return;
+    }
+    const tradeName = database.trades.find((t) => t.id === tradeId)?.name ?? 'Unknown trade';
     const siteName = siteId
       ? database.sites.find((s) => s.id === siteId)?.name ?? 'No site'
       : 'No site';
@@ -290,6 +307,7 @@ export const calcEmployeePayroll = (
       const rate = rateOnDate(database, tradeId, role, tier, a.date);
       if (rate == null) {
         unrated = round2(unrated + h);
+        addToSiteMap(unratedSites, siteId, h);
         return;
       }
       const amount = round2(h * rate);
@@ -320,6 +338,8 @@ export const calcEmployeePayroll = (
     closing_lifetime_hours: round2(closingLifetime),
     unrated_hours: round2(unrated),
     unassigned_hours: round2(unassigned),
+    unassigned_sites: unassignedSites,
+    unrated_sites: unratedSites,
     gross_salary: gross,
     lines,
   };
@@ -358,6 +378,7 @@ export interface DemoPayrollEmployeeRow {
   notes: string | null;
   trade_id_snapshot: string | null;
   salary_role_snapshot: SalaryRole;
+  manually_edited: boolean;
 }
 
 export interface DemoPayrollSiteRow {
@@ -373,6 +394,7 @@ export interface DemoPayrollSiteRow {
   supervisor_hours: number;
   gross_salary: number;
   has_missing_rate: boolean;
+  manually_edited: boolean;
 }
 
 export interface DemoPayrollLineRow {
@@ -401,6 +423,13 @@ export const refreshPayrollEmployee = (
   const emp = database.employees.find((e) => e.id === employeeId && e.status !== 'deleted');
   if (!emp) return;
 
+  // THE SHEET RECORD HAS PRIORITY: a settlement edited by hand in the
+  // Salary Sheet is never recalculated until resetPayrollEmployeeAuto.
+  const existing = database.payrollEmployees.find(
+    (x) => x.payroll_period_id === period.id && x.employee_id === employeeId,
+  );
+  if (existing?.manually_edited) return;
+
   const calc = calcEmployeePayroll(database, employeeId, period.year, period.month);
 
   // aggregate lines into site buckets (site-key = id or '__none__')
@@ -412,47 +441,49 @@ export const refreshPayrollEmployee = (
   }
   const buckets = new Map<string, SiteAgg>();
   const keyOf = (siteId: string | null): string => siteId ?? '__none__';
-  calc.lines.forEach((l) => {
-    const key = keyOf(l.site_id);
+  const bucketOf = (siteId: string | null): SiteAgg => {
+    const key = keyOf(siteId);
     let agg = buckets.get(key);
     if (!agg) {
       agg = {
-        site_id: l.site_id, site_name: l.site_name,
+        site_id: siteId,
+        site_name: siteId
+          ? database.sites.find((s) => s.id === siteId)?.name ?? 'No site'
+          : 'No site',
         total_hours: 0, below_threshold_hours: 0, qualified_hours: 0,
         standard_hours: 0, team_leader_hours: 0, supervisor_hours: 0,
         gross_salary: 0, has_missing_rate: false,
       };
       buckets.set(key, agg);
     }
+    return agg;
+  };
+  calc.lines.forEach((l) => {
+    const agg = bucketOf(l.site_id);
     agg.total_hours = round2(agg.total_hours + l.hours);
     if (l.experience_tier === 'below_threshold') agg.below_threshold_hours = round2(agg.below_threshold_hours + l.hours);
-    else agg.qualified_hours = round2(agg.qualified_hours + l.hours);
+    else if (l.experience_tier === 'qualified') agg.qualified_hours = round2(agg.qualified_hours + l.hours);
     if (l.salary_role === 'standard') agg.standard_hours = round2(agg.standard_hours + l.hours);
     else if (l.salary_role === 'team_leader') agg.team_leader_hours = round2(agg.team_leader_hours + l.hours);
     else agg.supervisor_hours = round2(agg.supervisor_hours + l.hours);
     agg.gross_salary = round2(agg.gross_salary + l.gross_amount);
   });
 
-  // unassigned / unrated hours still appear under "No site" so hours reconcile
-  if (calc.unassigned_hours > 0 || calc.unrated_hours > 0) {
-    let agg = buckets.get('__none__');
-    if (!agg) {
-      agg = {
-        site_id: null, site_name: 'No site',
-        total_hours: 0, below_threshold_hours: 0, qualified_hours: 0,
-        standard_hours: 0, team_leader_hours: 0, supervisor_hours: 0,
-        gross_salary: 0, has_missing_rate: false,
-      };
-      buckets.set('__none__', agg);
-    }
-    agg.total_hours = round2(agg.total_hours + calc.unassigned_hours + calc.unrated_hours);
-    if (calc.unrated_hours > 0) agg.has_missing_rate = true;
-  }
+  // unpriced hours (no trade / no effective rate) belong to the site where
+  // they were WORKED — an employee who moved mid-month appears at every
+  // site they worked at, with the hours of that site
+  calc.unassigned_sites.forEach((hours, key) => {
+    const agg = bucketOf(key === '__none__' ? null : key);
+    agg.total_hours = round2(agg.total_hours + hours);
+  });
+  calc.unrated_sites.forEach((hours, key) => {
+    const agg = bucketOf(key === '__none__' ? null : key);
+    agg.total_hours = round2(agg.total_hours + hours);
+    agg.has_missing_rate = true;
+  });
 
   // upsert the settlement row (manually entered adjustments preserved)
-  let pe = database.payrollEmployees.find(
-    (x) => x.payroll_period_id === period.id && x.employee_id === employeeId,
-  );
+  let pe = existing;
   if (!pe) {
     pe = {
       id: uidFn(),
@@ -473,6 +504,7 @@ export const refreshPayrollEmployee = (
       notes: null,
       trade_id_snapshot: emp.trade_id ?? null,
       salary_role_snapshot: emp.salary_role ?? 'standard',
+      manually_edited: false,
     };
     database.payrollEmployees.push(pe);
   } else {
@@ -505,6 +537,7 @@ export const refreshPayrollEmployee = (
       supervisor_hours: agg.supervisor_hours,
       gross_salary: agg.gross_salary,
       has_missing_rate: agg.has_missing_rate,
+      manually_edited: false,
     });
   });
 
@@ -645,6 +678,7 @@ export const buildSalarySheet = (
         supervisor_hours: siteRow.supervisor_hours,
         gross_salary: siteRow.gross_salary,
         has_missing_rate: siteRow.has_missing_rate,
+        manually_edited: siteRow.manually_edited,
         lines,
         employee_id: pe.employee_id,
         full_name: emp?.full_name ?? 'Unknown',
@@ -685,6 +719,7 @@ export const buildSalarySheet = (
         supervisor_hours: s.supervisor_hours,
         gross_salary: s.gross_salary,
         has_missing_rate: s.has_missing_rate,
+        manually_edited: s.manually_edited,
         lines: database.payrollLines
           .filter((l) => l.payroll_employee_id === pe.id
             && (l.site_id ?? '__none__') === (s.site_id ?? '__none__'))
@@ -730,6 +765,7 @@ export const buildSalarySheet = (
         ? database.profiles.find((p) => p.id === pe.paid_by)?.name ?? null
         : null,
       notes: pe.notes,
+      manually_edited: pe.manually_edited,
       sites: sitesVM,
     };
   });
@@ -811,12 +847,21 @@ export const applyTradeRates = (
   createdBy: string | null,
 ): void => {
   rates.forEach((r) => {
+    // the FIRST rate of a cell covers all history (mirrors update_trade_rates
+    // — "adding the missing rate" prices past months too)
+    const hasEarlier = database.tradeRates.some((x) =>
+      x.trade_id === tradeId
+      && x.salary_role === r.salary_role
+      && x.experience_tier === r.experience_tier
+      && x.effective_from < effectiveDate);
+    const eff = hasEarlier ? effectiveDate : '1970-01-01';
+
     // a rate scheduled for exactly this date is replaced by the new one
     database.tradeRates = database.tradeRates.filter((x) => !(
       x.trade_id === tradeId
       && x.salary_role === r.salary_role
       && x.experience_tier === r.experience_tier
-      && x.effective_from === effectiveDate
+      && x.effective_from === eff
     ));
 
     // a strictly future-scheduled rate caps the new period
@@ -839,9 +884,9 @@ export const applyTradeRates = (
       if (x.trade_id === tradeId
         && x.salary_role === r.salary_role
         && x.experience_tier === r.experience_tier
-        && x.effective_from < effectiveDate
-        && (x.effective_to == null || x.effective_to >= effectiveDate)) {
-        const [y, m, d] = effectiveDate.split('-').map(Number);
+        && x.effective_from < eff
+        && (x.effective_to == null || x.effective_to >= eff)) {
+        const [y, m, d] = eff.split('-').map(Number);
         const dt = new Date(y, m - 1, d - 1);
         x.effective_to = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
       }
@@ -853,7 +898,7 @@ export const applyTradeRates = (
       salary_role: r.salary_role,
       experience_tier: r.experience_tier,
       hourly_rate: round2(r.hourly_rate),
-      effective_from: effectiveDate,
+      effective_from: eff,
       effective_to: cap,
       created_by: createdBy,
       created_at: new Date().toISOString(),
@@ -887,5 +932,172 @@ export const tradesWithRates = (
   [...database.trades]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((t) => ({ ...t, current_rates: currentRatesOf(database, t.id) }));
+
+// ---------------------------------------------------------------------------
+// SALARY SHEET EDITING (mirrors update_salary_sheet_row / reset_payroll_
+// employee_auto). THE SHEET RECORD HAS PRIORITY: manual values overwrite the
+// calculated data and survive every recalculation; a trade picked in the
+// sheet overwrites the employee's stored trade + assignment history.
+// ---------------------------------------------------------------------------
+export const applySalarySheetRow = (
+  database: DemoDB,
+  payload: SalarySheetRowUpdate,
+  actorId: string | null,
+  actorName: string | null,
+  uidFn: () => string,
+): void => {
+  const pe = database.payrollEmployees.find((x) => x.id === payload.payroll_employee_id);
+  if (!pe) throw new Error('Payroll employee not found');
+  if (pe.payment_status === 'paid') {
+    throw new Error('This employee is already marked paid — reopen the payroll to correct it');
+  }
+  const period = database.payrollPeriods.find((p) => p.id === pe.payroll_period_id);
+  if (!period) throw new Error('Payroll period not found');
+  const monthStartDate = monthStart(period.year, period.month);
+  const emp = database.employees.find((e) => e.id === pe.employee_id);
+  if (!emp) throw new Error('Employee not found');
+  const details: string[] = [];
+  const wasManual = pe.manually_edited;
+
+  // 1. trade picked in the sheet → OVERWRITE the stored trade + assignment
+  //    (effective from the 1st of the payroll month — the whole month prices
+  //    at the new trade)
+  let tradeChanged = false;
+  if ('trade_id' in payload) {
+    const newTradeId = payload.trade_id ?? null;
+    if (newTradeId && !database.trades.some((t) => t.id === newTradeId)) {
+      throw new Error('Trade not found');
+    }
+    if ((newTradeId ?? null) !== (emp.trade_id ?? null)) {
+      tradeChanged = true;
+      applyAssignment(database, emp.id, newTradeId, emp.salary_role ?? 'standard', monthStartDate, actorId);
+      emp.trade_id = newTradeId;
+      pe.trade_id_snapshot = newTradeId;
+      details.push(`trade → ${
+        newTradeId ? database.trades.find((t) => t.id === newTradeId)?.name ?? 'unknown' : 'no trade'}`);
+    }
+  }
+
+  // 2. manual site overrides — the sheet record wins
+  if (payload.sites && payload.sites.length > 0) {
+    payload.sites.forEach((s) => {
+      const row = database.payrollSites.find((x) => x.payroll_employee_id === pe.id
+        && (x.site_id ?? null) === (s.site_id ?? null));
+      if (!row) throw new Error('Site row not found for this employee');
+      const hours = round2(s.total_hours);
+      const gross = round2(s.gross_salary);
+      if (!Number.isFinite(hours) || hours < 0 || !Number.isFinite(gross) || gross < 0) {
+        throw new Error('Hours and gross must be 0 or more');
+      }
+      row.total_hours = hours;
+      row.gross_salary = gross;
+      row.has_missing_rate = false;
+      row.manually_edited = true;
+
+      // the site's rate lines collapse into ONE manual line
+      database.payrollLines = database.payrollLines.filter((l) => !(
+        l.payroll_employee_id === pe.id && (l.site_id ?? null) === (s.site_id ?? null)));
+      if (hours > 0) {
+        const rate = s.hourly_rate != null && Number.isFinite(s.hourly_rate)
+          ? round2(s.hourly_rate)
+          : round2(gross / hours);
+        database.payrollLines.push({
+          id: uidFn(),
+          payroll_employee_id: pe.id,
+          site_id: s.site_id ?? null,
+          site_name_snapshot: row.site_name_snapshot,
+          attendance_date: monthStartDate,
+          trade_id: emp.trade_id ?? null,
+          trade_name_snapshot: emp.trade_id
+            ? database.trades.find((t) => t.id === emp.trade_id)?.name ?? 'No trade'
+            : 'No trade',
+          salary_role_snapshot: emp.salary_role ?? 'standard',
+          experience_tier: 'manual',
+          hours,
+          hourly_rate: rate,
+          gross_amount: gross,
+        });
+      }
+    });
+
+    // settlement totals = sum over ALL site rows (manual + automatic)
+    const rows = database.payrollSites.filter((x) => x.payroll_employee_id === pe.id);
+    pe.total_hours = round2(rows.reduce((n, r) => n + r.total_hours, 0));
+    pe.gross_salary = round2(rows.reduce((n, r) => n + r.gross_salary, 0));
+    pe.unrated_hours = 0;
+    pe.unassigned_hours = 0;
+    pe.manually_edited = true;
+    details.push('manual site values');
+  }
+
+  // 3. trade change without manual values → re-price the month automatically
+  if (tradeChanged && !(payload.sites && payload.sites.length > 0)) {
+    if (!wasManual) {
+      refreshPayrollEmployee(database, period, emp.id, uidFn);
+      details.push('recalculated');
+    } else {
+      // manual values exist: keep them, only refresh the trade snapshot
+      pe.trade_id_snapshot = emp.trade_id ?? null;
+      pe.salary_role_snapshot = emp.salary_role ?? 'standard';
+    }
+  }
+
+  // 4. settlement adjustments (advance / deduction / notes)
+  if (payload.advance != null || payload.deduction != null || payload.notes !== undefined) {
+    if (payload.advance != null) {
+      if (!Number.isFinite(payload.advance) || payload.advance < 0) throw new Error('Advance must be 0 or more');
+      pe.advance = round2(payload.advance);
+    }
+    if (payload.deduction != null) {
+      if (!Number.isFinite(payload.deduction) || payload.deduction < 0) throw new Error('Deduction must be 0 or more');
+      pe.deduction = round2(payload.deduction);
+    }
+    if (payload.notes !== undefined) pe.notes = payload.notes?.trim() || null;
+    details.push('settlement');
+  }
+
+  pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction);
+
+  database.payrollAudit.push({
+    id: uidFn(),
+    period_id: period.id,
+    trade_id: null,
+    action: 'manual_edit',
+    actor_id: actorId,
+    actor_name: actorName,
+    details: `Salary sheet row of ${emp.full_name} edited: ${details.join('; ') || 'no changes'}`,
+    created_at: new Date().toISOString(),
+  });
+};
+
+/** Return an employee's settlement to automatic calculation (draft periods). */
+export const resetPayrollEmployeeAuto = (
+  database: DemoDB,
+  payrollEmployeeId: string,
+  actorId: string | null,
+  actorName: string | null,
+  uidFn: () => string,
+): void => {
+  const pe = database.payrollEmployees.find((x) => x.id === payrollEmployeeId);
+  if (!pe) throw new Error('Payroll employee not found');
+  const period = database.payrollPeriods.find((p) => p.id === pe.payroll_period_id);
+  if (!period) throw new Error('Payroll period not found');
+  if (period.status === 'finalized') {
+    throw new Error('Reopen the finalized payroll before resetting to automatic calculation');
+  }
+  pe.manually_edited = false;
+  refreshPayrollEmployee(database, period, pe.employee_id, uidFn);
+  const emp = database.employees.find((e) => e.id === pe.employee_id);
+  database.payrollAudit.push({
+    id: uidFn(),
+    period_id: period.id,
+    trade_id: null,
+    action: 'reset_auto',
+    actor_id: actorId,
+    actor_name: actorName,
+    details: `Salary sheet row of ${emp?.full_name ?? pe.employee_id} returned to automatic calculation`,
+    created_at: new Date().toISOString(),
+  });
+};
 
 export const uidOfPayroll = uidOf;

@@ -43,7 +43,22 @@ export interface MenuDef {
   managed: boolean;
   /** access for admins with no explicit permission row */
   defaultOn: boolean;
+  /** optional group id — grouped menus render under one collapsible parent
+   *  (see MENU_GROUPS). Permissions stay per menu id. */
+  group?: string;
 }
+
+/** Collapsible sidebar groups (e.g. "Salary Details"). The children keep
+ *  their own permission keys — grouping is presentation only. */
+export interface MenuGroupDef {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+}
+
+export const MENU_GROUPS: Record<string, MenuGroupDef> = {
+  salary_details: { id: 'salary_details', label: 'Salary Details', icon: Wallet },
+};
 
 export const MENUS = [
   { id: 'dashboard', label: 'Dashboard', hint: 'Operations overview & stats', icon: LayoutDashboard, managed: false, defaultOn: true },
@@ -52,8 +67,8 @@ export const MENUS = [
   { id: 'camps', label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent, managed: true, defaultOn: false },
   { id: 'attendance', label: 'Attendance', hint: 'Sitewise hours marking — assigned sites only', icon: CalendarCheck, managed: true, defaultOn: false },
   { id: 'working_hours', label: 'Working Hours', hint: 'Total hours & monthly history per employee', icon: Clock, managed: true, defaultOn: false },
-  { id: 'salary_sheet', label: 'Salary Sheet', hint: 'Monthly payroll — sitewise salary, advances & payments', icon: Wallet, managed: true, defaultOn: false },
-  { id: 'trade_management', label: 'Trade Management', hint: 'Trades & effective-dated hourly rates', icon: Wrench, managed: true, defaultOn: false },
+  { id: 'salary_sheet', label: 'Salary Sheet', hint: 'Monthly payroll — sitewise salary, advances & payments', icon: Wallet, managed: true, defaultOn: false, group: 'salary_details' },
+  { id: 'trade_management', label: 'Trade Management', hint: 'Trades & effective-dated hourly rates', icon: Wrench, managed: true, defaultOn: false, group: 'salary_details' },
   { id: 'uniform_registry', label: 'Uniform Registry', hint: 'Uniform tokens & renewals', icon: Shirt, managed: true, defaultOn: true },
   { id: 'leave_requests', label: 'Leave Requests', hint: 'Leave applications & review', icon: FileWarning, managed: true, defaultOn: false },
   { id: 'cancellation_requests', label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban, managed: true, defaultOn: false },
@@ -64,6 +79,33 @@ export const MENUS = [
 
 /** Every sidebar menu id. */
 export type MenuId = (typeof MENUS)[number]['id'];
+
+/** Ordered render list: menus and group blocks interleaved (a group replaces
+ *  its children's slots — children render nested under the group header). */
+export interface MenuEntry {
+  /** single menu */
+  menu?: MenuDef;
+  /** grouped menus (rendered under one collapsible parent) */
+  group?: MenuGroupDef;
+  items: MenuDef[];
+}
+
+export function menuRenderList(menus: readonly MenuDef[]): MenuEntry[] {
+  const entries: MenuEntry[] = [];
+  const seen = new Set<string>();
+  menus.forEach((m) => {
+    if (m.group && !seen.has(m.group)) {
+      seen.add(m.group);
+      const group = MENU_GROUPS[m.group];
+      if (group) {
+        entries.push({ group, items: menus.filter((x) => x.group === m.group) });
+        return;
+      }
+    }
+    if (!m.group || !MENU_GROUPS[m.group]) entries.push({ menu: m, items: [m] });
+  });
+  return entries;
+}
 
 /** Permission-managed menu ids (the super-admin toggle list). */
 export type MenuKey = Extract<(typeof MENUS)[number], { managed: true }>['id'];

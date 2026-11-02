@@ -51,6 +51,7 @@ const ROLE_LABEL: Record<SalaryRole, string> = {
 const TIER_LABEL: Record<ExperienceTier, string> = {
   below_threshold: 'Below threshold',
   qualified: 'Qualified',
+  manual: 'Manual',
 };
 
 const rateKey = (role: SalaryRole, tier: ExperienceTier): string => `${role}:${tier}`;

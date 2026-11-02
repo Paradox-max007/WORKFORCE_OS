@@ -30,6 +30,7 @@ import {
   type RealtimeTable,
   type SalaryEligibility,
   type SalarySheetReport,
+  type SalarySheetRowUpdate,
   type SalaryRole,
   type Site,
   type SiteTransfer,
@@ -931,6 +932,21 @@ export const prodApi = {
       p_advance: input.advance,
       p_deduction: input.deduction,
       p_notes: input.notes,
+    });
+    assertOk(error);
+  },
+
+  /** Salary Sheet edit-mode save — the sheet record has priority (see
+   *  update_salary_sheet_row RPC in 20261103b_salary_sheet_edit.sql). */
+  async updateSalarySheetRow(input: SalarySheetRowUpdate): Promise<void> {
+    const { error } = await sb().rpc('update_salary_sheet_row', { p_payload: input });
+    assertOk(error);
+  },
+
+  /** Return a hand-edited settlement to automatic calculation (draft only). */
+  async resetPayrollEmployeeAuto(payrollEmployeeId: string): Promise<void> {
+    const { error } = await sb().rpc('reset_payroll_employee_auto', {
+      p_payroll_employee_id: payrollEmployeeId,
     });
     assertOk(error);
   },

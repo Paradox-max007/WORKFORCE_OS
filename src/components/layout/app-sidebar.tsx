@@ -6,7 +6,7 @@
 
 import { motion } from 'framer-motion';
 import {
-  Bell, ChevronLeft, LogOut, Moon, Sun,
+  Bell, ChevronDown, ChevronLeft, ChevronRight, LogOut, Moon, Sun,
 } from 'lucide-react';
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
@@ -15,7 +15,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTr
 import { cn } from '@/lib/utils';
 import { dataApi } from '@/lib/data';
 import { initials, fmtTimeAgo } from '@/lib/format';
-import { MENUS, menuAllows } from '@/lib/menus';
+import { MENUS, MENU_GROUPS, menuAllows, menuRenderList, type MenuDef } from '@/lib/menus';
 import type { AccentColor, Profile } from '@/lib/types';
 import { useAppStore, type AppView } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -50,6 +50,111 @@ function useUnreadCount(user: Profile | null): number {
      
   }, [user?.id, version]);
   return count;
+}
+
+// ---------------------------------------------------------------------------
+// Nav button (single menu entry — top level or inside a group)
+// ---------------------------------------------------------------------------
+function NavButton({ item, active, collapsed, onNav, unread }: {
+  item: MenuDef;
+  active: boolean;
+  collapsed: boolean;
+  onNav: (id: AppView) => void;
+  unread: number;
+}) {
+  const showBadge = item.id === 'notifications' && unread > 0;
+  return (
+    <button
+      onClick={() => onNav(item.id)}
+      title={collapsed ? item.label : undefined}
+      className={cn(
+        'group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
+        active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
+        collapsed && 'justify-center px-0 py-3',
+      )}
+    >
+      {active && (
+        <motion.span
+          layoutId="sidebar-active"
+          transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+          className="absolute inset-0 rounded-xl border border-brand/25 bg-brand/10"
+        />
+      )}
+      <span className="relative z-10 flex items-center">
+        <item.icon className={cn('size-[18px] transition-colors', active ? 'text-brand' : 'group-hover:text-brand')} />
+        {showBadge && (
+          <span
+            className={cn(
+              'absolute -right-2.5 -top-2 rounded-full bg-rose-500 px-1.5 text-[10px] font-bold text-white shadow',
+              collapsed && 'right-[-10px]',
+            )}
+          >
+            {unread > 9 ? '9+' : unread}
+          </span>
+        )}
+      </span>
+      {!collapsed && <span className="relative z-10 truncate">{item.label}</span>}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Collapsible menu group (e.g. "Salary Details")
+// ---------------------------------------------------------------------------
+function NavGroup({ group, items, collapsed, onNav, currentView, unread }: {
+  group: (typeof MENU_GROUPS)[string];
+  items: MenuDef[];
+  collapsed: boolean;
+  onNav: (id: AppView) => void;
+  currentView: AppView;
+  unread: number;
+}) {
+  const containsActive = items.some((x) => x.id === currentView);
+  const [open, setOpen] = useState(containsActive);
+
+  useEffect(() => {
+    if (containsActive) setOpen(true);
+  }, [containsActive]);
+
+  // rail (collapsed) mode: no room for a dropdown — children stay reachable
+  if (collapsed) {
+    return (
+      <>
+        {items.map((item) => (
+          <NavButton key={item.id} item={item} active={currentView === item.id}
+            collapsed onNav={onNav} unread={unread} />
+        ))}
+      </>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className={cn(
+          'group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
+          containsActive ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
+        )}
+      >
+        <group.icon className={cn('size-[18px] transition-colors', containsActive ? 'text-brand' : 'group-hover:text-brand')} />
+        <span className="flex-1 truncate text-left">{group.label}</span>
+        {open
+          ? <ChevronDown size={14} className="shrink-0 text-muted-foreground" />
+          : <ChevronRight size={14} className="shrink-0 text-muted-foreground" />}
+      </button>
+      {open && (
+        <div className="ml-4 space-y-0.5 border-l border-border/60 pl-2">
+          {items.map((item) => (
+            <NavButton key={item.id} item={item} active={currentView === item.id}
+              collapsed={false} onNav={onNav} unread={unread} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -129,44 +234,29 @@ function SidebarContent({
 
       {/* Nav — scrolls independently ONLY when the menu list outgrows the viewport */}
       <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 py-2">
-        {visibleItems.map((item) => {
-          const active = currentView === item.id;
-          const showBadge = item.id === 'notifications' && unread > 0;
-          return (
-            <button
-              key={item.id}
-              onClick={() => handleNav(item.id)}
-              title={collapsed ? item.label : undefined}
-              className={cn(
-                'group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
-                active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
-                collapsed && 'justify-center px-0 py-3',
-              )}
-            >
-              {active && (
-                <motion.span
-                  layoutId="sidebar-active"
-                  transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-                  className="absolute inset-0 rounded-xl border border-brand/25 bg-brand/10"
-                />
-              )}
-              <span className="relative z-10 flex items-center">
-                <item.icon className={cn('size-[18px] transition-colors', active ? 'text-brand' : 'group-hover:text-brand')} />
-                {showBadge && (
-                  <span
-                    className={cn(
-                      'absolute -right-2.5 -top-2 rounded-full bg-rose-500 px-1.5 text-[10px] font-bold text-white shadow',
-                      collapsed && 'right-[-10px]',
-                    )}
-                  >
-                    {unread > 9 ? '9+' : unread}
-                  </span>
-                )}
-              </span>
-              {!collapsed && <span className="relative z-10 truncate">{item.label}</span>}
-            </button>
-          );
-        })}
+        {menuRenderList(visibleItems).map((entry) =>
+          entry.group ? (
+            <NavGroup
+              key={entry.group.id}
+              group={entry.group}
+              items={entry.items as MenuDef[]}
+              collapsed={collapsed}
+              onNav={handleNav}
+              currentView={currentView}
+              unread={unread}
+            />
+          ) : (
+            entry.menu && (
+              <NavButton
+                key={entry.menu.id}
+                item={entry.menu as MenuDef}
+                active={currentView === entry.menu.id}
+                collapsed={collapsed}
+                onNav={handleNav}
+                unread={unread}
+              />
+            )
+          ))}
       </nav>
 
       {/* Latest notification hint */}

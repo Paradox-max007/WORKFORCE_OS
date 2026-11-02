@@ -162,7 +162,9 @@ create table if not exists public.payroll_audit_log (
   actor_id    uuid,
   actor_name  text,
   details     text,
-  created_at  timestamptz not null default now()
+  -- clock_timestamp(): events logged inside one transaction still order
+  -- chronologically (now() is transaction-stable and would tie)
+  created_at  timestamptz not null default clock_timestamp()
 );
 create index if not exists idx_payroll_audit_period on public.payroll_audit_log(period_id, created_at);
 
@@ -174,8 +176,11 @@ create table if not exists public.trade_rate_audit_log (
   actor_id    uuid,
   actor_name  text,
   details     text,
-  created_at  timestamptz not null default now()
+  created_at  timestamptz not null default clock_timestamp()
 );
+-- re-run safety: fix tables created by an earlier partial run of this migration
+alter table public.payroll_audit_log   alter column created_at set default clock_timestamp();
+alter table public.trade_rate_audit_log alter column created_at set default clock_timestamp();
 
 -- ---------------------------------------------------------------------------
 -- 2. NON-OVERLAP GUARDS (triggers — no extension required)
@@ -396,27 +401,34 @@ end; $$;
 
 -- Assignment history for one employee (newest first).
 create or replace function public.get_employee_salary_history(p_employee_id uuid)
-returns jsonb language sql stable
+returns jsonb language plpgsql stable
 security definer set search_path = public
 as $$
-  select coalesce(jsonb_agg(row order by effective_from desc), '[]'::jsonb) from (
-    select jsonb_build_object(
-      'id', a.id,
-      'employee_id', a.employee_id,
-      'employee_name', e.full_name,
-      'trade_id', a.trade_id,
-      'trade_name', t.name,
-      'salary_role', a.salary_role,
-      'effective_from', a.effective_from,
-      'effective_to', a.effective_to,
-      'created_at', a.created_at
-    ) as row
+begin
+  if not public.has_menu_permission('salary_sheet')
+     and not public.has_menu_permission('employees') then
+    raise exception 'Access denied';
+  end if;
+  return (
+    select coalesce(jsonb_agg(
+             jsonb_build_object(
+               'id', a.id,
+               'employee_id', a.employee_id,
+               'employee_name', e.full_name,
+               'trade_id', a.trade_id,
+               'trade_name', t.name,
+               'salary_role', a.salary_role,
+               'effective_from', a.effective_from,
+               'effective_to', a.effective_to,
+               'created_at', a.created_at
+             ) order by a.effective_from desc
+           ), '[]'::jsonb)
     from public.employee_salary_assignment a
     join public.employee e on e.id = a.employee_id
     join public.trades t on t.id = a.trade_id
     where a.employee_id = p_employee_id
-  ) s;
-$$;
+  );
+end; $$;
 
 -- ---------------------------------------------------------------------------
 -- 6. THE CALCULATION ENGINE (single source of truth — frontend never computes)
@@ -449,6 +461,8 @@ declare
   v_unassigned numeric := 0;
   v_gross numeric := 0;
 begin
+  if not public.has_menu_permission('salary_sheet') then raise exception 'Access denied'; end if;
+
   select e.* into emp from public.employee e
   where e.id = p_employee_id and e.status <> 'deleted';
   if emp.id is null then raise exception 'Employee not found'; end if;
@@ -574,6 +588,8 @@ declare
   v_sites jsonb := '{}'::jsonb;   -- coalesced site key → aggregate object
   v_agg jsonb;
 begin
+  if not public.has_menu_permission('salary_sheet') then raise exception 'Access denied'; end if;
+
   select e.*, t.name as trade_name into emp
   from public.employee e left join public.trades t on t.id = e.trade_id
   where e.id = p_employee_id and e.status <> 'deleted';
@@ -596,10 +612,10 @@ begin
     v_agg := jsonb_set(v_agg, '{total_hours}',
       to_jsonb(round(((v_agg->>'total_hours')::numeric + (v_line->>'hours')::numeric), 2)));
     v_tier_hours := (v_line->>'hours')::numeric;
-    v_agg := jsonb_set(v_agg, '{' || (v_line->>'experience_tier') || '_hours}',
-      to_jsonb(round(((v_agg->(v_line->>'experience_tier') || '_hours')::numeric + v_tier_hours), 2)));
+    v_agg := jsonb_set(v_agg, array[(v_line->>'experience_tier') || '_hours'],
+      to_jsonb(round(((v_agg->((v_line->>'experience_tier') || '_hours'))::numeric + v_tier_hours), 2)));
     v_role_hours := (v_agg->((v_line->>'salary_role') || '_hours'))::numeric + v_tier_hours;
-    v_agg := jsonb_set(v_agg, '{' || (v_line->>'salary_role') || '_hours}', to_jsonb(round(v_role_hours, 2)));
+    v_agg := jsonb_set(v_agg, array[(v_line->>'salary_role') || '_hours'], to_jsonb(round(v_role_hours, 2)));
     v_agg := jsonb_set(v_agg, '{gross_salary}',
       to_jsonb(round(((v_agg->>'gross_salary')::numeric + (v_line->>'gross_amount')::numeric), 2)));
     v_sites := jsonb_set(v_sites, array[v_key], v_agg);
@@ -688,10 +704,10 @@ begin
       hours, hourly_rate, gross_amount
     ) values (
       v_pe_id,
-      (v_line->'site_id')::uuid,
+      (v_line->>'site_id')::uuid,
       v_line->>'site_name',
       (v_line->>'date')::date,
-      (v_line->'trade_id')::uuid,
+      (v_line->>'trade_id')::uuid,
       v_line->>'trade_name',
       v_line->>'salary_role',
       v_line->>'experience_tier',
@@ -1027,7 +1043,8 @@ begin
                             'hours', l.hours, 'hourly_rate', l.hourly_rate,
                             'gross_amount', l.gross_amount) order by l.attendance_date), '[]'::jsonb)
                           from public.payroll_salary_line l
-                          where l.payroll_employee_id = pe.id)
+                          where l.payroll_employee_id = pe.id
+                            and (l.site_id is not distinct from s.site_id))
               ) order by s.gross_salary desc), '[]'::jsonb)
               from public.payroll_employee_site s where s.payroll_employee_id = pe.id)
   ) order by e.full_name), '[]'::jsonb) into v_employees
@@ -1060,38 +1077,51 @@ end; $$;
 -- 9. TRADE MANAGEMENT RPCs
 -- ---------------------------------------------------------------------------
 create or replace function public.list_trades()
-returns jsonb language sql stable
+returns jsonb language plpgsql stable
 security definer set search_path = public
 as $$
-  select coalesce(jsonb_agg(jsonb_build_object(
-    'id', t.id, 'name', t.name, 'description', t.description,
-    'is_active', t.is_active, 'created_at', t.created_at, 'updated_at', t.updated_at,
-    'current_rates', (select coalesce(jsonb_agg(jsonb_build_object(
-        'id', r.id, 'trade_id', r.trade_id, 'salary_role', r.salary_role,
-        'experience_tier', r.experience_tier, 'hourly_rate', r.hourly_rate,
-        'effective_from', r.effective_from, 'effective_to', r.effective_to,
-        'created_at', r.created_at) order by r.salary_role, r.experience_tier),
-        '[]'::jsonb)
-      from public.trade_rate_history r
-      where r.trade_id = t.id
-        and r.effective_from <= current_date
-        and (r.effective_to is null or r.effective_to >= current_date))
-  ) order by t.name), '[]'::jsonb)
-  from public.trades t;
-$$;
+begin
+  -- the employee form's trade dropdown needs this for every staff member
+  -- (mirrors the trades_select table policy)
+  if not public.is_staff() then raise exception 'Access denied'; end if;
+  return (
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'id', t.id, 'name', t.name, 'description', t.description,
+      'is_active', t.is_active, 'created_at', t.created_at, 'updated_at', t.updated_at,
+      'current_rates', (select coalesce(jsonb_agg(jsonb_build_object(
+          'id', r.id, 'trade_id', r.trade_id, 'salary_role', r.salary_role,
+          'experience_tier', r.experience_tier, 'hourly_rate', r.hourly_rate,
+          'effective_from', r.effective_from, 'effective_to', r.effective_to,
+          'created_at', r.created_at) order by r.salary_role, r.experience_tier),
+          '[]'::jsonb)
+        from public.trade_rate_history r
+        where r.trade_id = t.id
+          and r.effective_from <= current_date
+          and (r.effective_to is null or r.effective_to >= current_date))
+    ) order by t.name), '[]'::jsonb)
+    from public.trades t
+  );
+end; $$;
 
 create or replace function public.get_trade_rate_history(p_trade_id uuid)
-returns jsonb language sql stable
+returns jsonb language plpgsql stable
 security definer set search_path = public
 as $$
-  select coalesce(jsonb_agg(jsonb_build_object(
-    'id', r.id, 'trade_id', r.trade_id, 'salary_role', r.salary_role,
-    'experience_tier', r.experience_tier, 'hourly_rate', r.hourly_rate,
-    'effective_from', r.effective_from, 'effective_to', r.effective_to,
-    'created_at', r.created_at
-  ) order by r.salary_role, r.experience_tier, r.effective_from desc), '[]'::jsonb)
-  from public.trade_rate_history r where r.trade_id = p_trade_id;
-$$;
+begin
+  if not public.has_menu_permission('trade_management')
+     and not public.has_menu_permission('salary_sheet') then
+    raise exception 'Access denied';
+  end if;
+  return (
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'id', r.id, 'trade_id', r.trade_id, 'salary_role', r.salary_role,
+      'experience_tier', r.experience_tier, 'hourly_rate', r.hourly_rate,
+      'effective_from', r.effective_from, 'effective_to', r.effective_to,
+      'created_at', r.created_at
+    ) order by r.salary_role, r.experience_tier, r.effective_from desc), '[]'::jsonb)
+    from public.trade_rate_history r where r.trade_id = p_trade_id
+  );
+end; $$;
 
 -- p_rates: [{"salary_role":"standard","experience_tier":"below_threshold","hourly_rate":8}, …]
 -- p_activate requires ALL six rate cells.
@@ -1302,6 +1332,8 @@ security definer set search_path = public
 as $$
 declare v_cap date;
 begin
+  if not public.has_menu_permission('employees') then raise exception 'Access denied'; end if;
+
   delete from public.employee_salary_assignment
     where employee_id = p_employee_id and effective_from = p_eff;
 

@@ -12,10 +12,12 @@
 //   • site groups: per-employee hours & gross AT THAT SITE (historical site
 //     attribution — moved-out employees stay on every site they worked at),
 //     with a click-through rate breakdown
-//   • EDIT MODE: pick the trade from a dropdown, override hours / rate /
-//     gross / advance / deduction. THE SHEET RECORD HAS PRIORITY — saved
-//     values overwrite the stored data and never get overwritten by the
-//     automatic recalculation (reset returns an employee to auto pricing)
+//   • EDIT MODE: change the employee's TRADE from a dropdown (sitewise rows
+//     and the settlement table — immediate save, overwrites the stored trade
+//     and re-prices the month) and override hours / rate / gross / advance /
+//     deduction. THE SHEET RECORD HAS PRIORITY — saved values overwrite the
+//     stored data and never get overwritten by the automatic recalculation
+//     (reset returns an employee to auto pricing)
 //   • consolidated Employee Settlement table: advance / deduction / net are
 //     settled exactly ONCE per employee per month (never repeated per site)
 //   • payment + adjustment + finalize + audited reopen dialogs
@@ -77,7 +79,9 @@ const NO_TRADE = '__none__';
 
 type SiteRow = SalarySheetSiteGroup['rows'][number];
 type SiteDraft = { hours: string; rate: string; gross: string };
-type EmpDraft = { trade: string; advance: string; deduction: string };
+type EmpDraft = { advance: string; deduction: string };
+/** live trade-edit state for a site row (edit mode only) */
+type TradeState = { value: string | null; editable: boolean; busy: boolean };
 
 /** effective (volume-weighted) rate of a site row — the edit-mode prefill */
 const effRateOf = (r: SiteRow): number => {
@@ -492,6 +496,7 @@ function ReopenDialog({ report, open, onOpenChange, onDone }: {
 // ---------------------------------------------------------------------------
 function SiteGroup({
   group, index, onShowLines, editMode, peIdOf, siteDraftOf, onSiteDraftChange, onSaveSite, busyKey,
+  tradeOptions, tradeStateOf, onTradeChange,
 }: {
   group: SalarySheetSiteGroup;
   index: number;
@@ -502,6 +507,9 @@ function SiteGroup({
   onSiteDraftChange: (peId: string, siteId: string | null, next: SiteDraft) => void;
   onSaveSite: (peId: string, row: SiteRow, draft: SiteDraft) => void;
   busyKey: string | null;
+  tradeOptions: Trade[];
+  tradeStateOf: (employeeId: string) => TradeState;
+  onTradeChange: (employeeId: string, tradeId: string | null) => void;
 }) {
   const [open, setOpen] = useState(true);
   const employeeById = useMemo(() => new Map(group.rows.map((r) => [r.employee_id, r])), [group]);
@@ -545,7 +553,7 @@ function SiteGroup({
                     <TableHead className="w-10">Sl</TableHead>
                     <TableHead>Employee</TableHead>
                     <TableHead className="hidden md:table-cell">Employee ID</TableHead>
-                    <TableHead className="hidden lg:table-cell">Trade</TableHead>
+                    <TableHead className={cn(editMode ? 'table-cell' : 'hidden lg:table-cell')}>Trade</TableHead>
                     <TableHead className="hidden xl:table-cell">Nationality</TableHead>
                     <TableHead className="text-right">Hours</TableHead>
                     <TableHead className="text-right">Rate</TableHead>
@@ -592,8 +600,31 @@ function SiteGroup({
                           </div>
                         </TableCell>
                         <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{r.employee_code}</TableCell>
-                        <TableCell className="hidden text-xs md:table-cell">
-                          {r.trade_name ?? <span className="text-amber-500">no trade</span>}
+                        <TableCell className={cn('text-xs', editMode ? 'table-cell' : 'hidden lg:table-cell')}>
+                          {(() => {
+                            const ts = tradeStateOf(r.employee_id);
+                            if (!ts.editable) {
+                              return r.trade_name ?? <span className="text-amber-500">no trade</span>;
+                            }
+                            return (
+                              <Select
+                                value={ts.value ?? NO_TRADE}
+                                onValueChange={(v) => onTradeChange(r.employee_id, v === NO_TRADE ? null : v)}
+                              >
+                                <SelectTrigger className="h-8 w-36 bg-card text-xs" aria-label={`Trade of ${r.full_name}`}>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value={NO_TRADE}>No trade</SelectItem>
+                                  {tradeOptions.map((t) => (
+                                    <SelectItem key={t.id} value={t.id}>
+                                      {t.name}{t.is_active ? '' : ' (inactive)'}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="hidden text-xs text-muted-foreground xl:table-cell">{r.nationality ?? '—'}</TableCell>
                         {editable && draft ? (
@@ -805,7 +836,6 @@ export function SalarySheetPage() {
 
   const empDraftOf = (e: PayrollEmployeeVM): EmpDraft =>
     empDrafts[e.id] ?? {
-      trade: e.trade_id ?? NO_TRADE,
       advance: String(e.advance),
       deduction: String(e.deduction),
     };
@@ -821,12 +851,11 @@ export function SalarySheetPage() {
     try {
       await dataApi.updateSalarySheetRow({
         payroll_employee_id: e.id,
-        trade_id: d.trade === NO_TRADE ? null : d.trade,
         advance: Math.round(adv * 100) / 100,
         deduction: Math.round(ded * 100) / 100,
       });
-      toast.success('Sheet row saved', {
-        description: `${e.full_name}${e.trade_id !== (d.trade === NO_TRADE ? null : d.trade) ? ' — trade updated & month re-priced' : ''}`,
+      toast.success('Settlement saved', {
+        description: `${e.full_name} — the sheet record wins over every recalculation`,
       });
       setEmpDrafts((prev) => { const n = { ...prev }; delete n[e.id]; return n; });
       load();
@@ -853,6 +882,44 @@ export function SalarySheetPage() {
     }
   };
 
+  // ---- change an employee's trade straight from the sheet (edit mode) -----
+  // Immediate save: the pick overwrites the stored trade + assignment history
+  // (effective from the 1st of the payroll month) and re-prices the month.
+  const onTradeChange = async (employeeId: string, tradeId: string | null): Promise<void> => {
+    const e = employeeById.get(employeeId);
+    if (!e) return;
+    if ((tradeId ?? null) === (e.trade_id ?? null)) return;
+    if (e.payment_status === 'paid') {
+      toast.error('This employee is already marked paid — reopen the payroll first');
+      return;
+    }
+    setBusyKey(`trade:${e.id}`);
+    try {
+      await dataApi.updateSalarySheetRow({ payroll_employee_id: e.id, trade_id: tradeId });
+      const tName = tradeId
+        ? tradeOptions.find((t) => t.id === tradeId)?.name ?? 'the new trade'
+        : 'no trade';
+      toast.success('Trade updated from the sheet', {
+        description: `${e.full_name} → ${tName} — stored trade overwritten, month re-priced.`,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to change trade');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  /** live trade dropdown state for a site row (edit mode only) */
+  const tradeStateOf = useCallback((employeeId: string): TradeState => {
+    const e = employeeById.get(employeeId);
+    return {
+      value: e?.trade_id ?? null,
+      editable: editMode && !!e && e.payment_status !== 'paid' && e.status !== 'deleted',
+      busy: !!e && busyKey === `trade:${e.id}`,
+    };
+  }, [employeeById, editMode, busyKey]);
+
   const toggleEditMode = (): void => {
     setEditMode((o) => !o);
     setSiteDrafts({});
@@ -863,10 +930,11 @@ export function SalarySheetPage() {
   const finalized = period?.status === 'finalized';
   const exportCsv = (): void => {
     if (!report) return;
-    const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Gross (AED)']];
+    const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Rate (AED/h)', 'Gross (AED)']];
     report.sites.forEach((g) => g.rows.forEach((r, i) => rows.push([
       g.site_name, String(i + 1), r.full_name, r.employee_code,
-      r.trade_name ?? '', r.nationality ?? '', fmtHrs(r.total_hours), fmtMoney(r.gross_salary),
+      r.trade_name ?? '', r.nationality ?? '', fmtHrs(r.total_hours),
+      r.has_missing_rate ? '' : fmtMoney(effRateOf(r)), fmtMoney(r.gross_salary),
     ])));
     const settlement: string[][] = [['', ''], ['SETTLEMENT', ''], ['Employee', 'Employee ID', 'Gross', 'Advance', 'Deduction', 'Net', 'Status']];
     report.employees.forEach((e) => settlement.push([
@@ -887,14 +955,17 @@ export function SalarySheetPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
-      {/* header */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <SectionTitle
-          icon={<Wallet size={16} />}
-          title="Salary Sheet"
-          sub="Monthly payroll — sitewise hours, rates & settlement (database-calculated)"
-        />
-        <div className="flex flex-wrap items-center gap-2">
+      {/* sticky action bar — Edit / CSV / Finalize stay visible while scrolling */}
+      <div className="sticky top-16 z-30 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="shrink-0 rounded-lg bg-brand/10 p-1.5 text-brand"><Wallet size={16} /></div>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-semibold">Salary Sheet</h1>
+              <p className="truncate text-xs text-muted-foreground">Monthly payroll — sitewise hours, rates &amp; settlement (database-calculated)</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
           {period && (
             <span className={cn(
               'inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold',
@@ -945,6 +1016,7 @@ export function SalarySheetPage() {
               <LockOpen size={14} /> Reopen
             </Button>
           )}
+          </div>
         </div>
       </div>
 
@@ -1015,6 +1087,9 @@ export function SalarySheetPage() {
                   onSiteDraftChange={onSiteDraftChange}
                   onSaveSite={(peId, row, draft) => { void onSaveSite(peId, row, draft); }}
                   busyKey={busyKey}
+                  tradeOptions={tradeOptions}
+                  tradeStateOf={tradeStateOf}
+                  onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
                 />
               ))}
@@ -1074,11 +1149,9 @@ export function SalarySheetPage() {
                         <TableCell className="hidden md:table-cell">
                           {canEdit ? (
                             <Select
-                              value={draft.trade}
-                              onValueChange={(v) => setEmpDrafts((prev) => ({
-                                ...prev,
-                                [e.id]: { ...draft, trade: v },
-                              }))}
+                              value={e.trade_id ?? NO_TRADE}
+                              disabled={busyKey === `trade:${e.id}`}
+                              onValueChange={(v) => { void onTradeChange(e.employee_id, v === NO_TRADE ? null : v); }}
                             >
                               <SelectTrigger className="h-8 w-40 bg-card text-xs" aria-label={`Trade of ${e.full_name}`}>
                                 <SelectValue />
@@ -1151,7 +1224,7 @@ export function SalarySheetPage() {
                               <Button
                                 variant="outline" size="icon" className="size-8 text-emerald-500 hover:text-emerald-400"
                                 disabled={busy}
-                                title="Save trade / advance / deduction (the sheet record wins)"
+                                title="Save advance / deduction (the sheet record wins)"
                                 onClick={() => { void onSaveEmployee(e, draft); }}
                               >
                                 {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}

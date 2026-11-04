@@ -1344,6 +1344,30 @@ export const demoApi = {
     saveAndEmit(['payroll_period', 'payroll_employee']);
   },
 
+  /** Revert a payment — super admin only, reason mandatory, audited
+   *  (mirrors unmark_employee_salary_paid RPC). */
+  async unmarkPayrollPaid(payrollEmployeeId: string, reason: string): Promise<void> {
+    const me = currentProfile();
+    if (me?.role !== 'super_admin') {
+      throw new Error('Only a super admin can revert a paid salary');
+    }
+    if (!reason.trim()) throw new Error('A reason is required to revert a paid salary');
+    const pe = db.payrollEmployees.find((x) => x.id === payrollEmployeeId);
+    if (!pe) throw new Error('Payroll employee not found');
+    if (pe.payment_status !== 'paid') throw new Error('This salary is not marked paid');
+    const period = db.payrollPeriods.find((p) => p.id === pe.payroll_period_id);
+    pe.payment_status = 'unpaid';
+    pe.paid_at = null;
+    pe.paid_by = null;
+    db.payrollAudit.push({
+      id: uid(), period_id: period?.id ?? null, trade_id: null, action: 'unpayment',
+      actor_id: me.id, actor_name: me.name,
+      details: `Employee ${pe.employee_id} reverted to unpaid — reason: ${reason.trim()}`,
+      created_at: nowISO(),
+    });
+    saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
   // ---- realtime ------------------------------------------------------------------------------
   subscribe(onChange: (tables: string[]) => void): () => void {
     return subscribeDemo(onChange);

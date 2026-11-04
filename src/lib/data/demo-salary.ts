@@ -598,6 +598,24 @@ export const refreshPayrollPeriod = (
 // ---------------------------------------------------------------------------
 // Salary sheet read model (mirrors get_salary_sheet)
 // ---------------------------------------------------------------------------
+/** First date the lifetime cumulative (opening + all tracked attendance)
+ *  reaches the 1,000-hour threshold — chronologically. Null = never (yet). */
+const thresholdDateOf = (database: DemoDB, employeeId: string): string | null => {
+  const emp = database.employees.find((e) => e.id === employeeId);
+  if (!emp) return null;
+  let cum = emp.opening_hours ?? 0;
+  let hit: string | null = null;
+  database.attendance
+    .filter((a) => a.employee_id === employeeId && !a.is_hidden
+      && a.hours != null && (a.hours as number) > 0)
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .forEach((a) => {
+      if (hit == null && cum + (a.hours as number) >= SALARY_THRESHOLD_HOURS) hit = a.date;
+      cum += a.hours as number;
+    });
+  return hit;
+};
+
 const toPeriodVM = (p: DemoPayrollPeriodRow): PayrollPeriodVM => ({
   id: p.id, year: p.year, month: p.month, status: p.status,
   created_by: p.created_by, finalized_by: p.finalized_by,
@@ -636,12 +654,13 @@ export const buildSalarySheet = (
     unpaid_count: pes.filter((pe) => pe.payment_status !== 'paid').length,
   };
 
-  // site groups keyed by site id (never by name)
+  // site groups keyed by site id (never by name); the no-site bucket is NOT
+  // a site group — it becomes part of the trailing Idle Employees group
   const siteKeys = new Map<string, { site_id: string | null; site_name: string }>();
   pes.forEach((pe) => {
     database.payrollSites
-      .filter((s) => s.payroll_employee_id === pe.id)
-      .forEach((s) => siteKeys.set(s.site_id ?? '__none__', {
+      .filter((s) => s.payroll_employee_id === pe.id && s.site_id != null)
+      .forEach((s) => siteKeys.set(s.site_id!, {
         site_id: s.site_id,
         site_name: s.site_name_snapshot,
       }));
@@ -703,7 +722,95 @@ export const buildSalarySheet = (
   });
   sites.sort((a, b) => b.gross_salary - a.gross_salary);
 
-  // consolidated per-employee settlements (advance/deduction/net exactly once)
+  // ---- IDLE EMPLOYEES (always the LAST group) -----------------------------
+  // (a) employees with unassigned / unrated (no-site) hours — shown as idle
+  //     hours, never attributed to an invented site;
+  // (b) employees whose CURRENT site is empty without a no-site row →
+  //     synthetic zero rows (covers site-less employees with no attendance).
+  // Historical attendance of these employees keeps its original site
+  // attribution and stays in the site groups above.
+  const idleRows: SalarySheetSiteGroup['rows'] = [];
+  pes.forEach((pe) => {
+    const emp = database.employees.find((e) => e.id === pe.employee_id);
+    if (!emp) return;
+    const tradeName = pe.trade_id_snapshot
+      ? database.trades.find((t) => t.id === pe.trade_id_snapshot)?.name ?? null
+      : null;
+    const noSiteRow = database.payrollSites.find(
+      (s) => s.payroll_employee_id === pe.id && s.site_id == null,
+    );
+    if (noSiteRow) {
+      const lines = database.payrollLines
+        .filter((l) => l.payroll_employee_id === pe.id && l.site_id == null)
+        .sort((a, b) => (a.attendance_date < b.attendance_date ? -1 : 1))
+        .map((l): PayrollSalaryLineVM => ({
+          site_id: l.site_id, site_name: l.site_name_snapshot, date: l.attendance_date,
+          trade_id: l.trade_id, trade_name: l.trade_name_snapshot,
+          salary_role: l.salary_role_snapshot, experience_tier: l.experience_tier,
+          hours: l.hours, hourly_rate: l.hourly_rate, gross_amount: l.gross_amount,
+        }));
+      idleRows.push({
+        site_id: null,
+        site_name: 'Idle Employees',
+        total_hours: noSiteRow.total_hours,
+        below_threshold_hours: noSiteRow.below_threshold_hours,
+        qualified_hours: noSiteRow.qualified_hours,
+        standard_hours: noSiteRow.standard_hours,
+        team_leader_hours: noSiteRow.team_leader_hours,
+        supervisor_hours: noSiteRow.supervisor_hours,
+        gross_salary: noSiteRow.gross_salary,
+        has_missing_rate: noSiteRow.has_missing_rate,
+        manually_edited: noSiteRow.manually_edited,
+        synthetic: false,
+        lines,
+        employee_id: pe.employee_id,
+        full_name: emp.full_name,
+        employee_code: emp.employee_code,
+        nationality: emp.nationality ?? null,
+        photo: emp.photo ?? null,
+        trade_name: tradeName,
+        salary_role: pe.salary_role_snapshot,
+      });
+    } else if (emp.current_site_id == null) {
+      idleRows.push({
+        site_id: null,
+        site_name: 'Idle Employees',
+        total_hours: 0,
+        below_threshold_hours: 0,
+        qualified_hours: 0,
+        standard_hours: 0,
+        team_leader_hours: 0,
+        supervisor_hours: 0,
+        gross_salary: 0,
+        has_missing_rate: false,
+        manually_edited: false,
+        synthetic: true,
+        lines: [],
+        employee_id: pe.employee_id,
+        full_name: emp.full_name,
+        employee_code: emp.employee_code,
+        nationality: emp.nationality ?? null,
+        photo: emp.photo ?? null,
+        trade_name: tradeName,
+        salary_role: pe.salary_role_snapshot,
+      });
+    }
+  });
+  idleRows.sort((a, b) => a.full_name.localeCompare(b.full_name));
+  if (idleRows.length > 0) {
+    sites.push({
+      site_id: null,
+      site_name: 'Idle Employees',
+      employees: idleRows.length,
+      total_hours: round2(idleRows.reduce((n, r) => n + r.total_hours, 0)),
+      gross_salary: round2(idleRows.reduce((n, r) => n + r.gross_salary, 0)),
+      idle: true,
+      rows: idleRows,
+    });
+  }
+
+  // consolidated per-employee rows — ONE row per employee for the Payroll
+  // page; includes the qualification fields used by the hours tooltip
   const employees: PayrollEmployeeVM[] = pes.map((pe) => {
     const emp = database.employees.find((e) => e.id === pe.employee_id);
     const siteRows = database.payrollSites.filter((s) => s.payroll_employee_id === pe.id);
@@ -766,6 +873,11 @@ export const buildSalarySheet = (
         : null,
       notes: pe.notes,
       manually_edited: pe.manually_edited,
+      join_date: emp?.join_date ?? null,
+      six_month_date: emp
+        ? addMonthsClamped(emp.join_date ?? ymdOf(emp.created_at), SALARY_THRESHOLD_MONTHS)
+        : null,
+      threshold_date: thresholdDateOf(database, pe.employee_id),
       sites: sitesVM,
     };
   });

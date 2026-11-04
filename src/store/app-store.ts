@@ -16,6 +16,7 @@ export type AppView =
   | 'attendance'
   | 'working_hours'
   | 'salary_sheet'
+  | 'payroll'
   | 'trade_management'
   | 'uniform_registry'
   | 'leave_requests'
@@ -33,6 +34,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   attendance: 'Attendance',
   working_hours: 'Working Hours',
   salary_sheet: 'Salary Sheet',
+  payroll: 'Payroll',
   trade_management: 'Trade Management',
   uniform_registry: 'Uniform Registry',
   leave_requests: 'Leave Requests',
@@ -52,6 +54,11 @@ interface AppStore {
   employeeFormId: string | null;
   /** Where the Back button and post-save navigation should return to */
   employeeFormReturnTo: 'employees' | 'employee_details';
+  /** Shared payroll month selection — Salary Sheet and Payroll use the SAME
+   *  period; switching pages keeps the month. */
+  salaryPeriodYear: number;
+  salaryPeriodMonth: number;
+  setSalaryPeriod: (year: number, month: number) => void;
   navigateTo: (view: AppView) => void;
   navigateToEmployees: (filter?: string) => void;
   navigateToEmployeeDetails: (employeeId: string) => void;
@@ -69,9 +76,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   sidebarOpen: true,
   employeeFilter: '',
   selectedEmployeeId: null,
-  employeeFormMode: 'create',
+  employeeFormMode: 'create' as const,
   employeeFormId: null,
-  employeeFormReturnTo: 'employees',
+  employeeFormReturnTo: 'employees' as const,
+  salaryPeriodYear: new Date().getFullYear(),
+  salaryPeriodMonth: new Date().getMonth() + 1,
+  setSalaryPeriod: (year, month) => set({ salaryPeriodYear: year, salaryPeriodMonth: month }),
   navigateTo: (view) => set({ currentView: view }),
   navigateToEmployees: (filter = '') => set({ currentView: 'employees', employeeFilter: filter }),
   navigateToEmployeeDetails: (employeeId) =>

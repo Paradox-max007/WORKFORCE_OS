@@ -514,6 +514,8 @@ export interface PayrollEmployeeSiteVM {
   has_missing_rate: boolean;
   /** true → hand-edited in the Salary Sheet; recalculation never touches it */
   manually_edited?: boolean;
+  /** true → Idle Employees placeholder row (no real site row behind it) */
+  synthetic?: boolean;
   lines: PayrollSalaryLineVM[];
 }
 
@@ -550,6 +552,12 @@ export interface PayrollEmployeeVM {
   notes: string | null;
   /** true → hand-edited in the Salary Sheet; recalculation never touches it */
   manually_edited?: boolean;
+  /** qualification inputs for the Payroll hours tooltip (from sheet data) */
+  join_date: string | null;
+  /** join date + 6 calendar months (the alternative qualification route) */
+  six_month_date: string | null;
+  /** first date the lifetime cumulative (opening + tracked hours) reached 1,000 h */
+  threshold_date: string | null;
   sites: PayrollEmployeeSiteVM[];
 }
 
@@ -570,6 +578,8 @@ export interface SalarySheetSiteGroup {
   employees: number;
   total_hours: number;
   gross_salary: number;
+  /** true → the trailing "Idle Employees" group (no current site / unassigned hours) */
+  idle?: boolean;
   rows: (PayrollEmployeeSiteVM & {
     employee_id: string;
     full_name: string;

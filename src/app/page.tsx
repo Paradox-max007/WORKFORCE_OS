@@ -21,6 +21,7 @@ import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
 import { LeaveRequestPage } from '@/components/leave-requests/leave-request-page';
 import { NotificationPage } from '@/components/notifications/notification-page';
+import { PayrollPage } from '@/components/payroll/payroll-page';
 import { SalarySheetPage } from '@/components/salary-sheet/salary-sheet-page';
 import { SitesPage } from '@/components/sites/sites-page';
 import { TradePage } from '@/components/trades/trade-page';
@@ -73,6 +74,7 @@ function MainLayout() {
     attendance: <AttendancePage />,
     working_hours: <WorkingHoursPage />,
     salary_sheet: <SalarySheetPage />,
+    payroll: <PayrollPage />,
     trade_management: <TradePage />,
     uniform_registry: <UniformRegistryPage />,
     leave_requests: <LeaveRequestPage />,

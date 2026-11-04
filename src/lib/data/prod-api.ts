@@ -936,6 +936,16 @@ export const prodApi = {
     assertOk(error);
   },
 
+  /** Revert a payment — super admin only, reason mandatory, audited
+   *  (unmark_employee_salary_paid RPC in 20261104_payroll_idle.sql). */
+  async unmarkPayrollPaid(payrollEmployeeId: string, reason: string): Promise<void> {
+    const { error } = await sb().rpc('unmark_employee_salary_paid', {
+      p_payroll_employee_id: payrollEmployeeId,
+      p_reason: reason,
+    });
+    assertOk(error);
+  },
+
   /** Salary Sheet edit-mode save — the sheet record has priority (see
    *  update_salary_sheet_row RPC in 20261103b_salary_sheet_edit.sql). */
   async updateSalarySheetRow(input: SalarySheetRowUpdate): Promise<void> {

@@ -62,6 +62,13 @@ export interface CampWithCount extends Camp {
 export type EmployeeStatus = 'active' | 'pending_deletion' | 'deleted';
 export type DocumentStatus = 'Valid' | 'Expired' | 'N/A';
 
+/** A manpower / contracting company employees work under (its own table). */
+export interface Company {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
 export interface Employee {
   id: string;
   full_name: string;
@@ -654,6 +661,7 @@ export type RealtimeTable =
   | 'cancellation_request'
   | 'uniform_registry'
   | 'site_transfer'
+  | 'company'
   | 'trades'
   | 'trade_rate_history'
   | 'employee_salary_assignment'

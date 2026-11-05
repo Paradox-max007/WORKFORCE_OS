@@ -1,29 +1,33 @@
 # PULSE — Generated files
 
-## Database migration (run in Supabase SQL Editor)
+## Database migrations (run in Supabase SQL Editor)
 
-**`20261105_payroll_inline.sql`** — REQUIRED for the new Payroll editing features.
+**`20261105b_audit_employee_names.sql`** + **`20261105c_companies.sql`** —
+REQUIRED for this update.
 
-Run the whole file in Supabase → SQL Editor → New query → Run. It is
-idempotent (`create or replace function`) and safe to re-run.
+Run each whole file in Supabase → SQL Editor → New query → Run. Both are
+idempotent (`create or replace function` / `create table if not exists`) and
+safe to re-run.
 
-What it does:
+### `20261105b_audit_employee_names.sql` — human-readable payroll audit
 
-1. `mark_employee_salary_paid` — **Mark Paid no longer requires a finalized
-   period.** It is active whenever the employee HAS a salary this month
-   (`gross_salary > 0`); a zero-salary employee is rejected with
-   "No salary calculated for this employee this month". Payments keep the
-   who/when audit trail and paid employees stay protected.
-2. `update_salary_sheet_row` + `apply_employee_assignment` — permission
-   leniency `salary_sheet OR payroll`, so the **Trade dropdown on the Payroll
-   page** (edit mode) saves through the exact same RPC as the Salary Sheet:
-   it overwrites the stored trade + assignment history from the 1st of the
-   payroll month and re-prices the month — Salary Sheet, Employee Details,
-   the Attendance page and the Attendance PDF all read the same rows, so they
-   update together.
+1. **Backfill** — every raw employee UUID inside existing
+   `payroll_audit_log.details` rows is replaced with
+   `Full Name (EMPLOYEE_CODE)`.
+2. `mark_employee_salary_paid`, `unmark_employee_salary_paid` and
+   `reset_payroll_employee_auto` are recreated so **new audit entries are
+   written with the employee name + code** instead of the database id
+   (payment rules unchanged).
 
-Verified locally on PostgreSQL (15 checks incl. idempotency — see
-`scripts/test_payroll_inline_migration.py`).
+### `20261105c_companies.sql` — companies get their own table
+
+1. New **`company`** table (id, name, created_at, unique name) with RLS
+   (staff read, employee editors insert) + realtime publication.
+2. `create_company` RPC (permission-checked, duplicate-safe) used by the
+   **"+ Add New Company…"** option in the employee form.
+3. **Seed** — every distinct company name already used by an employee
+   becomes a company row (employees keep storing the name in
+   `employee.company_name`; no employee-table migration is needed).
 
 Earlier migrations (only needed on a fresh database):
 
@@ -32,23 +36,46 @@ Earlier migrations (only needed on a fresh database):
 - `20261103_trade_salary_system.sql`
 - `20261103b_salary_sheet_edit.sql`
 - `20261104_payroll_idle.sql`
+- `20261105_payroll_inline.sql`
 
-## What changed in this update (Payroll page)
+## What changed in this update
 
-- **Advance & Deduction are always-visible columns** — no separate edit
-  button. In **Edit mode** (sticky Edit button, top bar — like the Salary
-  Sheet) they become inline inputs that save on blur/Enter.
-- **Trade dropdown in edit mode** — pick a trade, it saves immediately and
-  propagates to every linked page.
-- **Mark Paid is active whenever the employee has a salary** (gross > 0);
-  the payment dialog confirms the settlement summary (gross − advance −
-  deduction = net) and records who/when.
-- **New cards at the top: Paid salary** (Σ net of paid employees) and
-  **Balance to pay** (Σ net of unpaid).
-- **Net Payable column + totals footer row** (hours, advance, deduction,
-  gross, net).
-- The Salary Sheet's **Idle Employees** section always renders LAST, after
-  all site sections.
-- The Attendance page & Attendance PDF now show the employee's real **trade**
-  (was the free-text position; falls back to position when no trade is
-  assigned).
+### Salary Sheet & Payroll
+
+- **Search** (name / employee ID / trade) on both pages — always visible in
+  the sticky bar; the Salary Sheet filters rows inside every site section
+  (empty sections hide, counters update), the Payroll narrows the table
+  (footer totals follow the visible rows; the top cards stay period totals).
+- **Payroll filters**: by **trade** and by **nationality** (options built
+  from the current period), plus a Clear button and a shown/total counter.
+- **Audit trail (Payroll) is collapsed** behind an expandable
+  **Audit trail (N)** icon button — clicking it reveals every audit entry;
+  audits now show the **employee name + code**, never the database id.
+- Hours tooltip: "Below threshold" is now **"Below 1000 h / 6 months"**
+  (badge, this-month line, site-distribution column, rate category).
+- The "always last" chip was removed from the Salary Sheet's Idle Employees
+  section (it still renders last, just without the label).
+
+### Employee Details
+
+- The **Personal Information box is split in two** — the second card is
+  **Notices & Fines**: the employee's warnings + fines, newest first, as a
+  **carousel** (prev/next + dots + counter when there are several). Every
+  slide **hyperlinks to that notification** — it opens the Notifications Hub
+  straight on the Warnings or Fines tab.
+
+### Add / Edit Employee
+
+- **Phone** now has a **country-code dropdown** (+971, +966, +91, … next to
+  the local number; legacy "+code number" values are parsed back in, unknown
+  codes fall back to "Other" and are preserved as typed).
+- "Position (free text)" is now **"Position as per Visa"**.
+- **Company Name is a dropdown** fed by the new companies table, with an
+  inline **"+ Add New Company…"** option (created on the fly and selected
+  automatically). Existing employee companies appear automatically.
+
+### Notifications Hub
+
+- Tabs are deep-linkable — the Notices & Fines card on Employee Details
+  jumps straight to the right tab; the sidebar always opens the Requests
+  tab.

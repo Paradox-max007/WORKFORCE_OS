@@ -29,14 +29,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Skeleton } from '@/components/ui/skeleton';
 import { NationalitySelect } from '@/components/shared/nationality-select';
+import { PhoneInput } from '@/components/shared/phone-input';
 import { RatingStars } from '@/components/shared/primitives';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  EXPERIENCE_TIERS, SALARY_ROLES, type CampWithCount, type DocumentStatus,
-  type EmployeeInput, type EmployeeVM, type ExperienceTier, type SalaryRole,
-  type SiteWithCount, type Trade, type TradeRateInput,
+  EXPERIENCE_TIERS, SALARY_ROLES, type CampWithCount, type Company,
+  type DocumentStatus, type EmployeeInput, type EmployeeVM, type ExperienceTier,
+  type SalaryRole, type SiteWithCount, type Trade, type TradeRateInput,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -250,8 +251,11 @@ export function EmployeeFormPage() {
   const [allEmployees, setAllEmployees] = useState<EmployeeVM[]>([]);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [camps, setCamps] = useState<CampWithCount[] | null>(null);
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [newSiteName, setNewSiteName] = useState<string | null>(null);
   const [addingSite, setAddingSite] = useState(false);
+  const [newCompanyName, setNewCompanyName] = useState<string | null>(null);
+  const [addingCompany, setAddingCompany] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ---- load reference data (+ the employee being edited) ----------------------
@@ -262,17 +266,19 @@ export function EmployeeFormPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps, trs] = await Promise.all([
+        const [emps, sts, cps, trs, cmps] = await Promise.all([
           dataApi.listEmployees(),
           dataApi.listSites(),
           dataApi.listCamps(),
           dataApi.listTrades().catch(() => []),
+          dataApi.listCompanies().catch(() => [] as Company[]),
         ]);
         if (cancelled) return;
         setAllEmployees(emps);
         setSites(sts);
         setCamps(cps);
         setTrades(trs);
+        setCompanies(cmps);
         if (isEdit && employeeId) {
           const emp = emps.find((e) => e.id === employeeId);
           if (!emp) {
@@ -336,6 +342,32 @@ export function EmployeeFormPage() {
     }
     setNewSiteName(null);
     setForm((f) => ({ ...f, current_site_id: v === 'none' ? null : v }));
+  };
+
+  // ---- inline new company (companies live in their own table) ----------------
+  const pickCompany = (v: string) => {
+    if (v === '__add_new') {
+      setNewCompanyName('');
+      return;
+    }
+    setNewCompanyName(null);
+    setForm((f) => ({ ...f, company_name: v === 'none' ? null : v }));
+  };
+
+  const addCompanyInline = async () => {
+    if (!newCompanyName?.trim()) return;
+    setAddingCompany(true);
+    try {
+      const company = await dataApi.createCompany(newCompanyName.trim());
+      toast.success('Company created', { description: company.name });
+      setCompanies((prev) => [...prev, company]);
+      setForm((f) => ({ ...f, company_name: company.name }));
+      setNewCompanyName(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create company');
+    } finally {
+      setAddingCompany(false);
+    }
   };
 
   const addSiteInline = async () => {
@@ -559,7 +591,12 @@ export function EmployeeFormPage() {
                 </div>
                 <div className="space-y-2">
                   <Label>Phone</Label>
-                  <Input value={form.phone ?? ''} onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))} placeholder="+966 5xx xxx xxxx" className="h-11" />
+                  <PhoneInput
+                    value={form.phone}
+                    onChange={(v) => setForm((f) => ({ ...f, phone: v }))}
+                    placeholder="5xx xxx xxxx"
+                  />
+                  <p className="text-[11px] text-muted-foreground">Pick the country code, then type the local number (saved as +code number).</p>
                 </div>
                 <div className="space-y-2">
                   <Label>Email</Label>
@@ -629,8 +666,9 @@ export function EmployeeFormPage() {
                 </p>
               </div>
               <div className="space-y-2">
-                <Label>Position (free text)</Label>
+                <Label>Position as per Visa</Label>
                 <Input value={form.position ?? ''} onChange={(e) => setForm((f) => ({ ...f, position: e.target.value }))} placeholder="e.g. Electrician, Plumber" className="h-11" />
+                <p className="text-[11px] text-muted-foreground">The job title printed on the employee&apos;s visa.</p>
               </div>
               <div className="space-y-2">
                 <Label>Join Date</Label>
@@ -638,7 +676,21 @@ export function EmployeeFormPage() {
               </div>
               <div className="space-y-2">
                 <Label>Company Name</Label>
-                <Input value={form.company_name ?? ''} onChange={(e) => setForm((f) => ({ ...f, company_name: e.target.value }))} className="h-11" />
+                <Select value={form.company_name ?? 'none'} onValueChange={pickCompany}>
+                  <SelectTrigger className="h-11 bg-card" aria-label="Company name"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No company</SelectItem>
+                    {companies.map((c) => (
+                      <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>
+                    ))}
+                    {/* legacy company name not yet in the company table */}
+                    {form.company_name && !companies.some((c) => c.name === form.company_name) && (
+                      <SelectItem value={form.company_name}>{form.company_name}</SelectItem>
+                    )}
+                    <SelectItem value="__add_new" className="text-brand">+ Add New Company…</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground">Companies are managed in their own list — use “Add New” to create one on the fly.</p>
               </div>
               <div className="space-y-2">
                 <Label>Current Working Site</Label>
@@ -667,6 +719,23 @@ export function EmployeeFormPage() {
                   </div>
                   <Button type="button" onClick={addSiteInline} disabled={addingSite} className="brand-gradient text-white">
                     {addingSite ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
+                  </Button>
+                </div>
+              )}
+              {newCompanyName !== null && (
+                <div className="flex items-end gap-2 sm:col-span-2">
+                  <div className="flex-1 space-y-2">
+                    <Label>New Company Name</Label>
+                    <Input
+                      value={newCompanyName}
+                      onChange={(e) => setNewCompanyName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void addCompanyInline(); } }}
+                      placeholder="e.g. Arabian Shield Manpower"
+                      className="h-11"
+                    />
+                  </div>
+                  <Button type="button" onClick={() => { void addCompanyInline(); }} disabled={addingCompany} className="brand-gradient text-white">
+                    {addingCompany ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
                   </Button>
                 </div>
               )}

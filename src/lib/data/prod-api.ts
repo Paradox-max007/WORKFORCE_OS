@@ -13,6 +13,7 @@ import {
   type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
+  type Company,
   type CancellationRequestVM,
   type EmployeeInput,
   type EmployeeSalaryAssignment,
@@ -96,6 +97,7 @@ function ensureRealtimeChannel(): void {
     'cancellation_request',
     'uniform_registry',
     'site_transfer',
+    'company',
     'trades',
     'trade_rate_history',
     'employee_salary_assignment',
@@ -390,6 +392,19 @@ export const prodApi = {
   async deleteCamp(id: string): Promise<void> {
     const { error } = await sb().rpc('delete_camp', { p_id: id });
     assertOk(error);
+  },
+
+  // ---- companies (manpower companies — own table) ------------------------------
+  async listCompanies(): Promise<Company[]> {
+    const { data, error } = await sb().from('company').select('*').order('name');
+    assertOk(error);
+    return (data ?? []) as Company[];
+  },
+
+  async createCompany(name: string): Promise<Company> {
+    const { data, error } = await sb().rpc('create_company', { p_name: name });
+    assertOk(error);
+    return data as unknown as Company;
   },
 
   async assignEmployeeCamp(

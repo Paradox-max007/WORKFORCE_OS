@@ -1177,7 +1177,7 @@ export const applySalarySheetRow = (
     action: 'manual_edit',
     actor_id: actorId,
     actor_name: actorName,
-    details: `Salary sheet row of ${emp.full_name} edited: ${details.join('; ') || 'no changes'}`,
+    details: `Salary sheet row of ${emp.full_name} (${emp.employee_code}) edited: ${details.join('; ') || 'no changes'}`,
     created_at: new Date().toISOString(),
   });
 };
@@ -1207,7 +1207,7 @@ export const resetPayrollEmployeeAuto = (
     action: 'reset_auto',
     actor_id: actorId,
     actor_name: actorName,
-    details: `Salary sheet row of ${emp?.full_name ?? pe.employee_id} returned to automatic calculation`,
+    details: `Salary sheet row of ${emp ? `${emp.full_name} (${emp.employee_code})` : 'unknown employee'} returned to automatic calculation`,
     created_at: new Date().toISOString(),
   });
 };

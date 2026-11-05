@@ -11,8 +11,9 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeft, Briefcase, CalendarCheck, Clock3, Crown, FileDown, FileText,
-  Loader2, MessageCircle, Pencil, Tent, UserRound, X,
+  ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
+  ChevronRight, Clock3, Crown, FileDown, FileText, Loader2, MessageCircle, Pencil,
+  Tent, TriangleAlert, UserRound, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -29,12 +30,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
-import { fmtDate, fmtDateTime, initials } from '@/lib/format';
+import { fmtDate, fmtDateTime, fmtSar, fmtTimeAgo, initials } from '@/lib/format';
 import { downloadEmployeeCv } from '@/lib/pdf';
 import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
 import { cn } from '@/lib/utils';
 import type {
-  Attendance, DocumentStatus, EmployeeStatus, EmployeeVM, SalaryEligibility,
+  Attendance, DocumentStatus, EmployeeStatus, EmployeeVM, FineVM,
+  SalaryEligibility, WarningVM,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -203,6 +205,125 @@ function InfoCard({ index, icon, title, sub, children }: {
     >
       <SectionTitle icon={icon} title={title} sub={sub} />
       <div className="mt-4 grid gap-x-4 gap-y-4 sm:grid-cols-2">{children}</div>
+    </motion.section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Notices & Fines — the second half of the split personal-information row.
+// The employee's warnings + fines as a carousel (multiple entries → prev/next
+// + dots); every slide hyperlinks to the matching tab of the Notifications Hub.
+// ---------------------------------------------------------------------------
+type NoticeItem =
+  | ({ kind: 'warning' } & WarningVM)
+  | ({ kind: 'fine' } & FineVM);
+
+function NoticesCard({ notices, onOpen, index }: {
+  notices: NoticeItem[] | null;
+  onOpen: (kind: 'warning' | 'fine') => void;
+  index: number;
+}) {
+  const [idx, setIdx] = useState(0);
+  // clamp when the list shrinks (employee switched / notice removed)
+  const safeIdx = notices ? Math.min(idx, Math.max(0, notices.length - 1)) : 0;
+  const item = notices?.[safeIdx];
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, delay: 0.08 + index * 0.06, ease: EASE }}
+      className="card-glow rounded-xl border bg-card p-5"
+    >
+      <SectionTitle
+        icon={<Bell size={16} />}
+        title="Notices & Fines"
+        sub={notices && notices.length > 1
+          ? `${notices.length} entries — newest first, click one to open it in the Notifications Hub`
+          : 'Warnings & fines issued to this employee — click to open it in the Notifications Hub'}
+      />
+      <div className="mt-4">
+        {notices === null ? (
+          <div className="space-y-2">
+            <Skeleton className="h-24 rounded-xl" />
+          </div>
+        ) : !item ? (
+          <div className="flex items-center gap-2.5 rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
+            <BadgeCheck size={17} className="shrink-0 text-emerald-500" />
+            <span>No warnings or fines — clean record.</span>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.button
+                key={item.id}
+                type="button"
+                initial={{ opacity: 0, x: 18 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -18 }}
+                transition={{ duration: 0.18, ease: EASE }}
+                onClick={() => onOpen(item.kind)}
+                className="block w-full rounded-xl border p-4 text-left transition-colors hover:border-brand/40 hover:bg-brand/[0.03]"
+                title={`Open this ${item.kind} in the Notifications Hub`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  {item.kind === 'warning' ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-500">
+                      <TriangleAlert size={11} /> Warning
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-500">
+                      <Banknote size={11} /> Fine · {fmtSar(item.amount)}
+                    </span>
+                  )}
+                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground" title={fmtDateTime(item.created_at)}>
+                    {fmtTimeAgo(item.created_at)}
+                  </span>
+                </div>
+                <p className="mt-2 line-clamp-3 text-sm leading-relaxed">{item.reason}</p>
+                <p className="mt-2 text-[11px] font-medium text-brand">
+                  View in Notifications →
+                </p>
+              </motion.button>
+            </AnimatePresence>
+            {notices.length > 1 && (
+              <div className="flex items-center justify-center gap-2">
+                <Button
+                  variant="outline" size="icon" className="size-7"
+                  onClick={() => setIdx((safeIdx - 1 + notices.length) % notices.length)}
+                  aria-label="Previous notice"
+                >
+                  <ChevronLeft size={14} />
+                </Button>
+                <div className="flex items-center gap-1.5">
+                  {notices.map((n, i) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      onClick={() => setIdx(i)}
+                      aria-label={`Show notice ${i + 1} of ${notices.length}`}
+                      className={cn(
+                        'size-1.5 rounded-full transition-colors',
+                        i === safeIdx ? 'bg-brand' : 'bg-muted-foreground/30 hover:bg-muted-foreground/60',
+                      )}
+                    />
+                  ))}
+                </div>
+                <Button
+                  variant="outline" size="icon" className="size-7"
+                  onClick={() => setIdx((safeIdx + 1) % notices.length)}
+                  aria-label="Next notice"
+                >
+                  <ChevronRight size={14} />
+                </Button>
+                <span className="ml-1 text-[11px] tabular-nums text-muted-foreground">
+                  {safeIdx + 1} / {notices.length}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </motion.section>
   );
 }
@@ -671,10 +792,11 @@ function ShareDialogContent({ emp, onPreviewChange }: {
 // Page
 // ---------------------------------------------------------------------------
 export function EmployeeDetailsPage() {
-  const realtimeVersion = useRealtimeVersion(['employee', 'attendance', 'site', 'camp']);
+  const realtimeVersion = useRealtimeVersion(['employee', 'attendance', 'site', 'camp', 'warning', 'fine']);
   const selectedEmployeeId = useAppStore((s) => s.selectedEmployeeId);
   const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
   const navigateToEmployeeForm = useAppStore((s) => s.navigateToEmployeeForm);
+  const navigateToNotifications = useAppStore((s) => s.navigateToNotifications);
 
   const [emp, setEmp] = useState<EmployeeVM | null>(null);
   const [loading, setLoading] = useState(true);
@@ -699,6 +821,9 @@ export function EmployeeDetailsPage() {
   // applicable rate) — Q = min(join + 6 months, 1,000 lifetime hours).
   const [eligibility, setEligibility] = useState<SalaryEligibility | null>(null);
   const [eligibilityFailed, setEligibilityFailed] = useState(false);
+
+  // Notices & fines card — the employee's warnings + fines, newest first
+  const [notices, setNotices] = useState<NoticeItem[] | null>(null);
 
   const trMonthKey = `${trYear}-${pad(trMonth)}`;
 
@@ -770,6 +895,27 @@ export function EmployeeDetailsPage() {
     dataApi.getEmployeeSalaryEligibility(employeeId)
       .then((report) => { if (!cancelled) setEligibility(report); })
       .catch(() => { if (!cancelled) setEligibilityFailed(true); });
+    return () => { cancelled = true; };
+  }, [selectedEmployeeId, realtimeVersion]);
+
+  // ---- notices & fines (second half of the personal-information row) -------------
+  useEffect(() => {
+    const employeeId = selectedEmployeeId;
+    if (!employeeId) return;
+    let cancelled = false;
+    setNotices(null);
+    Promise.all([dataApi.listWarnings(), dataApi.listFines()])
+      .then(([warnings, fines]) => {
+        if (cancelled) return;
+        const items: NoticeItem[] = [
+          ...warnings.filter((w) => w.employee_id === employeeId)
+            .map((w) => ({ kind: 'warning' as const, ...w })),
+          ...fines.filter((f) => f.employee_id === employeeId)
+            .map((f) => ({ kind: 'fine' as const, ...f })),
+        ].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+        if (!cancelled) setNotices(items);
+      })
+      .catch(() => { if (!cancelled) setNotices([]); });
     return () => { cancelled = true; };
   }, [selectedEmployeeId, realtimeVersion]);
 
@@ -910,7 +1056,15 @@ export function EmployeeDetailsPage() {
           </div>
         </InfoCard>
 
-        <InfoCard index={1} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
+        {/* the personal-information box split in two — this half lists the
+            employee's notices & fines (carousel when there are several) */}
+        <NoticesCard
+          index={1}
+          notices={notices}
+          onOpen={(kind) => navigateToNotifications(kind === 'warning' ? 'warnings' : 'fines')}
+        />
+
+        <InfoCard index={2} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
           <div className="sm:col-span-2">
             <InfoRow
               label="Total Hours"
@@ -1069,14 +1223,14 @@ export function EmployeeDetailsPage() {
 
         </InfoCard>
 
-        <InfoCard index={2} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">
+        <InfoCard index={3} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">
           <InfoRow label="Passport Number" value={emp.passport_number ?? '—'} mono />
           <InfoRow label="Passport Status" value={<DocStatusPill status={emp.passport_status} />} />
           <InfoRow label="ID Number" value={emp.id_number ?? '—'} mono />
           <InfoRow label="ID Status" value={<DocStatusPill status={emp.id_status} />} />
         </InfoCard>
 
-        <InfoCard index={3} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
+        <InfoCard index={4} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
           <InfoRow label="Employee Code" value={emp.employee_code} mono />
           <InfoRow label="Performance Rating" value={<RatingStars rating={emp.rating} size={13} />} />
           <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />

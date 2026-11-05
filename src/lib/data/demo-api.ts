@@ -8,6 +8,7 @@ import {
   type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
+  type Company,
   type CancellationRequestVM,
   type Employee,
   type EmployeeInput,
@@ -992,6 +993,23 @@ export const demoApi = {
     saveAndEmit(['cancellation_request', 'employee', 'uniform_registry', 'notification']);
   },
 
+  // ---- companies (manpower companies — own table) ------------------------------
+  async listCompanies(): Promise<Company[]> {
+    return [...db.companies].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  async createCompany(name: string): Promise<Company> {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('Company name is required');
+    if (db.companies.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())) {
+      throw new Error('A company with this name already exists');
+    }
+    const company: Company = { id: uid(), name: trimmed, created_at: nowISO() };
+    db.companies.push(company);
+    saveAndEmit(['company']);
+    return company;
+  },
+
   // ---- warnings + fines ---------------------------------------------------------------
   async listWarnings(): Promise<WarningVM[]> {
     return db.warnings
@@ -1338,10 +1356,11 @@ export const demoApi = {
     pe.payment_status = 'paid';
     pe.paid_at = nowISO();
     pe.paid_by = me?.id ?? null;
+    const paidEmp = db.employees.find((x) => x.id === pe.employee_id);
     db.payrollAudit.push({
       id: uid(), period_id: period.id, trade_id: null, action: 'payment',
       actor_id: me?.id ?? null, actor_name: me?.name ?? null,
-      details: `Employee ${pe.employee_id} marked paid`,
+      details: `${paidEmp ? `${paidEmp.full_name} (${paidEmp.employee_code})` : 'Unknown employee'} marked paid`,
       created_at: nowISO(),
     });
     saveAndEmit(['payroll_period', 'payroll_employee']);
@@ -1362,10 +1381,11 @@ export const demoApi = {
     pe.payment_status = 'unpaid';
     pe.paid_at = null;
     pe.paid_by = null;
+    const unpaidEmp = db.employees.find((x) => x.id === pe.employee_id);
     db.payrollAudit.push({
       id: uid(), period_id: period?.id ?? null, trade_id: null, action: 'unpayment',
       actor_id: me.id, actor_name: me.name,
-      details: `Employee ${pe.employee_id} reverted to unpaid — reason: ${reason.trim()}`,
+      details: `${unpaidEmp ? `${unpaidEmp.full_name} (${unpaidEmp.employee_code})` : 'Unknown employee'} reverted to unpaid — reason: ${reason.trim()}`,
       created_at: nowISO(),
     });
     saveAndEmit(['payroll_period', 'payroll_employee']);

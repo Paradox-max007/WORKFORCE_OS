@@ -26,8 +26,8 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, Clock, Eye,
-  FileSpreadsheet, Loader2, Lock, LockOpen, PencilLine, RotateCcw,
-  TriangleAlert, UserX, Users, Wallet,
+  FileSpreadsheet, Loader2, Lock, LockOpen, PencilLine, RotateCcw, Search,
+  TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -252,11 +252,6 @@ function SiteGroup({
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-sm font-semibold">
             {group.site_name}
-            {idle && (
-              <span className="ml-2 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 align-middle text-[9px] font-semibold uppercase tracking-wide text-amber-500">
-                always last
-              </span>
-            )}
           </h3>
           <p className="text-xs text-muted-foreground">
             {idle
@@ -499,6 +494,10 @@ export function SalarySheetPage() {
   const [siteDrafts, setSiteDrafts] = useState<Record<string, SiteDraft>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
+  // ---- search (name / employee ID / trade) — filters rows inside every
+  //      site section; empty sections are hidden -------------------------------
+  const [search, setSearch] = useState('');
+
   const load = (): void => {
     setLoading(true);
     dataApi.getSalarySheet(year, month)
@@ -682,7 +681,39 @@ export function SalarySheetPage() {
   };
 
   const idleGroups = report?.sites.filter((g) => g.idle) ?? [];
-  const siteGroups = report?.sites.filter((g) => !g.idle) ?? [];
+  const siteGroups = report?.sites.filter((g) => g.idle !== true) ?? [];
+
+  // search narrows the rows inside every group; the group counters are
+  // recomputed from the visible rows and empty groups are hidden entirely
+  const searchActive = search.trim() !== '';
+  const matchesRow = useCallback((r: SiteRow): boolean => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return r.full_name.toLowerCase().includes(q)
+      || r.employee_code.toLowerCase().includes(q)
+      || (r.trade_name ?? '').toLowerCase().includes(q);
+  }, [search]);
+
+  const filterGroups = useCallback((groups: SalarySheetSiteGroup[]): SalarySheetSiteGroup[] =>
+    groups
+      .map((g) => {
+        const rows = g.rows.filter(matchesRow);
+        return {
+          ...g,
+          rows,
+          employees: rows.length,
+          total_hours: Math.round(rows.reduce((n, r) => n + r.total_hours, 0) * 100) / 100,
+          gross_salary: Math.round(rows.reduce((n, r) => n + r.gross_salary, 0) * 100) / 100,
+        };
+      })
+      .filter((g) => g.rows.length > 0), [matchesRow]);
+
+  const visibleSiteGroups = useMemo(() => filterGroups(siteGroups), [filterGroups, siteGroups]);
+  const visibleIdleGroups = useMemo(() => filterGroups(idleGroups), [filterGroups, idleGroups]);
+  const visibleRowCount = visibleSiteGroups.reduce((n, g) => n + g.rows.length, 0)
+    + visibleIdleGroups.reduce((n, g) => n + g.rows.length, 0);
+  const totalRowCount = siteGroups.reduce((n, g) => n + g.rows.length, 0)
+    + idleGroups.reduce((n, g) => n + g.rows.length, 0);
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
@@ -749,6 +780,35 @@ export function SalarySheetPage() {
           )}
           </div>
         </div>
+
+        {/* search — always visible while scrolling; filters rows in every section */}
+        <div className="mt-2.5 flex items-center gap-2 border-t border-border/60 pt-2.5">
+          <div className="relative flex-1">
+            <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, ID or trade…"
+              aria-label="Search employees by name, ID or trade"
+              className="h-9 bg-card pl-8 pr-8 text-sm"
+            />
+            {search !== '' && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          {searchActive && (
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title="Rows shown / total">
+              {visibleRowCount}/{totalRowCount}
+            </span>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -805,9 +865,15 @@ export function SalarySheetPage() {
               title="No employee hours this month"
               description="Mark attendance first — the salary sheet prices every hour at the site where it was worked."
             />
+          ) : visibleRowCount === 0 ? (
+            <EmptyState
+              icon={<Search size={22} />}
+              title="No matching employees"
+              description={`No employee matches “${search.trim()}” — try another name, ID or trade.`}
+            />
           ) : (
             <div className="space-y-4">
-              {siteGroups.map((g, i) => (
+              {visibleSiteGroups.map((g, i) => (
                 <SiteGroup
                   key={g.site_id ?? 'none'}
                   group={g}
@@ -826,8 +892,8 @@ export function SalarySheetPage() {
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
                 />
               ))}
-              {/* Idle Employees — ALWAYS the last section */}
-              {idleGroups.map((g, i) => (
+              {/* Idle Employees — the last section */}
+              {visibleIdleGroups.map((g, i) => (
                 <SiteGroup
                   key="idle-employees"
                   group={g}

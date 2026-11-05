@@ -59,7 +59,10 @@ interface AppStore {
   salaryPeriodYear: number;
   salaryPeriodMonth: number;
   setSalaryPeriod: (year: number, month: number) => void;
+  /** Which tab the Notifications Hub opens on (deep links from other pages) */
+  notificationsTab: 'requests' | 'warnings' | 'fines';
   navigateTo: (view: AppView) => void;
+  navigateToNotifications: (tab?: 'requests' | 'warnings' | 'fines') => void;
   navigateToEmployees: (filter?: string) => void;
   navigateToEmployeeDetails: (employeeId: string) => void;
   navigateToEmployeeForm: (
@@ -82,7 +85,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   salaryPeriodYear: new Date().getFullYear(),
   salaryPeriodMonth: new Date().getMonth() + 1,
   setSalaryPeriod: (year, month) => set({ salaryPeriodYear: year, salaryPeriodMonth: month }),
-  navigateTo: (view) => set({ currentView: view }),
+  notificationsTab: 'requests' as const,
+  navigateTo: (view) => set(
+    // plain sidebar navigation to the hub always opens the default Requests
+    // tab — only the deep links (navigateToNotifications) preselect a tab
+    view === 'notifications'
+      ? { currentView: view, notificationsTab: 'requests' as const }
+      : { currentView: view },
+  ),
+  navigateToNotifications: (tab = 'requests') =>
+    set({ currentView: 'notifications', notificationsTab: tab }),
   navigateToEmployees: (filter = '') => set({ currentView: 'employees', employeeFilter: filter }),
   navigateToEmployeeDetails: (employeeId) =>
     set({ currentView: 'employee_details', selectedEmployeeId: employeeId }),

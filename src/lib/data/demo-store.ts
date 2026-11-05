@@ -11,6 +11,7 @@ import {
   type Attendance,
   type CancellationRequest,
   type Camp,
+  type Company,
   type Employee,
   type ExperienceTier,
   type Fine,
@@ -158,6 +159,8 @@ export interface DemoDB {
   payrollLines: DemoPayrollLine[];
   payrollAudit: DemoAuditEntry[];
   tradeRateAudit: DemoAuditEntry[];
+  // manpower companies (own table — the Add Employee company dropdown)
+  companies: Company[];
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +207,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 11,
+    version: 12,
     profiles: [],
     sites: [],
     camps: [],
@@ -229,6 +232,7 @@ function seedDB(): DemoDB {
     payrollLines: [],
     payrollAudit: [],
     tradeRateAudit: [],
+    companies: [],
   };
 
   // ---- profiles -----------------------------------------------------------
@@ -255,6 +259,13 @@ function seedDB(): DemoDB {
   const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works', 'Carlos Reyes');
   const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', 'Deepak Nair', false);
   db.sites = [npc, redCoast, marina, depot];
+
+  // manpower companies (own table — feeds the Add Employee company dropdown)
+  db.companies = [
+    { id: uid(), name: 'Arabian Shield Manpower', created_at: nowISO() },
+    { id: uid(), name: 'Gulf Contracting LLC', created_at: nowISO() },
+    { id: uid(), name: 'Emirates Facilities Services', created_at: nowISO() },
+  ];
 
   // site assignments — the two normal admins can only mark their assigned sites
   db.siteAssignments = [
@@ -625,7 +636,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 11) return parsed;
+      if (parsed.version === 12) return parsed;
     }
   } catch {
     // corrupted → reseed

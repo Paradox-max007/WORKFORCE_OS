@@ -20,14 +20,20 @@
 //     rows green in every Salary Sheet section
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
 //     (Σ net of unpaid)
+//   • SEARCH (name / employee ID / trade) plus FILTERS (trade, nationality)
+//     in the sticky bar — they narrow the table; the top cards stay period
+//     totals
+//   • the AUDIT TRAIL is collapsed behind an expandable icon button; opening
+//     it lists every audit entry, written with employee names & codes
 //   • reverting a payment is super-admin only and audited with a reason
 //   • shares the selected month with the Salary Sheet (app store)
 // ============================================================================
 
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, Check, Clock, Eye, Loader2, Lock, LockOpen, PencilLine,
-  Scale, TriangleAlert, UserX, Users, Wallet,
+  BadgeCheck, Banknote, Check, ChevronDown, ChevronUp, Clock, Eye, History,
+  Loader2, Lock, LockOpen, PencilLine, Scale, Search, TriangleAlert, UserX,
+  Users, Wallet, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -79,8 +85,12 @@ const ROLE_LABEL: Record<string, string> = {
   standard: 'Standard', team_leader: 'Team Leader', supervisor: 'Supervisor',
 };
 const TIER_LABEL: Record<string, string> = {
-  below_threshold: 'Below threshold', qualified: 'Qualified', manual: 'Manual',
+  below_threshold: 'Below 1000 h / 6 months', qualified: 'Qualified', manual: 'Manual',
 };
+
+/** sentinel trade/nationality filter values */
+const FILTER_ALL = 'all';
+const FILTER_NONE = '__none__';
 
 const lastDayOf = (year: number, month: number): string => {
   const d = new Date(year, month, 0); // month is 1-based; day 0 = last day of previous
@@ -169,7 +179,7 @@ function CalculationPanel({ e, year, month }: {
             ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-500'
             : 'border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400',
         )}>
-          {qual.qualified ? 'Qualified' : 'Below threshold'}
+          {qual.qualified ? 'Qualified' : 'Below 1000 h / 6 months'}
         </span>
       </div>
 
@@ -184,7 +194,7 @@ function CalculationPanel({ e, year, month }: {
           {!qual.reason && <>Not yet qualified — 1,000 h / six months not reached in this period.</>}
         </p>
         <p className="mt-1 text-muted-foreground">
-          This month: <span className="font-mono text-foreground">{fmtHrs(e.below_threshold_hours)} h</span> below threshold ·
+          This month: <span className="font-mono text-foreground">{fmtHrs(e.below_threshold_hours)} h</span> below 1000 h / 6 months ·
           {' '}<span className="font-mono text-foreground">{fmtHrs(e.qualified_hours)} h</span> qualified
         </p>
       </div>
@@ -201,7 +211,7 @@ function CalculationPanel({ e, year, month }: {
                 <TableRow>
                   <TableHead>Site</TableHead>
                   <TableHead className="text-right">Hours</TableHead>
-                  <TableHead className="text-right">Below thr.</TableHead>
+                  <TableHead className="text-right">Below 1000h/6mo</TableHead>
                   <TableHead className="text-right">Qualified</TableHead>
                 </TableRow>
               </TableHeader>
@@ -552,6 +562,13 @@ export function PayrollPage() {
   const [tradeOptions, setTradeOptions] = useState<Trade[]>([]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
+  // ---- search + filters (they narrow the table only — the top cards stay
+  //      period totals) --------------------------------------------------------
+  const [search, setSearch] = useState('');
+  const [tradeFilter, setTradeFilter] = useState(FILTER_ALL);
+  const [nationalityFilter, setNationalityFilter] = useState(FILTER_ALL);
+  const [auditOpen, setAuditOpen] = useState(false);
+
   const load = (): void => {
     setLoading(true);
     dataApi.getSalarySheet(year, month)
@@ -591,6 +608,50 @@ export function PayrollPage() {
   const period = report?.period ?? null;
   const finalized = period?.status === 'finalized';
   const employees = useMemo(() => report?.employees ?? [], [report]);
+
+  // ---- search / filter option lists (built from this period's rows) --------
+  const tradeFilterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    employees.forEach((e) => {
+      if (e.trade_id) map.set(e.trade_id, e.trade_name ?? 'Unknown trade');
+    });
+    return [...map.entries()].map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [employees]);
+
+  const nationalityFilterOptions = useMemo(
+    () => [...new Set(employees.map((e) => e.nationality).filter((n): n is string => !!n))].sort(),
+    [employees],
+  );
+
+  const filtersActive = search.trim() !== '' || tradeFilter !== FILTER_ALL || nationalityFilter !== FILTER_ALL;
+
+  const filteredEmployees = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return employees.filter((e) => {
+      if (tradeFilter !== FILTER_ALL && (e.trade_id ?? FILTER_NONE) !== tradeFilter) return false;
+      if (nationalityFilter !== FILTER_ALL && (e.nationality ?? FILTER_NONE) !== nationalityFilter) return false;
+      if (!q) return true;
+      return e.full_name.toLowerCase().includes(q)
+        || e.employee_code.toLowerCase().includes(q)
+        || (e.trade_name ?? '').toLowerCase().includes(q);
+    });
+  }, [employees, search, tradeFilter, nationalityFilter]);
+
+  // footer totals follow the FILTERED rows (consistent with the visible table)
+  const filteredTotals = useMemo(() => ({
+    hours: round2(filteredEmployees.reduce((n, e) => n + e.total_hours, 0)),
+    advances: round2(filteredEmployees.reduce((n, e) => n + e.advance, 0)),
+    deductions: round2(filteredEmployees.reduce((n, e) => n + e.deduction, 0)),
+    gross: round2(filteredEmployees.reduce((n, e) => n + e.gross_salary, 0)),
+    net: round2(filteredEmployees.reduce((n, e) => n + e.net_salary, 0)),
+  }), [filteredEmployees]);
+
+  const clearFilters = (): void => {
+    setSearch('');
+    setTradeFilter(FILTER_ALL);
+    setNationalityFilter(FILTER_ALL);
+  };
 
   // payment cards — read from the stored settlement rows (never recalculated)
   const paidNet = useMemo(
@@ -707,6 +768,64 @@ export function PayrollPage() {
             )}
           </div>
         </div>
+
+        {/* search + filters — always visible while scrolling */}
+        <div className="mt-2.5 flex flex-col gap-2 border-t border-border/60 pt-2.5 sm:flex-row sm:items-center">
+          <div className="relative flex-1">
+            <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name, ID or trade…"
+              aria-label="Search employees by name, ID or trade"
+              className="h-9 bg-card pl-8 pr-8 text-sm"
+            />
+            {search !== '' && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <Select value={tradeFilter} onValueChange={setTradeFilter}>
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by trade">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All trades</SelectItem>
+              {tradeFilterOptions.map((t) => (
+                <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+              ))}
+              <SelectItem value={FILTER_NONE}>No trade</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={nationalityFilter} onValueChange={setNationalityFilter}>
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by nationality">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All nationalities</SelectItem>
+              {nationalityFilterOptions.map((n) => (
+                <SelectItem key={n} value={n}>{n}</SelectItem>
+              ))}
+              <SelectItem value={FILTER_NONE}>No nationality</SelectItem>
+            </SelectContent>
+          </Select>
+          {filtersActive && (
+            <>
+              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title="Employees shown / total">
+                {filteredEmployees.length}/{employees.length}
+              </span>
+              <Button variant="ghost" size="sm" className="h-9 shrink-0 px-2.5 text-xs" onClick={clearFilters}>
+                <X size={13} /> Clear
+              </Button>
+            </>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -798,7 +917,7 @@ export function PayrollPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {employees.map((e, i) => {
+                  {filteredEmployees.map((e, i) => {
                     const paid = e.payment_status === 'paid';
                     const tradeBusy = busyKey === `trade:${e.id}`;
                     const settleBusy = busyKey === `settle:${e.id}`;
@@ -939,27 +1058,30 @@ export function PayrollPage() {
                       </TableRow>
                     );
                   })}
-                  {employees.length === 0 && (
+                  {filteredEmployees.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={10} className="py-10 text-center text-sm text-muted-foreground">
-                        No employees in this payroll period.
+                        {employees.length === 0
+                          ? 'No employees in this payroll period.'
+                          : 'No employees match the search / filters.'}
                       </TableCell>
                     </TableRow>
                   )}
                 </TableBody>
-                {employees.length > 0 && (
+                {filteredEmployees.length > 0 && (
                   <TableFooter>
                     <TableRow className="font-semibold hover:bg-transparent">
                       <TableCell colSpan={3} className="text-right text-xs uppercase tracking-wide text-muted-foreground">
-                        Total — {employees.length} employees
+                        Total — {filteredEmployees.length} employee{filteredEmployees.length === 1 ? '' : 's'}
+                        {filtersActive && ` (of ${employees.length})`}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-sm">{fmtHrs(report.totals.total_hours)} h</TableCell>
+                      <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.hours)} h</TableCell>
                       <TableCell />
-                      <TableCell className="text-right font-mono text-xs">{fmtMoney(report.totals.advances)}</TableCell>
-                      <TableCell className="text-right font-mono text-xs">{fmtMoney(report.totals.deductions)}</TableCell>
-                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(report.totals.gross_salary)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.advances)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.deductions)}</TableCell>
+                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(filteredTotals.gross)}</TableCell>
                       <TableCell className="text-right font-mono text-sm text-emerald-600 dark:text-emerald-400">
-                        AED {fmtMoney(report.totals.net_payable)}
+                        AED {fmtMoney(filteredTotals.net)}
                       </TableCell>
                       <TableCell />
                     </TableRow>
@@ -969,25 +1091,58 @@ export function PayrollPage() {
             </div>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Employees without a site are listed under Idle Employees (always the last section) in the Salary Sheet.
+              Hover (or tap) a Total Hours value for the complete calculation. Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 
-          {/* audit trail */}
+          {/* audit trail — collapsed behind an expandable icon button */}
           {report.audit.length > 0 && (
-            <section className="card-glow rounded-xl border bg-card p-5">
-              <SectionTitle icon={<Clock size={16} />} title="Audit trail" sub="Payments, reverts, edits, finalizations and reopens" />
-              <div className="mt-3 space-y-1.5">
-                {report.audit.map((a) => (
-                  <p key={a.id} className="text-xs text-muted-foreground">
-                    <span className="font-mono">{fmtDateTime(a.created_at)}</span>
-                    {' · '}<span className="font-semibold text-foreground">{a.actor_name ?? 'System'}</span>
-                    {' · '}{a.details}
-                  </p>
-                ))}
-              </div>
-            </section>
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => setAuditOpen((o) => !o)}
+                aria-expanded={auditOpen}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors',
+                  auditOpen
+                    ? 'border-brand/40 bg-brand/10 text-brand'
+                    : 'border-border/60 bg-card text-muted-foreground hover:text-foreground',
+                )}
+                title={auditOpen ? 'Hide the audit trail' : `Show all ${report.audit.length} audit entries`}
+              >
+                <History size={14} />
+                Audit trail
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-bold tabular-nums">
+                  {report.audit.length}
+                </span>
+                {auditOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+            </div>
           )}
+          <AnimatePresence initial={false}>
+            {auditOpen && report.audit.length > 0 && (
+              <motion.section
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.25, ease: EASE }}
+                className="overflow-hidden"
+              >
+                <div className="card-glow rounded-xl border bg-card p-5">
+                  <SectionTitle icon={<History size={16} />} title="Audit trail" sub={`All ${report.audit.length} entries — payments, reverts, edits, finalizations and reopens`} />
+                  <div className="mt-3 space-y-1.5">
+                    {report.audit.map((a) => (
+                      <p key={a.id} className="text-xs text-muted-foreground">
+                        <span className="font-mono">{fmtDateTime(a.created_at)}</span>
+                        {' · '}<span className="font-semibold text-foreground">{a.actor_name ?? 'System'}</span>
+                        {' · '}{a.details}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              </motion.section>
+            )}
+          </AnimatePresence>
         </>
       )}
 

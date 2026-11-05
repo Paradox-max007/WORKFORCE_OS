@@ -43,6 +43,7 @@ import {
   type LeaveRequestVM, type LeaveType, type Notification, type WarningVM,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -850,6 +851,10 @@ export function NotificationPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
   const version = useRealtimeVersion(['notification', 'leave_request', 'cancellation_request', 'warning', 'fine']);
+  // controlled tab — other pages deep-link straight to Warnings / Fines
+  // (e.g. the Notices & Fines card on the Employee Details page)
+  const activeTab = useAppStore((s) => s.notificationsTab);
+  const navigateToNotifications = useAppStore((s) => s.navigateToNotifications);
 
   const [notifications, setNotifications] = useState<Notification[] | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -1070,7 +1075,7 @@ export function NotificationPage() {
       {/* ------------------------------------------------------------------ */}
       {/* Main tabs: Requests / Warnings / Fines                               */}
       {/* ------------------------------------------------------------------ */}
-      <Tabs defaultValue="requests" className="w-full">
+      <Tabs value={activeTab} onValueChange={(v) => navigateToNotifications(v as 'requests' | 'warnings' | 'fines')} className="w-full">
         <TabsList className="w-full max-w-md">
           <TabsTrigger value="requests">
             <Inbox size={14} /> Requests

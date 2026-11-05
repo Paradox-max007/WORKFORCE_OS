@@ -131,17 +131,24 @@ interface SheetRow {
   src: { name: string; code: string; position: string };
 }
 
-/** Build a fresh PDF row from the employee record (roster source of truth). */
-const buildSheetRow = (e: EmployeeVM, siteId: string): SheetRow => ({
-  id: e.id,
-  name: e.full_name,
-  code: e.employee_code,
-  position: e.position ?? '',
-  signature: '',
-  isTeamLeader: e.is_team_leader && e.team_leader_site_id === siteId,
-  isSupervisor: (e.position ?? '').toLowerCase().includes('supervisor'),
-  src: { name: e.full_name, code: e.employee_code, position: e.position ?? '' },
-});
+/** Build a fresh PDF row from the employee record (roster source of truth).
+ *  The trade column shows the employee's TRADE (kept in sync with the Salary
+ *  Sheet / Payroll trade dropdowns), falling back to the position when no
+ *  trade is assigned. */
+const buildSheetRow = (e: EmployeeVM, siteId: string): SheetRow => {
+  const trade = e.trade_name ?? e.position ?? '';
+  return {
+    id: e.id,
+    name: e.full_name,
+    code: e.employee_code,
+    position: trade,
+    signature: '',
+    isTeamLeader: e.is_team_leader && e.team_leader_site_id === siteId,
+    isSupervisor: trade.toLowerCase().includes('supervisor')
+      || (e.position ?? '').toLowerCase().includes('supervisor'),
+    src: { name: e.full_name, code: e.employee_code, position: trade },
+  };
+};
 
 interface ExtraRow {
   name: string;
@@ -997,7 +1004,7 @@ function SiteEmployeesView({
     const q = search.trim().toLowerCase();
     const list = q
       ? siteEmployees.filter((e) =>
-          `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`
+          `${e.full_name} ${e.employee_code} ${e.trade_name ?? ''} ${e.position ?? ''} ${e.nationality ?? ''}`
             .toLowerCase()
             .includes(q),
         )

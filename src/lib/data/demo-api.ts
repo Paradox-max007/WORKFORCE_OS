@@ -1321,8 +1321,11 @@ export const demoApi = {
     if (!pe) throw new Error('Payroll employee not found');
     if (pe.payment_status === 'paid') throw new Error('Already marked paid');
     const period = db.payrollPeriods.find((p) => p.id === pe.payroll_period_id);
-    if (!period || period.status !== 'finalized') {
-      throw new Error('Finalize the payroll before marking salaries paid');
+    if (!period) throw new Error('Payroll period not found');
+    // the ONLY requirement: the employee actually has a salary this month
+    // (marking paid no longer requires a finalized period)
+    if (!(pe.gross_salary > 0)) {
+      throw new Error('No salary calculated for this employee this month');
     }
     // optional last-second adjustment values from the payment dialog
     if (input.advance != null || input.deduction != null || input.notes != null) {

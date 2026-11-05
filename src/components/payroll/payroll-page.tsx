@@ -9,20 +9,25 @@
 // sites:
 //
 //   • every employee appears EXACTLY ONCE (multi-site hours consolidated)
-//   • hovering / tapping Total Hours opens the complete calculation breakdown
-//     (site distribution, qualification, every rate line) — read from the
-//     sheet records, never recalculated here
-//   • advance / deduction / net settlement and the Paid/Unpaid toggle live
-//     here; marking paid turns the employee's rows green in every Salary
-//     Sheet section
+//   • ADVANCE and DEDUCTION are always-visible table columns (no separate
+//     edit button); in EDIT MODE they become inline inputs with immediate
+//     save, and the TRADE column becomes a dropdown — picking a trade
+//     overwrites the stored trade + assignment history and re-prices the
+//     month, so every linked page (Salary Sheet, Employee Details,
+//     Attendance page, Attendance PDF, …) updates together
+//   • MARK PAID is active whenever the employee HAS a salary this month
+//     (no finalized-period requirement); marking paid turns the employee's
+//     rows green in every Salary Sheet section
+//   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
+//     (Σ net of unpaid)
 //   • reverting a payment is super-admin only and audited with a reason
 //   • shares the selected month with the Salary Sheet (app store)
 // ============================================================================
 
 import { motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, Check, Clock, Loader2, Lock, LockOpen, PencilLine,
-  TriangleAlert, UserX, Users, Wallet,
+  BadgeCheck, Banknote, Check, Clock, Eye, Loader2, Lock, LockOpen, PencilLine,
+  Scale, TriangleAlert, UserX, Users, Wallet,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -41,14 +46,14 @@ import {
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+  Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
 import { dataApi } from '@/lib/data';
 import { fmtDate, fmtDateTime, initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  type PayrollEmployeeVM, type SalarySheetReport,
+  type PayrollEmployeeVM, type SalarySheetReport, type Trade,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -60,11 +65,15 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 
 const fmtMoney = (n: number): string => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtHrs = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 const selectableYears = (): number[] => {
   const y = new Date().getFullYear();
   return [y - 2, y - 1, y];
 };
+
+/** sentinel for "no trade" in the edit-mode dropdown (Radix needs non-empty values) */
+const NO_TRADE = '__none__';
 
 const ROLE_LABEL: Record<string, string> = {
   standard: 'Standard', team_leader: 'Team Leader', supervisor: 'Supervisor',
@@ -143,7 +152,7 @@ function CalculationPanel({ e, year, month }: {
   });
   groups.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
 
-  const lineSum = Math.round(groups.reduce((n, g) => n + g.gross, 0) * 100) / 100;
+  const lineSum = round2(groups.reduce((n, g) => n + g.gross, 0));
   const reconciles = Math.abs(lineSum - e.gross_salary) < 0.011;
 
   return (
@@ -333,96 +342,55 @@ function HoursCell({ e, year, month }: { e: PayrollEmployeeVM; year: number; mon
 }
 
 // ---------------------------------------------------------------------------
-// Adjustment dialog (advance / deduction / notes) — settlement administration
+// Inline settlement input (edit mode) — advance / deduction. Saves on blur /
+// Enter; Escape reverts. Values are committed immediately (audited RPC).
 // ---------------------------------------------------------------------------
-function AdjustmentDialog({ employee, open, onOpenChange, onSaved }: {
-  employee: PayrollEmployeeVM | null;
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  onSaved: () => void;
+function AdjustInput({ value, busy, onCommit, label }: {
+  value: number;
+  busy: boolean;
+  onCommit: (next: number) => void;
+  label: string;
 }) {
-  const [advance, setAdvance] = useState('0');
-  const [deduction, setDeduction] = useState('0');
-  const [notes, setNotes] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [text, setText] = useState(String(value));
+  const [focused, setFocused] = useState(false);
 
+  // adopt fresh stored values unless the user is typing
   useEffect(() => {
-    if (open && employee) {
-      setAdvance(String(employee.advance));
-      setDeduction(String(employee.deduction));
-      setNotes(employee.notes ?? '');
+    if (!focused) setText(String(value));
+  }, [value, focused]);
+
+  const commit = (): void => {
+    const n = Number(text);
+    if (!Number.isFinite(n) || n < 0) {
+      toast.error(`${label} must be 0 or more`);
+      setText(String(value));
+      return;
     }
-  }, [open, employee]);
-
-  if (!employee) return null;
-
-  const adv = Number(advance) || 0;
-  const ded = Number(deduction) || 0;
-  const net = Math.round((employee.gross_salary - adv - ded) * 100) / 100;
-
-  const submit = async (): Promise<void> => {
-    if (adv < 0 || ded < 0) { toast.error('Advance and deduction must be 0 or more'); return; }
-    setSaving(true);
-    try {
-      await dataApi.updatePayrollAdjustment(employee.id, {
-        advance: adv, deduction: ded, notes: notes.trim() || null,
-      });
-      toast.success('Adjustment saved', { description: `${employee.full_name} — net AED ${fmtMoney(net)}` });
-      onOpenChange(false);
-      onSaved();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save');
-    } finally {
-      setSaving(false);
-    }
+    const next = round2(n);
+    if (next !== value) onCommit(next);
+    else setText(String(value));
   };
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!saving) onOpenChange(v); }}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Adjust settlement — {employee.full_name}</DialogTitle>
-          <DialogDescription>Advances and deductions belong to the employee&apos;s monthly settlement, not to any site.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Advance (AED)</Label>
-              <Input type="number" min={0} step="0.01" value={advance}
-                onChange={(e) => setAdvance(e.target.value)} className="h-11 bg-card font-mono" />
-            </div>
-            <div className="space-y-2">
-              <Label>Deduction (AED)</Label>
-              <Input type="number" min={0} step="0.01" value={deduction}
-                onChange={(e) => setDeduction(e.target.value)} className="h-11 bg-card font-mono" />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>Remarks</Label>
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)}
-              placeholder="Optional remarks" className="h-11" />
-          </div>
-          <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-            <div className="flex justify-between"><span className="text-muted-foreground">Gross salary</span><span className="font-mono">AED {fmtMoney(employee.gross_salary)}</span></div>
-            <div className="flex justify-between"><span className="text-muted-foreground">− Advance − Deduction</span><span className="font-mono">AED {fmtMoney(adv + ded)}</span></div>
-            <div className="mt-1 flex justify-between border-t pt-1 font-semibold">
-              <span>Net salary</span><span className="font-mono text-brand">AED {fmtMoney(net)}</span>
-            </div>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
-          <Button onClick={submit} disabled={saving} className="brand-gradient font-semibold text-white">
-            {saving ? <Loader2 size={15} className="mr-1 animate-spin" /> : null} Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Input
+      type="number" min={0} step="0.01" inputMode="decimal" disabled={busy}
+      className="h-8 w-24 border-border/70 bg-card text-right font-mono text-xs"
+      value={text}
+      onFocus={() => setFocused(true)}
+      onBlur={() => { setFocused(false); commit(); }}
+      onChange={(e) => setText(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') { setText(String(value)); e.currentTarget.blur(); }
+      }}
+      aria-label={`${label} of this employee`}
+    />
   );
 }
 
 // ---------------------------------------------------------------------------
-// Payment dialog (mark paid — records who and when)
+// Payment dialog (mark paid — records who and when). Settlement values are
+// edited inline in the table; this dialog only confirms the payment.
 // ---------------------------------------------------------------------------
 function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
   employee: PayrollEmployeeVM | null;
@@ -430,34 +398,26 @@ function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
   onOpenChange: (v: boolean) => void;
   onSaved: () => void;
 }) {
-  const [advance, setAdvance] = useState('0');
-  const [deduction, setDeduction] = useState('0');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open && employee) {
-      setAdvance(String(employee.advance));
-      setDeduction(String(employee.deduction));
-      setNotes(employee.notes ?? '');
-    }
+    if (open && employee) setNotes(employee.notes ?? '');
   }, [open, employee]);
 
   if (!employee) return null;
 
-  const adv = Number(advance) || 0;
-  const ded = Number(deduction) || 0;
-  const net = Math.round((employee.gross_salary - adv - ded) * 100) / 100;
-
   const submit = async (): Promise<void> => {
-    if (adv < 0 || ded < 0) { toast.error('Advance and deduction must be 0 or more'); return; }
     setSaving(true);
     try {
       await dataApi.markPayrollPaid(employee.id, {
-        advance: adv, deduction: ded, notes: notes.trim() || null, paid: true,
+        advance: employee.advance,
+        deduction: employee.deduction,
+        notes: notes.trim() || null,
+        paid: true,
       });
       toast.success('Marked as paid', {
-        description: `${employee.full_name} — AED ${fmtMoney(net)}. Green in every Salary Sheet section.`,
+        description: `${employee.full_name} — AED ${fmtMoney(employee.net_salary)}. Green in every Salary Sheet section.`,
       });
       onOpenChange(false);
       onSaved();
@@ -479,27 +439,20 @@ function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Advance (AED)</Label>
-              <Input type="number" min={0} step="0.01" value={advance}
-                onChange={(e) => setAdvance(e.target.value)} className="h-11 bg-card font-mono" />
-            </div>
-            <div className="space-y-2">
-              <Label>Deduction (AED)</Label>
-              <Input type="number" min={0} step="0.01" value={deduction}
-                onChange={(e) => setDeduction(e.target.value)} className="h-11 bg-card font-mono" />
+          <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+            <div className="flex justify-between"><span className="text-muted-foreground">Gross salary</span><span className="font-mono">AED {fmtMoney(employee.gross_salary)}</span></div>
+            <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Advance</span><span className="font-mono">AED {fmtMoney(employee.advance)}</span></div>
+            <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Deduction</span><span className="font-mono">AED {fmtMoney(employee.deduction)}</span></div>
+            <div className="mt-1 flex justify-between border-t pt-1 font-semibold">
+              <span>Net salary payable</span><span className="font-mono text-emerald-500">AED {fmtMoney(employee.net_salary)}</span>
             </div>
           </div>
           <div className="space-y-2">
             <Label>Remarks</Label>
             <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional remarks" className="h-11" />
-          </div>
-          <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-            <div className="flex justify-between"><span className="text-muted-foreground">Gross salary</span><span className="font-mono">AED {fmtMoney(employee.gross_salary)}</span></div>
-            <div className="mt-1 flex justify-between border-t pt-1 font-semibold">
-              <span>Net salary payable</span><span className="font-mono text-emerald-500">AED {fmtMoney(net)}</span>
-            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Change the advance / deduction in the table (Edit mode) before confirming if needed.
+            </p>
           </div>
         </div>
         <DialogFooter>
@@ -589,11 +542,15 @@ export function PayrollPage() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
 
-  const [adjustTarget, setAdjustTarget] = useState<PayrollEmployeeVM | null>(null);
   const [payTarget, setPayTarget] = useState<PayrollEmployeeVM | null>(null);
   const [unpayTarget, setUnpayTarget] = useState<PayrollEmployeeVM | null>(null);
   const [finalizeOpen, setFinalizeOpen] = useState(false);
   const [reopenOpen, setReopenOpen] = useState(false);
+
+  // ---- edit mode (trade dropdown + inline advance / deduction) -------------
+  const [editMode, setEditMode] = useState(false);
+  const [tradeOptions, setTradeOptions] = useState<Trade[]>([]);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const load = (): void => {
     setLoading(true);
@@ -607,6 +564,16 @@ export function PayrollPage() {
   };
 
   useEffect(load, [year, month, realtimeVersion]);
+
+  // trades for the edit-mode dropdown
+  useEffect(() => {
+    if (!editMode) return;
+    let cancelled = false;
+    dataApi.listTrades()
+      .then((rows) => { if (!cancelled) setTradeOptions(rows); })
+      .catch(() => { if (!cancelled) setTradeOptions([]); });
+    return () => { cancelled = true; };
+  }, [editMode, realtimeVersion]);
 
   const generate = async (): Promise<void> => {
     setGenerating(true);
@@ -625,9 +592,64 @@ export function PayrollPage() {
   const finalized = period?.status === 'finalized';
   const employees = useMemo(() => report?.employees ?? [], [report]);
 
+  // payment cards — read from the stored settlement rows (never recalculated)
+  const paidNet = useMemo(
+    () => round2(employees.filter((e) => e.payment_status === 'paid').reduce((n, e) => n + e.net_salary, 0)),
+    [employees],
+  );
+  const balanceToPay = useMemo(
+    () => round2(employees.filter((e) => e.payment_status !== 'paid').reduce((n, e) => n + e.net_salary, 0)),
+    [employees],
+  );
+
+  // ---- inline settlement save (advance / deduction) ------------------------
+  const onAdjust = async (e: PayrollEmployeeVM, advance: number, deduction: number): Promise<void> => {
+    setBusyKey(`settle:${e.id}`);
+    try {
+      await dataApi.updatePayrollAdjustment(e.id, { advance, deduction, notes: e.notes });
+      toast.success('Settlement saved', {
+        description: `${e.full_name} — advance AED ${fmtMoney(advance)} · deduction AED ${fmtMoney(deduction)}`,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  // ---- change an employee's trade straight from Payroll (edit mode) -------
+  // Immediate save: the pick overwrites the stored trade + assignment history
+  // (effective from the 1st of the payroll month) and re-prices the month.
+  // Every linked page reads the same rows → all of them update together.
+  const onTradeChange = async (e: PayrollEmployeeVM, tradeId: string | null): Promise<void> => {
+    if ((tradeId ?? null) === (e.trade_id ?? null)) return;
+    if (e.payment_status === 'paid') {
+      toast.error('This employee is already marked paid — reopen the payroll first');
+      return;
+    }
+    setBusyKey(`trade:${e.id}`);
+    try {
+      await dataApi.updateSalarySheetRow({ payroll_employee_id: e.id, trade_id: tradeId });
+      const tName = tradeId
+        ? tradeOptions.find((t) => t.id === tradeId)?.name ?? 'the new trade'
+        : 'no trade';
+      toast.success('Trade updated', {
+        description: `${e.full_name} → ${tName} — month re-priced; Salary Sheet, Employee Details, Attendance and every linked page now use the new trade.`,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to change trade');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const toggleEditMode = (): void => setEditMode((o) => !o);
+
   return (
     <div className="mx-auto max-w-6xl space-y-4">
-      {/* sticky action bar — Finalize / Reopen stay visible while scrolling */}
+      {/* sticky action bar — Edit / Finalize / Reopen stay visible while scrolling */}
       <div className="sticky top-16 z-30 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
         <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -661,6 +683,18 @@ export function PayrollPage() {
                 {selectableYears().map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}
               </SelectContent>
             </Select>
+            {report?.exists && (
+              <Button
+                variant={editMode ? 'default' : 'outline'}
+                size="sm"
+                onClick={toggleEditMode}
+                className={cn(editMode && 'brand-gradient font-semibold text-white')}
+              >
+                {editMode
+                  ? <><Eye size={14} /> Done</>
+                  : <><PencilLine size={14} /> Edit</>}
+              </Button>
+            )}
             {isSuperAdmin && report?.exists && !finalized && (
               <Button size="sm" onClick={() => setFinalizeOpen(true)} className="brand-gradient font-semibold text-white">
                 <Lock size={14} /> Finalize
@@ -677,8 +711,8 @@ export function PayrollPage() {
 
       {loading ? (
         <div className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-3">
-            {[0, 1, 2].map((i) => <Skeleton key={i} className="h-24 rounded-xl" />)}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-24 rounded-xl" />)}
           </div>
           <Skeleton className="h-72 rounded-xl" />
         </div>
@@ -696,12 +730,26 @@ export function PayrollPage() {
         />
       ) : (
         <>
-          {/* totals */}
-          <div className="grid gap-4 sm:grid-cols-3">
+          {/* edit-mode banner */}
+          {editMode && (
+            <p className="flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-2.5 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+              <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+              <span>
+                <b>Edit mode</b> — pick the <b>trade</b> from the dropdown (overwrites the stored trade
+                and re-prices the month — updates the Salary Sheet, Employee Details, Attendance and
+                every linked page) and edit <b>advance / deduction</b> inline (saves on blur or Enter).
+                Paid employees are protected. Salary calculation edits stay in the <b>Salary Sheet</b>.
+              </span>
+            </p>
+          )}
+
+          {/* totals — incl. the new Paid salary & Balance to pay cards */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[
               { icon: <Users size={12} />, label: 'Total employees', value: String(report.totals.employees), hint: `${report.totals.paid_count} paid · ${report.totals.unpaid_count} unpaid`, tone: 'default' as const },
-              { icon: <Banknote size={12} />, label: 'Total gross salary', value: `AED ${fmtMoney(report.totals.gross_salary)}`, hint: 'Reconciles with the Salary Sheet', tone: 'brand' as const },
-              { icon: <Wallet size={12} />, label: 'Net payable', value: `AED ${fmtMoney(report.totals.net_payable)}`, hint: `Adv. ${fmtMoney(report.totals.advances)} · Ded. ${fmtMoney(report.totals.deductions)}`, tone: 'emerald' as const },
+              { icon: <Banknote size={12} />, label: 'Total gross salary', value: `AED ${fmtMoney(report.totals.gross_salary)}`, hint: `Adv. ${fmtMoney(report.totals.advances)} · Ded. ${fmtMoney(report.totals.deductions)}`, tone: 'brand' as const },
+              { icon: <BadgeCheck size={12} />, label: 'Paid salary', value: `AED ${fmtMoney(paidNet)}`, hint: `${report.totals.paid_count} employee${report.totals.paid_count === 1 ? '' : 's'} paid (net)`, tone: 'emerald' as const },
+              { icon: <Scale size={12} />, label: 'Balance to pay', value: `AED ${fmtMoney(balanceToPay)}`, hint: `${report.totals.unpaid_count} employee${report.totals.unpaid_count === 1 ? '' : 's'} unpaid (net)`, tone: 'amber' as const },
             ].map((c, i) => (
               <motion.div
                 key={c.label}
@@ -712,6 +760,7 @@ export function PayrollPage() {
                   'card-glow rounded-xl border bg-card p-4',
                   c.tone === 'brand' && 'border-brand/25 bg-brand/[0.05]',
                   c.tone === 'emerald' && 'border-emerald-500/25 bg-emerald-500/[0.05]',
+                  c.tone === 'amber' && 'border-amber-500/25 bg-amber-500/[0.05]',
                 )}
               >
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -721,6 +770,7 @@ export function PayrollPage() {
                   'mt-1.5 text-2xl font-bold tracking-tight tabular-nums',
                   c.tone === 'brand' && 'text-brand',
                   c.tone === 'emerald' && 'text-emerald-500',
+                  c.tone === 'amber' && 'text-amber-500',
                 )}>
                   {c.value}
                 </p>
@@ -729,7 +779,7 @@ export function PayrollPage() {
             ))}
           </div>
 
-          {/* consolidated table — ONE row per employee */}
+          {/* consolidated table — ONE row per employee, settlement always visible */}
           <section className="card-glow overflow-hidden rounded-xl border bg-card">
             <div className="overflow-x-auto">
               <Table>
@@ -740,13 +790,21 @@ export function PayrollPage() {
                     <TableHead>Code</TableHead>
                     <TableHead className="text-right">Total Hours</TableHead>
                     <TableHead>Trade</TableHead>
+                    <TableHead className="text-right">Advance</TableHead>
+                    <TableHead className="text-right">Deduction</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
+                    <TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {employees.map((e, i) => {
                     const paid = e.payment_status === 'paid';
+                    const tradeBusy = busyKey === `trade:${e.id}`;
+                    const settleBusy = busyKey === `settle:${e.id}`;
+                    // paid employees (and removed ones) keep read-only cells
+                    const editable = editMode && !paid && e.status !== 'deleted';
+                    const hasSalary = e.gross_salary > 0;
                     return (
                       <TableRow
                         key={e.id}
@@ -783,10 +841,64 @@ export function PayrollPage() {
                           <HoursCell e={e} year={year} month={month} />
                         </TableCell>
                         <TableCell className="text-xs">
-                          {e.trade_name ?? <span className="text-amber-500">no trade</span>}
+                          {editable ? (
+                            <span className="inline-flex items-center gap-1.5">
+                              {tradeBusy && <Loader2 size={12} className="animate-spin text-muted-foreground" />}
+                              <Select
+                                value={e.trade_id ?? NO_TRADE}
+                                disabled={tradeBusy}
+                                onValueChange={(v) => { void onTradeChange(e, v === NO_TRADE ? null : v); }}
+                              >
+                                <SelectTrigger className="h-8 w-40 bg-card text-xs" aria-label={`Trade of ${e.full_name}`}>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value={NO_TRADE}>No trade</SelectItem>
+                                  {tradeOptions.map((t) => (
+                                    <SelectItem key={t.id} value={t.id}>
+                                      {t.name}{t.is_active ? '' : ' (inactive)'}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </span>
+                          ) : (
+                            e.trade_name ?? <span className="text-amber-500">no trade</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {editable ? (
+                            <div className="flex justify-end">
+                              <AdjustInput
+                                value={e.advance} busy={settleBusy} label="Advance"
+                                onCommit={(next) => { void onAdjust(e, next, e.deduction); }}
+                              />
+                            </div>
+                          ) : (
+                            <span className={cn('font-mono text-xs', e.advance > 0 ? '' : 'text-muted-foreground')}>
+                              {e.advance > 0 ? fmtMoney(e.advance) : '—'}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {editable ? (
+                            <div className="flex justify-end">
+                              <AdjustInput
+                                value={e.deduction} busy={settleBusy} label="Deduction"
+                                onCommit={(next) => { void onAdjust(e, e.advance, next); }}
+                              />
+                            </div>
+                          ) : (
+                            <span className={cn('font-mono text-xs', e.deduction > 0 ? '' : 'text-muted-foreground')}>
+                              {e.deduction > 0 ? fmtMoney(e.deduction) : '—'}
+                            </span>
+                          )}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm font-semibold">
                           AED {fmtMoney(e.gross_salary)}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                          AED {fmtMoney(e.net_salary)}
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-1.5">
@@ -810,25 +922,17 @@ export function PayrollPage() {
                                 )}
                               </>
                             ) : (
-                              <>
-                                <Button
-                                  variant="ghost" size="icon" className="size-8"
-                                  disabled={paid}
-                                  title="Adjust advance / deduction"
-                                  onClick={() => setAdjustTarget(e)}
-                                >
-                                  <PencilLine size={14} />
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  disabled={!finalized}
-                                  title={finalized ? 'Mark the monthly salary paid' : 'Finalize the payroll first'}
-                                  onClick={() => setPayTarget(e)}
-                                  className="h-8 brand-gradient px-3 text-xs font-semibold text-white"
-                                >
-                                  <BadgeCheck size={13} className="mr-1" /> Mark paid
-                                </Button>
-                              </>
+                              <Button
+                                size="sm"
+                                disabled={!hasSalary}
+                                title={hasSalary
+                                  ? `Mark the monthly salary paid (net AED ${fmtMoney(e.net_salary)})`
+                                  : 'No salary calculated for this employee this month'}
+                                onClick={() => setPayTarget(e)}
+                                className="h-8 brand-gradient px-3 text-xs font-semibold text-white"
+                              >
+                                <BadgeCheck size={13} className="mr-1" /> Mark paid
+                              </Button>
                             )}
                           </div>
                         </TableCell>
@@ -837,24 +941,42 @@ export function PayrollPage() {
                   })}
                   {employees.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                      <TableCell colSpan={10} className="py-10 text-center text-sm text-muted-foreground">
                         No employees in this payroll period.
                       </TableCell>
                     </TableRow>
                   )}
                 </TableBody>
+                {employees.length > 0 && (
+                  <TableFooter>
+                    <TableRow className="font-semibold hover:bg-transparent">
+                      <TableCell colSpan={3} className="text-right text-xs uppercase tracking-wide text-muted-foreground">
+                        Total — {employees.length} employees
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-sm">{fmtHrs(report.totals.total_hours)} h</TableCell>
+                      <TableCell />
+                      <TableCell className="text-right font-mono text-xs">{fmtMoney(report.totals.advances)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{fmtMoney(report.totals.deductions)}</TableCell>
+                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(report.totals.gross_salary)}</TableCell>
+                      <TableCell className="text-right font-mono text-sm text-emerald-600 dark:text-emerald-400">
+                        AED {fmtMoney(report.totals.net_payable)}
+                      </TableCell>
+                      <TableCell />
+                    </TableRow>
+                  </TableFooter>
+                )}
               </Table>
             </div>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) a Total Hours value for the complete calculation. Employees without a site are listed under Idle Employees (always the last section) in the Salary Sheet.
             </p>
           </section>
 
           {/* audit trail */}
           {report.audit.length > 0 && (
             <section className="card-glow rounded-xl border bg-card p-5">
-              <SectionTitle icon={<Clock size={16} />} title="Audit trail" sub="Payments, reverts, finalizations and reopens" />
+              <SectionTitle icon={<Clock size={16} />} title="Audit trail" sub="Payments, reverts, edits, finalizations and reopens" />
               <div className="mt-3 space-y-1.5">
                 {report.audit.map((a) => (
                   <p key={a.id} className="text-xs text-muted-foreground">
@@ -870,12 +992,6 @@ export function PayrollPage() {
       )}
 
       {/* dialogs */}
-      <AdjustmentDialog
-        employee={adjustTarget}
-        open={adjustTarget !== null}
-        onOpenChange={(v) => { if (!v) setAdjustTarget(null); }}
-        onSaved={load}
-      />
       <PaymentDialog
         employee={payTarget}
         open={payTarget !== null}

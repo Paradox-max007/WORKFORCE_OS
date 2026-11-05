@@ -342,8 +342,10 @@ export function AttendancePage() {
   // marking cells stay reachable under both the old and the new site.
   const sections = useMemo<SiteSection[]>(() => {
     const q = debouncedSearch.toLowerCase().trim();
+    // (search covers the trade too — the attendance table shows the employee's
+    //  TRADE, falling back to the position when no trade is assigned)
     const matches = (e: EmployeeVM) =>
-      !q || `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q);
+      !q || `${e.full_name} ${e.employee_code} ${e.trade_name ?? ''} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q);
     const byName = (a: EmployeeVM, b: EmployeeVM) => a.full_name.localeCompare(b.full_name);
 
     // admins only ever see their assigned sites' sections
@@ -977,13 +979,16 @@ export function AttendancePage() {
                           </div>
                         </div>
                       </td>
-                      {/* trade — its own dedicated column (pins left from lg up) */}
+                      {/* trade — its own dedicated column (pins left from lg up);
+                          shows the employee's TRADE (kept in sync with the
+                          Salary Sheet / Payroll trade dropdowns), falling back
+                          to the position when no trade is assigned */}
                       <td className="lg:sticky lg:left-[150px] z-10 border-x border-b border-foreground/15 bg-card px-2 py-1.5">
                         <span
                           className={cn('block truncate text-[11px] font-medium text-foreground/80', moved && 'opacity-60')}
-                          title={emp.position ?? undefined}
+                          title={emp.trade_name ?? emp.position ?? undefined}
                         >
-                          {emp.position ?? '—'}
+                          {emp.trade_name ?? emp.position ?? '—'}
                         </span>
                       </td>
                       {/* days — one editable cell per day for the segment(s) at this
@@ -1369,7 +1374,7 @@ export function AttendancePage() {
           >
             <SectionTitle
               title={`${calendarEmployee.full_name} — ${MONTH_NAMES[month - 1]} ${year}`}
-              sub={`${calendarEmployee.employee_code} · ${calendarEmployee.position ?? 'No trade'}${calendarEmployee.site_name ? ' · ' + calendarEmployee.site_name : ' · Idle'}`}
+              sub={`${calendarEmployee.employee_code} · ${calendarEmployee.trade_name ?? calendarEmployee.position ?? 'No trade'}${calendarEmployee.site_name ? ' · ' + calendarEmployee.site_name : ' · Idle'}`}
             />
             <div className="mt-4 grid grid-cols-7 gap-1.5">
               {WEEKDAYS.map((w) => (
@@ -1626,7 +1631,7 @@ export function AttendancePage() {
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[13px] font-medium leading-tight">{emp.full_name}</p>
                       <p className="truncate font-mono text-[10px] leading-tight text-muted-foreground">
-                        {emp.employee_code} · {emp.position ?? 'No trade'}
+                        {emp.employee_code} · {emp.trade_name ?? emp.position ?? 'No trade'}
                       </p>
                     </div>
                     <span className="hidden shrink-0 rounded-full border bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground sm:inline-flex">

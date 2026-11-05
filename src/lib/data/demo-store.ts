@@ -11,6 +11,7 @@ import {
   type Attendance,
   type CancellationRequest,
   type Camp,
+  type CardType,
   type Company,
   type Employee,
   type ExperienceTier,
@@ -161,6 +162,19 @@ export interface DemoDB {
   tradeRateAudit: DemoAuditEntry[];
   // manpower companies (own table — the Add Employee company dropdown)
   companies: Company[];
+  // payroll card types (own table — Lulu Card, C3 Card, …)
+  cardTypes: CardType[];
+  // employee sticky notes (Payroll page — quick reference comments)
+  employeeNotes: DemoEmployeeNote[];
+}
+
+/** Raw employee-note row (author name resolved at read time from profiles) */
+export interface DemoEmployeeNote {
+  id: string;
+  employee_id: string;
+  note: string;
+  created_by: string | null;
+  created_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +221,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 12,
+    version: 13,
     profiles: [],
     sites: [],
     camps: [],
@@ -233,6 +247,8 @@ function seedDB(): DemoDB {
     payrollAudit: [],
     tradeRateAudit: [],
     companies: [],
+    cardTypes: [],
+    employeeNotes: [],
   };
 
   // ---- profiles -----------------------------------------------------------
@@ -266,6 +282,12 @@ function seedDB(): DemoDB {
     { id: uid(), name: 'Gulf Contracting LLC', created_at: nowISO() },
     { id: uid(), name: 'Emirates Facilities Services', created_at: nowISO() },
   ];
+
+  // payroll card types (own table — feeds the Document Details card type
+  // dropdown + the Payroll / Employees payment-method filters)
+  const luluCard: CardType = { id: uid(), name: 'Lulu Card', created_at: nowISO() };
+  const c3Card: CardType = { id: uid(), name: 'C3 Card', created_at: nowISO() };
+  db.cardTypes = [luluCard, c3Card];
 
   // site assignments — the two normal admins can only mark their assigned sites
   db.siteAssignments = [
@@ -369,6 +391,8 @@ function seedDB(): DemoDB {
     rating: [5, 4.8, 4.5, 4.2, 5, 4.7, 4.1, 3.5, 4.9, 4.6, 4.4, 4.8, 4.5, 4.7, 4.2][n - 1] ?? 4.5,
     status: 'active',
     photo: null,
+    payment_type: null,
+    card_type_id: null,
     is_team_leader: leaderSite !== null,
     team_leader_site_id: leaderSite?.id ?? null,
     // historical hours from before PULSE tracking (Working Hours module)
@@ -434,6 +458,41 @@ function seedDB(): DemoDB {
   inCamp(alNahda, ['Arun Nair', 'Joseph Santos', 'Ahmed Hassan', 'John Mwangi'], 'A', ['101', '102', '103', '104']);
   inCamp(muweilah, ['Suresh Patel', 'Dilip Shrestha', 'Ramesh Yadav', 'Omar Farooq'], 'C', ['12', '14', '16', '18']);
   const emp = (name: string): Employee => db.employees.find((e) => e.full_name === name)!;
+
+  // ---- payment methods (cash / card mix for the Payroll column & filter) ---
+  const setPay = (name: string, type: 'cash' | 'card', card: CardType | null = null): void => {
+    const e = emp(name);
+    if (e) { e.payment_type = type; e.card_type_id = type === 'card' ? card?.id ?? null : null; }
+  };
+  setPay('Rajesh Kumar', 'card', luluCard);
+  setPay('Muhammad Iqbal', 'card', c3Card);
+  setPay('Arun Nair', 'cash');
+  setPay('Kamal Hussain', 'card', luluCard);
+  setPay('Suresh Patel', 'cash');
+  setPay('Dilip Shrestha', 'card', c3Card);
+  setPay('Joseph Santos', 'cash');
+  setPay('Ahmed Hassan', 'card', luluCard);
+  setPay('Rahim Uddin', 'cash');
+  setPay('Sandeep Singh', 'card', luluCard);
+  setPay('John Mwangi', 'cash');
+  // Tharindu Perera + Ramesh Yadav stay unset (Not set filter demo)
+  setPay('Ibrahim Toure', 'cash');
+  setPay('Omar Farooq', 'card', c3Card);
+
+  // ---- employee sticky notes (Payroll page quick-reference demo) ----------
+  const mkNote = (name: string, note: string, hoursAgo: number): DemoEmployeeNote => ({
+    id: uid(),
+    employee_id: emp(name).id,
+    note,
+    created_by: superP.id,
+    created_at: new Date(Date.now() - hoursAgo * 3600000).toISOString(),
+  });
+  db.employeeNotes = [
+    mkNote('Rajesh Kumar', 'Prefers his salary advance on the 20th — coordinate with the site supervisor first.', 30),
+    mkNote('Rajesh Kumar', 'Lulu Card renewed until Dec 2026.', 6),
+    mkNote('Muhammad Iqbal', 'Send salary screenshots to his brother on WhatsApp after every payout.', 54),
+    mkNote('Sandeep Singh', 'Strong candidate for team leader once a slot opens at Marina Heights.', 100),
+  ];
 
   // ---- site transfer (historical attribution demo) ---------------------------
   // Kamal Hussain (Welder) moved NPC Tower → Marina Bay 12 days ago: his
@@ -636,7 +695,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 12) return parsed;
+      if (parsed.version === 13) return parsed;
     }
   } catch {
     // corrupted → reseed

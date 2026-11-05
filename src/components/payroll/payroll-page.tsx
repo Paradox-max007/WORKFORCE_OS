@@ -22,8 +22,16 @@
 //     (Σ net of unpaid)
 //   • SEARCH (name / employee ID / trade) plus FILTERS in the sticky bar —
 //     the SAME set as the Employees page: region, country (cascading), camp,
-//     trade and status (employee status + paid/unpaid). They narrow the
-//     table; the top cards stay period totals
+//     trade, status (employee status + paid/unpaid) and PAYMENT METHOD
+//     (cash / Lulu Cards / C3 Cards / any other card type in the DB / not
+//     set). They narrow the table; the top cards stay period totals
+//   • a STICKY-NOTE ICON next to every employee name opens a quick-notes
+//     popover — notepad-style comments stored on the EMPLOYEE (not the
+//     period) for quick future reference; the icon lights up amber and
+//     shows the count when notes exist
+//   • PAYMENT METHOD column right after Trade: “Cash”, or the CARD TYPE
+//     only when the employee is paid by card (set on the Employee Details
+//     page → Document Details)
 //   • the AUDIT TRAIL is collapsed behind an expandable icon button; opening
 //     it lists every audit entry, written with employee names & codes
 //   • reverting a payment is super-admin only and audited with a reason
@@ -32,9 +40,9 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, Check, ChevronDown, ChevronUp, Clock, Eye, History,
-  Loader2, Lock, LockOpen, PencilLine, Scale, Search, TriangleAlert, UserX,
-  Users, Wallet, X,
+  BadgeCheck, Banknote, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
+  History, Loader2, Lock, LockOpen, PencilLine, Scale, Search, StickyNote,
+  Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -49,19 +57,24 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
+  Popover, PopoverContent, PopoverTrigger,
+} from '@/components/ui/popover';
+import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
+import { Textarea } from '@/components/ui/textarea';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
 import { dataApi } from '@/lib/data';
-import { fmtDate, fmtDateTime, initials } from '@/lib/format';
+import { fmtDate, fmtDateTime, fmtTimeAgo, initials } from '@/lib/format';
 import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
 import { cn } from '@/lib/utils';
 import {
-  type PayrollEmployeeVM, type SalarySheetReport, type Trade,
+  type CardType, type EmployeeNote, type PayrollEmployeeVM,
+  type SalarySheetReport, type Trade,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -332,8 +345,8 @@ function HoursCell({ e, year, month }: { e: PayrollEmployeeVM; year: number; mon
         </HoverCardTrigger>
         <HoverCardContent
           side="top" align="start"
-          className="w-[min(580px,88vw)] max-h-[min(60vh,560px)] overflow-y-auto"
-          collisionPadding={{ top: 250, right: 16, bottom: 16, left: 16 }}
+          className="w-[min(580px,88vw)] max-h-[max(150px,min(calc(100vh-540px),460px))] overflow-y-auto"
+          collisionPadding={{ top: 220, right: 16, bottom: 16, left: 16 }}
         >
           <CalculationPanel e={e} year={year} month={month} />
         </HoverCardContent>
@@ -401,6 +414,182 @@ function AdjustInput({ value, busy, onCommit, label }: {
       }}
       aria-label={`${label} of this employee`}
     />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sticky-note quick notes — notepad-style comments stored on the EMPLOYEE
+// (not the payroll period). The icon next to the name opens a popover with
+// the saved notes plus a textarea to add a new one; the icon lights up amber
+// and shows the count when notes exist.
+// ---------------------------------------------------------------------------
+function EmployeeNotesCell({ employee, notes, onChanged }: {
+  employee: PayrollEmployeeVM;
+  notes: EmployeeNote[];
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const add = async (): Promise<void> => {
+    const t = text.trim();
+    if (!t || saving) return;
+    setSaving(true);
+    try {
+      await dataApi.addEmployeeNote(employee.employee_id, t);
+      setText('');
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save the note');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (id: string): Promise<void> => {
+    setBusyId(id);
+    try {
+      await dataApi.deleteEmployeeNote(id);
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete the note');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Quick notes about ${employee.full_name}`}
+          title={notes.length > 0
+            ? `${notes.length} note${notes.length === 1 ? '' : 's'} about ${employee.full_name} — click to read / add`
+            : `Add a quick note about ${employee.full_name}`}
+          className={cn(
+            'relative inline-flex size-6 shrink-0 items-center justify-center rounded-md border transition-colors',
+            notes.length > 0
+              ? 'border-amber-500/30 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20'
+              : 'border-border/60 bg-card text-muted-foreground/70 hover:text-brand',
+          )}
+        >
+          <StickyNote size={13} />
+          {notes.length > 0 && (
+            <span className="absolute -right-1.5 -top-1.5 flex min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-bold leading-4 text-white">
+              {notes.length}
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        collisionPadding={{ top: 90, right: 16, bottom: 16, left: 16 }}
+        className="w-[min(340px,88vw)] p-0"
+      >
+        <div className="border-b px-3 py-2.5">
+          <p className="flex items-center gap-1.5 text-sm font-semibold">
+            <StickyNote size={14} className="text-amber-500" /> Quick notes
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {employee.full_name} · <span className="font-mono">{employee.employee_code}</span> — stored on the employee for future reference
+          </p>
+        </div>
+
+        <div className="max-h-56 overflow-y-auto px-3 py-2">
+          {notes.length === 0 ? (
+            <p className="rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+              No notes yet — add the first sticky note below.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {notes.map((n) => (
+                <li key={n.id} className="group rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-2.5 py-2">
+                  <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">{n.note}</p>
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <p className="truncate text-[10px] text-muted-foreground">
+                      {n.author_name ?? 'System'} · {fmtTimeAgo(n.created_at)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => { void remove(n.id); }}
+                      disabled={busyId === n.id}
+                      aria-label="Delete this note"
+                      title="Delete this note"
+                      className="shrink-0 rounded p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:text-rose-500 focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      {busyId === n.id
+                        ? <Loader2 size={11} className="animate-spin" />
+                        : <Trash2 size={11} />}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="border-t p-3">
+          <Textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void add(); }
+            }}
+            placeholder="e.g. Advance every 20th · card renewed…"
+            rows={2}
+            className="resize-none bg-card text-xs"
+            aria-label={`New note about ${employee.full_name}`}
+          />
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-[10px] text-muted-foreground">⌘/Ctrl + Enter to save</p>
+            <Button
+              size="sm"
+              onClick={() => { void add(); }}
+              disabled={saving || text.trim() === ''}
+              className="h-8 brand-gradient px-3 text-xs font-semibold text-white"
+            >
+              {saving ? <Loader2 size={12} className="mr-1 animate-spin" /> : <StickyNote size={12} className="mr-1" />}
+              Add note
+            </Button>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Payment Method cell — “Cash”, or the CARD TYPE only when paid by card
+// (the type itself is set on the Employee Details → Document Details card).
+// ---------------------------------------------------------------------------
+function PaymentMethodCell({ e }: { e: PayrollEmployeeVM }) {
+  if (e.payment_type === 'card') {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2 py-0.5 text-[11px] font-semibold text-brand"
+        title={`Paid via card — ${e.card_type ?? 'card type not set'}`}
+      >
+        <CreditCard size={11} /> {e.card_type ?? 'Card'}
+      </span>
+    );
+  }
+  if (e.payment_type === 'cash') {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-500"
+        title="Paid in cash"
+      >
+        <Banknote size={11} /> Cash
+      </span>
+    );
+  }
+  return (
+    <span className="text-xs text-muted-foreground" title="Payment method not set — add it on the Employee Details page">
+      —
+    </span>
   );
 }
 
@@ -547,6 +736,9 @@ function UnpayDialog({ employee, open, onOpenChange, onSaved }: {
 // ---------------------------------------------------------------------------
 export function PayrollPage() {
   const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'attendance', 'employee', 'trade_rate_history']);
+  // separate counters — notes / card types must not reload the whole sheet
+  const notesVersion = useRealtimeVersion(['employee_note']);
+  const cardVersion = useRealtimeVersion(['card_type', 'employee']);
   const isSuperAdmin = useAuthStore((s) => s.user?.role) === 'super_admin';
 
   // SHARED payroll period — the Salary Sheet uses the same selection
@@ -570,14 +762,36 @@ export function PayrollPage() {
 
   // ---- search + filters (they narrow the table only — the top cards stay
   //      period totals). SAME set as the Employees page: region → country
-  //      (cascading), camp, trade, status (+ paid / unpaid). ---------------
+  //      (cascading), camp, trade, status (+ paid / unpaid) and payment
+  //      method (cash / card type / not set). -------------------------------
   const [search, setSearch] = useState('');
   const [tradeFilter, setTradeFilter] = useState(FILTER_ALL);
   const [regionFilter, setRegionFilter] = useState(FILTER_ALL);
   const [countryFilter, setCountryFilter] = useState(FILTER_ALL);
   const [campFilter, setCampFilter] = useState(FILTER_ALL);
   const [statusFilter, setStatusFilter] = useState(FILTER_ALL);
+  const [payFilter, setPayFilter] = useState(FILTER_ALL);
   const [auditOpen, setAuditOpen] = useState(false);
+
+  // ---- payment-method data (card types list + employee sticky notes) -------
+  const [cardTypes, setCardTypes] = useState<CardType[]>([]);
+  const [notes, setNotes] = useState<EmployeeNote[]>([]);
+
+  const loadNotes = (): void => {
+    dataApi.listEmployeeNotes()
+      .then(setNotes)
+      .catch(() => setNotes([]));
+  };
+
+  useEffect(loadNotes, [notesVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.listCardTypes()
+      .then((rows) => { if (!cancelled) setCardTypes(rows); })
+      .catch(() => { if (!cancelled) setCardTypes([]); });
+    return () => { cancelled = true; };
+  }, [cardVersion]);
 
   const load = (): void => {
     setLoading(true);
@@ -618,6 +832,17 @@ export function PayrollPage() {
   const period = report?.period ?? null;
   const finalized = period?.status === 'finalized';
   const employees = useMemo(() => report?.employees ?? [], [report]);
+
+  // notes grouped per employee (for the sticky-note icons)
+  const notesByEmployee = useMemo(() => {
+    const map = new Map<string, EmployeeNote[]>();
+    notes.forEach((n) => {
+      const list = map.get(n.employee_id);
+      if (list) list.push(n);
+      else map.set(n.employee_id, [n]);
+    });
+    return map;
+  }, [notes]);
 
   // ---- search / filter option lists (built from this period's rows) --------
   const tradeFilterOptions = useMemo(() => {
@@ -663,7 +888,8 @@ export function PayrollPage() {
     || regionFilter !== FILTER_ALL
     || countryFilter !== FILTER_ALL
     || campFilter !== FILTER_ALL
-    || statusFilter !== FILTER_ALL;
+    || statusFilter !== FILTER_ALL
+    || payFilter !== FILTER_ALL;
 
   const filteredEmployees = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -696,12 +922,17 @@ export function PayrollPage() {
       if (statusFilter === 'working' && !hasSiteThisMonth) return false;
       if (statusFilter === 'idle' && hasSiteThisMonth) return false;
       if (statusFilter === 'pending_deletion' && e.status !== 'pending_deletion') return false;
+      // payment method: cash / specific card type (by name — unique) / not set
+      if (payFilter === 'cash' && e.payment_type !== 'cash') return false;
+      if (payFilter === '__unset__' && e.payment_type) return false;
+      if (payFilter !== FILTER_ALL && payFilter !== 'cash' && payFilter !== '__unset__'
+        && !(e.payment_type === 'card' && e.card_type === payFilter)) return false;
       if (!q) return true;
       return e.full_name.toLowerCase().includes(q)
         || e.employee_code.toLowerCase().includes(q)
         || (e.trade_name ?? '').toLowerCase().includes(q);
     });
-  }, [employees, search, tradeFilter, regionFilter, countryFilter, campFilter, statusFilter]);
+  }, [employees, search, tradeFilter, regionFilter, countryFilter, campFilter, statusFilter, payFilter]);
 
   // footer totals follow the FILTERED rows (consistent with the visible table)
   const filteredTotals = useMemo(() => ({
@@ -719,6 +950,7 @@ export function PayrollPage() {
     setCountryFilter(FILTER_ALL);
     setCampFilter(FILTER_ALL);
     setStatusFilter(FILTER_ALL);
+    setPayFilter(FILTER_ALL);
   };
 
   // payment cards — read from the stored settlement rows (never recalculated)
@@ -911,6 +1143,20 @@ export function PayrollPage() {
               <SelectItem value={FILTER_NONE}>No trade</SelectItem>
             </SelectContent>
           </Select>
+          {/* payment method — All / Cash / every card type in the DB / Not set */}
+          <Select value={payFilter} onValueChange={setPayFilter}>
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by payment method">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All payment methods</SelectItem>
+              <SelectItem value="cash">Cash</SelectItem>
+              {cardTypes.map((c) => (
+                <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>
+              ))}
+              <SelectItem value="__unset__">Not set</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={statusFilter} onValueChange={setStatusFilter}>
             <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by status">
               <SelectValue />
@@ -1017,10 +1263,11 @@ export function PayrollPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-14">Sl No</TableHead>
-                    <TableHead className="min-w-52">Employee</TableHead>
+                    <TableHead className="min-w-56">Employee</TableHead>
                     <TableHead className="min-w-28">Code</TableHead>
                     <TableHead className="text-right">Total Hours</TableHead>
                     <TableHead className="min-w-40">Trade</TableHead>
+                    <TableHead className="min-w-32">Payment Method</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
                     <TableHead className="text-right">Deduction</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
@@ -1051,14 +1298,22 @@ export function PayrollPage() {
                               {e.photo ? <img src={e.photo} alt="" className="size-full object-cover" /> : initials(e.full_name)}
                             </span>
                             <div className="min-w-0">
-                              <p className="truncate text-sm font-medium">
-                                {e.full_name}
-                                {e.manually_edited && (
-                                  <span className="ml-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 align-middle text-[9px] font-semibold uppercase tracking-wide text-amber-500">
-                                    manual
-                                  </span>
-                                )}
-                              </p>
+                              <div className="flex items-center gap-1.5">
+                                <p className="truncate text-sm font-medium">
+                                  {e.full_name}
+                                  {e.manually_edited && (
+                                    <span className="ml-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 align-middle text-[9px] font-semibold uppercase tracking-wide text-amber-500">
+                                      manual
+                                    </span>
+                                  )}
+                                </p>
+                                {/* sticky-note quick notes — stored on the employee */}
+                                <EmployeeNotesCell
+                                  employee={e}
+                                  notes={notesByEmployee.get(e.employee_id) ?? []}
+                                  onChanged={loadNotes}
+                                />
+                              </div>
                               {paid && (
                                 <p className="text-[10px] font-medium text-emerald-500">
                                   Paid {e.paid_at ? fmtDateTime(e.paid_at) : ''}{e.paid_by_name ? ` · ${e.paid_by_name}` : ''}
@@ -1096,6 +1351,10 @@ export function PayrollPage() {
                           ) : (
                             e.trade_name ?? <span className="text-amber-500">no trade</span>
                           )}
+                        </TableCell>
+                        {/* payment method — cash, or the card type only */}
+                        <TableCell className="text-xs">
+                          <PaymentMethodCell e={e} />
                         </TableCell>
                         <TableCell className="text-right">
                           {editable ? (
@@ -1172,7 +1431,7 @@ export function PayrollPage() {
                   })}
                   {filteredEmployees.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={10} className="py-10 text-center text-sm text-muted-foreground">
+                      <TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">
                         {employees.length === 0
                           ? 'No employees in this payroll period.'
                           : 'No employees match the search / filters.'}
@@ -1188,6 +1447,7 @@ export function PayrollPage() {
                         {filtersActive && ` (of ${employees.length})`}
                       </TableCell>
                       <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.hours)} h</TableCell>
+                      <TableCell />
                       <TableCell />
                       <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.advances)}</TableCell>
                       <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.deductions)}</TableCell>

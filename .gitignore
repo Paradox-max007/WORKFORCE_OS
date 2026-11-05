@@ -62,6 +62,7 @@ tool-results/
 
 # salary migration test harness — local artifacts (regenerated per run)
 scripts/pgdata_test/
+scripts/pgdata_pay_test/
 scripts/base_schema.sql
 scripts/base_schema_local.sql
 scripts/migration_buggy.sql

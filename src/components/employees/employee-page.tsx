@@ -22,9 +22,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
-import { exportEmployeesToXlsx, employeeExportFileName } from '@/lib/export-xlsx';
+import { employeeExportFileName } from '@/lib/export-xlsx';
 import { cn } from '@/lib/utils';
-import type { CampWithCount, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { CampWithCount, CardType, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -33,18 +33,21 @@ export function EmployeePage() {
   const user = useAuthStore((s) => s.user);
   const navigateToEmployeeDetails = useAppStore((s) => s.navigateToEmployeeDetails);
   const navigateToEmployeeForm = useAppStore((s) => s.navigateToEmployeeForm);
+  const navigateToExportPreview = useAppStore((s) => s.navigateToExportPreview);
   const consumeEmployeeFilter = useAppStore((s) => s.consumeEmployeeFilter);
-  const realtimeVersion = useRealtimeVersion(['employee', 'site', 'camp']);
+  const realtimeVersion = useRealtimeVersion(['employee', 'site', 'camp', 'card_type']);
 
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [camps, setCamps] = useState<CampWithCount[] | null>(null);
+  const [cardTypes, setCardTypes] = useState<CardType[]>([]);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [regionFilter, setRegionFilter] = useState('all');
   const [countryFilter, setCountryFilter] = useState('all');
   const [campFilter, setCampFilter] = useState('all');
+  const [payFilter, setPayFilter] = useState('all');
   const [exporting, setExporting] = useState(false);
   const [page, setPage] = useState(1);
   const PER_PAGE = 20;
@@ -72,8 +75,11 @@ export function EmployeePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps] = await Promise.all([dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps()]);
-        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); }
+        const [emps, sts, cps, cards] = await Promise.all([
+          dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps(),
+          dataApi.listCardTypes().catch(() => [] as CardType[]),
+        ]);
+        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); setCardTypes(cards); }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
       }
@@ -133,13 +139,18 @@ export function EmployeePage() {
       // camp filter ('__none__' = employees without a camp)
       if (campFilter === '__none__' && e.camp_id) return false;
       if (campFilter !== 'all' && campFilter !== '__none__' && e.camp_id !== campFilter) return false;
+      // payment method filter (cash / specific card type / not set)
+      if (payFilter === 'cash' && e.payment_type !== 'cash') return false;
+      if (payFilter === '__unset__' && e.payment_type) return false;
+      if (payFilter !== 'all' && payFilter !== 'cash' && payFilter !== '__unset__'
+        && !(e.payment_type === 'card' && e.card_type_id === payFilter)) return false;
       if (q) {
         const hay = `${e.full_name} ${e.employee_code} ${e.nationality ?? ''} ${e.phone ?? ''} ${e.position ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [employees, debouncedSearch, statusFilter, regionFilter, countryFilter, campFilter]);
+  }, [employees, debouncedSearch, statusFilter, regionFilter, countryFilter, campFilter, payFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
   const safePage = Math.min(page, totalPages);
@@ -167,24 +178,28 @@ export function EmployeePage() {
     else if (campFilter !== 'all') {
       chips.push(`Camp-${campOptions.find((c) => c.id === campFilter)?.name ?? 'Camp'}`);
     }
+    if (payFilter === 'cash') chips.push('Payment-Cash');
+    else if (payFilter === '__unset__') chips.push('Payment-Not-Set');
+    else if (payFilter !== 'all') {
+      chips.push(`Payment-${cardTypes.find((c) => c.id === payFilter)?.name ?? 'Card'}`);
+    }
     return chips;
   };
 
-  const exportToExcel = async () => {
+  /** Export Excel opens the PREVIEW page first — the download button there
+   *  writes the .xlsx (same columns, same order, same values). */
+  const exportToExcel = () => {
     if (filtered.length === 0) {
       toast.error('Nothing to export', { description: 'The current filters match no employees.' });
       return;
     }
     setExporting(true);
-    try {
-      const fileName = employeeExportFileName(exportChips());
-      await exportEmployeesToXlsx(filtered, fileName);
-      toast.success('Excel exported', { description: `${filtered.length} employee(s) → ${fileName}` });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Export failed');
-    } finally {
+    const fileName = employeeExportFileName(exportChips());
+    // give the button its spinner frame, then switch to the preview page
+    setTimeout(() => {
+      navigateToExportPreview(filtered, fileName);
       setExporting(false);
-    }
+    }, 120);
   };
 
   const confirmDelete = async () => {
@@ -215,9 +230,9 @@ export function EmployeePage() {
   const loading = !employees || !sites;
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="mx-auto max-w-[1600px]">
       {/* header */}
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Employee Management</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -241,13 +256,15 @@ export function EmployeePage() {
         </div>
       </div>
 
-      {/* filters */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      {/* search + filters — STICKY so they stay reachable while scrolling the
+          table (same behaviour as the Payroll page) */}
+      <div className="sticky top-16 z-30 mb-4 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
+        <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-56 flex-1 sm:max-w-xs">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Search by name, ID, nationality, phone, position…"
-            className="h-10 pl-9"
+            className="h-10 bg-card pl-9"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -260,6 +277,18 @@ export function EmployeePage() {
             <SelectItem value="working">Currently Working</SelectItem>
             <SelectItem value="idle">Idle (No Site)</SelectItem>
             <SelectItem value="pending_deletion">Pending Deletion</SelectItem>
+          </SelectContent>
+        </Select>
+        {/* payment method filter (cash / card types from the card_type table) */}
+        <Select value={payFilter} onValueChange={(v) => { setPayFilter(v); setPage(1); }}>
+          <SelectTrigger className="h-10 w-44 bg-card" aria-label="Filter by payment method"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Payment Methods</SelectItem>
+            <SelectItem value="cash">Cash</SelectItem>
+            {cardTypes.map((c) => (
+              <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+            ))}
+            <SelectItem value="__unset__">Not set</SelectItem>
           </SelectContent>
         </Select>
         {/* Nationality region + country filters (e.g. Africans → Burundi) */}
@@ -303,11 +332,12 @@ export function EmployeePage() {
             <SelectItem value="__none__">No camp assigned</SelectItem>
           </SelectContent>
         </Select>
-        {(search || statusFilter !== 'all' || regionFilter !== 'all' || countryFilter !== 'all' || campFilter !== 'all') && (
-          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setRegionFilter('all'); setCountryFilter('all'); setCampFilter('all'); setPage(1); }}>
+        {(search || statusFilter !== 'all' || regionFilter !== 'all' || countryFilter !== 'all' || campFilter !== 'all' || payFilter !== 'all') && (
+          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setRegionFilter('all'); setCountryFilter('all'); setCampFilter('all'); setPayFilter('all'); setPage(1); }}>
             <X size={14} className="mr-1" /> Reset
           </Button>
         )}
+        </div>
       </div>
 
       {/* table */}

@@ -5,12 +5,14 @@
 // ============================================================================
 
 import { create } from 'zustand';
+import type { EmployeeVM } from '@/lib/types';
 
 export type AppView =
   | 'dashboard'
   | 'employees'
   | 'employee_details'
   | 'employee_form'
+  | 'employee_export'
   | 'sites'
   | 'camps'
   | 'attendance'
@@ -29,6 +31,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   employees: 'Employee Management',
   employee_details: 'Employee Details',
   employee_form: 'Add / Edit Employee',
+  employee_export: 'Excel Export Preview',
   sites: 'Site Management',
   camps: 'Camp Management',
   attendance: 'Attendance',
@@ -54,6 +57,8 @@ interface AppStore {
   employeeFormId: string | null;
   /** Where the Back button and post-save navigation should return to */
   employeeFormReturnTo: 'employees' | 'employee_details';
+  /** Payload of the Excel export preview page (filtered rows + filename) */
+  exportPreview: { rows: EmployeeVM[]; fileName: string } | null;
   /** Shared payroll month selection — Salary Sheet and Payroll use the SAME
    *  period; switching pages keeps the month. */
   salaryPeriodYear: number;
@@ -70,6 +75,8 @@ interface AppStore {
     employeeId?: string,
     returnTo?: 'employees' | 'employee_details',
   ) => void;
+  /** Export Excel flow — opens the preview page for the filtered rows */
+  navigateToExportPreview: (rows: EmployeeVM[], fileName: string) => void;
   setSidebarOpen: (open: boolean) => void;
   consumeEmployeeFilter: () => string;
 }
@@ -82,6 +89,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   employeeFormMode: 'create' as const,
   employeeFormId: null,
   employeeFormReturnTo: 'employees' as const,
+  exportPreview: null,
   salaryPeriodYear: new Date().getFullYear(),
   salaryPeriodMonth: new Date().getMonth() + 1,
   setSalaryPeriod: (year, month) => set({ salaryPeriodYear: year, salaryPeriodMonth: month }),
@@ -100,6 +108,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ currentView: 'employee_details', selectedEmployeeId: employeeId }),
   navigateToEmployeeForm: (mode, employeeId, returnTo = 'employees') =>
     set({ currentView: 'employee_form', employeeFormMode: mode, employeeFormId: employeeId ?? null, employeeFormReturnTo: returnTo }),
+  navigateToExportPreview: (rows, fileName) =>
+    set({ currentView: 'employee_export', exportPreview: { rows, fileName } }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   consumeEmployeeFilter: () => {
     const f = get().employeeFilter;

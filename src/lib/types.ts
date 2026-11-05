@@ -69,6 +69,27 @@ export interface Company {
   created_at: string;
 }
 
+/** How an employee receives their salary: cash or a payroll card. */
+export type PaymentType = 'cash' | 'card';
+
+/** A payroll card type (Lulu Card, C3 Card, …) — its own table, grows via
+ *  the "+ Add New Card Type…" option in the employee Document Details card. */
+export interface CardType {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+/** A quick sticky-note style comment about an employee (Payroll page icon).
+ *  Employee-level — not tied to a payroll period. */
+export interface EmployeeNote {
+  id: string;
+  employee_id: string;
+  note: string;
+  author_name: string | null;
+  created_at: string;
+}
+
 export interface Employee {
   id: string;
   full_name: string;
@@ -95,6 +116,10 @@ export interface Employee {
   rating: number;
   status: EmployeeStatus;
   photo: string | null;
+  /** How this employee is paid: cash / card (set from the details page) */
+  payment_type: PaymentType | null;
+  /** Which payroll card (card_type table) — meaningful when payment_type = 'card' */
+  card_type_id: string | null;
   is_team_leader: boolean;
   team_leader_site_id: string | null;
   /** Historical working hours accumulated BEFORE PULSE started tracking
@@ -114,6 +139,7 @@ export interface EmployeeVM extends Employee {
   leader_site_name: string | null;
   camp_name: string | null;
   trade_name: string | null;
+  card_type_name: string | null;
 }
 
 export type AttendanceStatus = 'present' | 'absent' | 'not_marked';
@@ -541,6 +567,10 @@ export interface PayrollEmployeeVM {
   camp_name: string | null;
   trade_id: string | null;
   trade_name: string | null;
+  /** how this employee is paid (live employee field — read at report time) */
+  payment_type: PaymentType | null;
+  /** card type NAME when payment_type = 'card' (Payroll column + filter) */
+  card_type: string | null;
   salary_role: SalaryRole;
   total_hours: number;
   opening_lifetime_hours: number;
@@ -665,6 +695,8 @@ export type RealtimeTable =
   | 'uniform_registry'
   | 'site_transfer'
   | 'company'
+  | 'card_type'
+  | 'employee_note'
   | 'trades'
   | 'trade_rate_history'
   | 'employee_salary_assignment'

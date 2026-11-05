@@ -13,9 +13,11 @@ import {
   type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
+  type CardType,
   type Company,
   type CancellationRequestVM,
   type EmployeeInput,
+  type EmployeeNote,
   type EmployeeSalaryAssignment,
   type EmployeeVM,
   type EmployeeWorkingHoursReport,
@@ -27,6 +29,7 @@ import {
   type MonthlySummaryRow,
   type Notification,
   type PayrollAdjustmentInput,
+  type PaymentType,
   type Profile,
   type RealtimeTable,
   type SalaryEligibility,
@@ -98,6 +101,8 @@ function ensureRealtimeChannel(): void {
     'uniform_registry',
     'site_transfer',
     'company',
+    'card_type',
+    'employee_note',
     'trades',
     'trade_rate_history',
     'employee_salary_assignment',
@@ -407,6 +412,63 @@ export const prodApi = {
     return data as unknown as Company;
   },
 
+  // ---- payroll card types (Lulu Card, C3 Card, … — own table) ---------------
+  async listCardTypes(): Promise<CardType[]> {
+    const { data, error } = await sb().from('card_type').select('*').order('name');
+    assertOk(error);
+    return (data ?? []) as CardType[];
+  },
+
+  async createCardType(name: string): Promise<CardType> {
+    const { data, error } = await sb().rpc('create_card_type', { p_name: name });
+    assertOk(error);
+    return data as unknown as CardType;
+  },
+
+  /** Set / clear how an employee is paid (Employee Details → Document
+   *  Details). 'card' requires an existing card type; 'cash'/null clears it. */
+  async setEmployeePaymentMethod(
+    employeeId: string,
+    paymentType: PaymentType | null,
+    cardTypeId: string | null,
+  ): Promise<EmployeeVM> {
+    const { data, error } = await sb().rpc('set_employee_payment_method', {
+      p_employee_id: employeeId,
+      p_payment_type: paymentType,
+      p_card_type_id: cardTypeId,
+    });
+    assertOk(error);
+    const updated = data as unknown as Record<string, unknown>;
+    return {
+      ...(updated as unknown as EmployeeVM),
+      site_name: null,
+      leader_site_name: null,
+      camp_name: null,
+      card_type_name: null,
+    };
+  },
+
+  // ---- employee sticky notes (Payroll page quick-reference comments) --------
+  async listEmployeeNotes(): Promise<EmployeeNote[]> {
+    const { data, error } = await sb().rpc('list_employee_notes');
+    assertOk(error);
+    return (data ?? []) as EmployeeNote[];
+  },
+
+  async addEmployeeNote(employeeId: string, note: string): Promise<EmployeeNote> {
+    const { data, error } = await sb().rpc('add_employee_note', {
+      p_employee_id: employeeId,
+      p_note: note,
+    });
+    assertOk(error);
+    return data as unknown as EmployeeNote;
+  },
+
+  async deleteEmployeeNote(id: string): Promise<void> {
+    const { error } = await sb().rpc('delete_employee_note', { p_id: id });
+    assertOk(error);
+  },
+
   async assignEmployeeCamp(
     employeeId: string, campId: string | null,
     block?: string | null, room?: string | null,
@@ -428,13 +490,13 @@ export const prodApi = {
   // ---- employees ---------------------------------------------------------------
   async listEmployees(): Promise<EmployeeVM[]> {
     const { data, error } = await sb().from('employee')
-      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name)')
+      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name), card_type:card_type_id(name)')
       .neq('status', 'deleted')
       .order('created_at');
     assertOk(error);
     return ((data ?? []) as unknown as {
       site: { name: string } | null; leader_site: { name: string } | null; camp: { name: string } | null;
-      trade: { name: string } | null;
+      trade: { name: string } | null; card_type: { name: string } | null;
       [k: string]: unknown;
     }[]).map((row) => ({
       ...(row as unknown as EmployeeVM),
@@ -442,6 +504,7 @@ export const prodApi = {
       leader_site_name: row.leader_site?.name ?? null,
       camp_name: row.camp?.name ?? null,
       trade_name: row.trade?.name ?? null,
+      card_type_name: row.card_type?.name ?? null,
     }));
   },
 

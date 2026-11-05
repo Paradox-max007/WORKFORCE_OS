@@ -12,8 +12,8 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
-  ChevronRight, Clock3, Crown, FileDown, FileText, Loader2, MessageCircle, Pencil,
-  Tent, TriangleAlert, UserRound, X,
+  ChevronRight, Clock3, CreditCard, Crown, FileDown, FileText, Loader2, MessageCircle,
+  Pencil, Plus, Tent, TriangleAlert, UserRound, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -35,8 +35,8 @@ import { downloadEmployeeCv } from '@/lib/pdf';
 import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
 import { cn } from '@/lib/utils';
 import type {
-  Attendance, DocumentStatus, EmployeeStatus, EmployeeVM, FineVM,
-  SalaryEligibility, WarningVM,
+  Attendance, CardType, DocumentStatus, EmployeeStatus, EmployeeVM, FineVM,
+  PaymentType, SalaryEligibility, WarningVM,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -789,6 +789,206 @@ function ShareDialogContent({ emp, onPreviewChange }: {
 }
 
 // ---------------------------------------------------------------------------
+// Payment Method editor — lives inside the Document Details card. Payment
+// Type (Cash / Card) and, when Card, the Card Type (Lulu Card, C3 Card, …)
+// with an inline "+ Add New Card Type…" option. Saves immediately through
+// set_employee_payment_method; the Payroll page column + filters read the
+// same fields.
+// ---------------------------------------------------------------------------
+function PaymentMethodEditor({ emp, onSaved }: {
+  emp: EmployeeVM;
+  onSaved: (patch: { payment_type: PaymentType | null; card_type_id: string | null; card_type_name: string | null }) => void;
+}) {
+  const [cardTypes, setCardTypes] = useState<CardType[] | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [type, setType] = useState<'cash' | 'card' | null>(emp.payment_type);
+  const [cardId, setCardId] = useState<string>(emp.card_type_id ?? 'none');
+  const [newCardName, setNewCardName] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.listCardTypes()
+      .then((rows) => { if (!cancelled) setCardTypes(rows); })
+      .catch(() => { if (!cancelled) setCardTypes([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const startEdit = (): void => {
+    setType(emp.payment_type);
+    setCardId(emp.card_type_id ?? 'none');
+    setNewCardName(null);
+    setEditing(true);
+  };
+
+  const pickCard = (v: string): void => {
+    if (v === '__add_new') { setNewCardName(''); return; }
+    setNewCardName(null);
+    setCardId(v);
+  };
+
+  const addCardInline = async (): Promise<void> => {
+    if (!newCardName?.trim() || adding) return;
+    setAdding(true);
+    try {
+      const created = await dataApi.createCardType(newCardName.trim());
+      toast.success('Card type created', { description: created.name });
+      setCardTypes((prev) => [...(prev ?? []), created].sort((a, b) => a.name.localeCompare(b.name)));
+      setCardId(created.id);
+      setNewCardName(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create card type');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const save = async (): Promise<void> => {
+    if (saving) return;
+    if (type === 'card' && cardId === 'none') {
+      toast.error('Select the card type first');
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await dataApi.setEmployeePaymentMethod(
+        emp.id,
+        type,
+        type === 'card' ? cardId : null,
+      );
+      const name = type === 'card'
+        ? (cardTypes ?? []).find((c) => c.id === cardId)?.name ?? null
+        : null;
+      toast.success('Payment method saved', {
+        description: type === 'card'
+          ? `${emp.full_name} is paid via ${name ?? 'card'}.`
+          : type === 'cash'
+            ? `${emp.full_name} is paid in cash.`
+            : 'Payment method cleared.',
+      });
+      setEditing(false);
+      onSaved({
+        payment_type: updated.payment_type,
+        card_type_id: updated.card_type_id,
+        card_type_name: name,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const currentCardName = emp.card_type_id
+    ? (cardTypes ?? []).find((c) => c.id === emp.card_type_id)?.name ?? emp.card_type_name
+    : emp.card_type_name;
+
+  return (
+    <div className="rounded-xl border border-brand/15 bg-brand/[0.03] p-3.5 sm:col-span-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <CreditCard size={13} className="text-brand" /> Payment Method
+          <span className="normal-case text-muted-foreground/70">— how this employee is paid (Payroll column &amp; filter)</span>
+        </p>
+        {!editing && (
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground hover:text-brand" onClick={startEdit}>
+            <Pencil size={12} className="mr-1" /> Edit
+          </Button>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="mt-3 space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>Payment Type</Label>
+              <Select
+                value={type ?? 'none'}
+                onValueChange={(v) => { setType(v === 'none' ? null : v as 'cash' | 'card'); }}
+              >
+                <SelectTrigger className="h-10 bg-card" aria-label="Payment type"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Not set</SelectItem>
+                  <SelectItem value="cash">Cash</SelectItem>
+                  <SelectItem value="card">Card</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {type === 'card' && (
+              <div className="space-y-1.5">
+                <Label>Card Type</Label>
+                <Select value={cardId} onValueChange={pickCard}>
+                  <SelectTrigger className="h-10 bg-card" aria-label="Card type"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Select a card…</SelectItem>
+                    {(cardTypes ?? []).map((c) => (
+                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                    ))}
+                    <SelectItem value="__add_new" className="text-brand">+ Add New Card Type…</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
+
+          {type === 'card' && newCardName !== null && (
+            <div className="flex items-end gap-2">
+              <div className="flex-1 space-y-1.5">
+                <Label>New Card Type</Label>
+                <Input
+                  value={newCardName}
+                  onChange={(e) => setNewCardName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void addCardInline(); } }}
+                  placeholder="e.g. Emirates NBD Card"
+                  className="h-10 bg-card"
+                />
+              </div>
+              <Button type="button" onClick={() => { void addCardInline(); }} disabled={adding || newCardName.trim() === ''} className="brand-gradient h-10 font-semibold text-white">
+                {adding ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
+              </Button>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-0.5">
+            <Button variant="outline" size="sm" onClick={() => setEditing(false)} disabled={saving}>Cancel</Button>
+            <Button size="sm" onClick={() => { void save(); }} disabled={saving} className="brand-gradient font-semibold text-white">
+              {saving ? <Loader2 size={13} className="mr-1 animate-spin" /> : <BadgeCheck size={13} className="mr-1" />}
+              Save Payment Method
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2.5 grid gap-3 sm:grid-cols-2">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Payment Type</p>
+            {emp.payment_type === 'card' ? (
+              <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm font-semibold text-brand">
+                <CreditCard size={14} /> Card
+              </p>
+            ) : emp.payment_type === 'cash' ? (
+              <p className="mt-0.5 inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-500">
+                <Banknote size={14} /> Cash
+              </p>
+            ) : (
+              <p className="mt-0.5 text-sm font-medium text-muted-foreground">— not set</p>
+            )}
+          </div>
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Card Type</p>
+            {emp.payment_type === 'card' ? (
+              <p className="mt-0.5 text-sm font-semibold text-brand">{currentCardName ?? 'not selected'}</p>
+            ) : (
+              <p className="mt-0.5 text-sm text-muted-foreground">{emp.payment_type === 'cash' ? 'Paid in cash' : '—'}</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export function EmployeeDetailsPage() {
@@ -1070,11 +1270,16 @@ export function EmployeeDetailsPage() {
             onOpen={(kind) => navigateToNotifications(kind === 'warning' ? 'warnings' : 'fines')}
           />
 
-          <InfoCard index={2} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">
+          <InfoCard index={2} icon={<FileText size={16} />} title="Document Details" sub="Passport, ID & payment">
             <InfoRow label="Passport Number" value={emp.passport_number ?? '—'} mono />
             <InfoRow label="Passport Status" value={<DocStatusPill status={emp.passport_status} />} />
             <InfoRow label="ID Number" value={emp.id_number ?? '—'} mono />
             <InfoRow label="ID Status" value={<DocStatusPill status={emp.id_status} />} />
+            {/* payment method — cash / card (+ card type), shown in Payroll */}
+            <PaymentMethodEditor
+              emp={emp}
+              onSaved={(patch) => setEmp((prev) => (prev ? { ...prev, ...patch } : prev))}
+            />
           </InfoCard>
         </div>
 

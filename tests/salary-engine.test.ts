@@ -29,7 +29,7 @@ const emp = (id: string, name: string, siteId: string | null, opening = 0, join 
   company_name: null, passport_number: null, passport_status: null, id_number: null, id_status: null,
   current_site_id: siteId, camp_id: null, camp_block: null, camp_room: null, rating: 5,
   status: 'active', photo: null, is_team_leader: false, team_leader_site_id: null,
-  opening_hours: opening, trade_id: tradeId, salary_role: 'standard',
+  opening_hours: opening, trade_id: tradeId, salary_role: 'standard', payment_type: null, card_type_id: null,
   created_at: `${join}T00:00:00.000Z`, updated_at: T0,
 });
 

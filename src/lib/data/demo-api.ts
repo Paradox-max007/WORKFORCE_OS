@@ -8,10 +8,12 @@ import {
   type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
+  type CardType,
   type Company,
   type CancellationRequestVM,
   type Employee,
   type EmployeeInput,
+  type EmployeeNote,
   type EmployeeSalaryAssignment,
   type EmployeeVM,
   type EmployeeWorkingHoursReport,
@@ -22,6 +24,7 @@ import {
   type MonthlySummaryRow,
   type Notification,
   type PayrollAdjustmentInput,
+  type PaymentType,
   type Profile,
   type SalaryEligibility,
   type SalarySheetReport,
@@ -103,6 +106,7 @@ const attachEmployeeVM = (e: Employee): EmployeeVM => ({
   leader_site_name: e.team_leader_site_id ? db.sites.find((s) => s.id === e.team_leader_site_id)?.name ?? null : null,
   camp_name: e.camp_id ? db.camps.find((c) => c.id === e.camp_id)?.name ?? null : null,
   trade_name: e.trade_id ? db.trades.find((t) => t.id === e.trade_id)?.name ?? null : null,
+  card_type_name: e.card_type_id ? db.cardTypes.find((c) => c.id === e.card_type_id)?.name ?? null : null,
 });
 
 const profileName = (id: string | null): string | null =>
@@ -591,6 +595,9 @@ export const demoApi = {
       opening_hours: opening,
       trade_id: input.trade_id || null,
       salary_role: input.salary_role ?? 'standard',
+      // payment method is set later from the Employee Details page
+      payment_type: null,
+      card_type_id: null,
       created_at: nowISO(),
       updated_at: nowISO(),
     };
@@ -1008,6 +1015,89 @@ export const demoApi = {
     db.companies.push(company);
     saveAndEmit(['company']);
     return company;
+  },
+
+  // ---- payroll card types (Lulu Card, C3 Card, … — own table) ---------------
+  async listCardTypes(): Promise<CardType[]> {
+    return [...db.cardTypes].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  async createCardType(name: string): Promise<CardType> {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('Card type name is required');
+    if (db.cardTypes.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())) {
+      throw new Error('A card type with this name already exists');
+    }
+    const cardType: CardType = { id: uid(), name: trimmed, created_at: nowISO() };
+    db.cardTypes.push(cardType);
+    saveAndEmit(['card_type']);
+    return cardType;
+  },
+
+  /** Set / clear how an employee is paid (Employee Details → Document
+   *  Details). 'card' requires an existing card type; 'cash'/null clears it. */
+  async setEmployeePaymentMethod(
+    employeeId: string,
+    paymentType: PaymentType | null,
+    cardTypeId: string | null,
+  ): Promise<EmployeeVM> {
+    const e = db.employees.find((x) => x.id === employeeId);
+    if (!e) throw new Error('Employee not found');
+    if (paymentType === 'card') {
+      if (!cardTypeId) throw new Error('Select the card type first');
+      if (!db.cardTypes.some((c) => c.id === cardTypeId)) {
+        throw new Error('The selected card type does not exist');
+      }
+    }
+    e.payment_type = paymentType;
+    e.card_type_id = paymentType === 'card' ? cardTypeId : null;
+    e.updated_at = nowISO();
+    saveAndEmit(['employee']);
+    return attachEmployeeVM(e);
+  },
+
+  // ---- employee sticky notes (Payroll page quick-reference comments) --------
+  async listEmployeeNotes(): Promise<EmployeeNote[]> {
+    return db.employeeNotes
+      .filter((n) => db.employees.some((e) => e.id === n.employee_id && e.status !== 'deleted'))
+      .map((n) => ({
+        id: n.id,
+        employee_id: n.employee_id,
+        note: n.note,
+        author_name: profileName(n.created_by),
+        created_at: n.created_at,
+      }))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  },
+
+  async addEmployeeNote(employeeId: string, note: string): Promise<EmployeeNote> {
+    const e = db.employees.find((x) => x.id === employeeId);
+    if (!e) throw new Error('Employee not found');
+    const trimmed = note.trim();
+    if (!trimmed) throw new Error('Note text is required');
+    const row = {
+      id: uid(),
+      employee_id: employeeId,
+      note: trimmed,
+      created_by: currentProfile()?.id ?? null,
+      created_at: nowISO(),
+    };
+    db.employeeNotes.push(row);
+    saveAndEmit(['employee_note']);
+    return {
+      id: row.id,
+      employee_id: row.employee_id,
+      note: row.note,
+      author_name: profileName(row.created_by),
+      created_at: row.created_at,
+    };
+  },
+
+  async deleteEmployeeNote(id: string): Promise<void> {
+    const before = db.employeeNotes.length;
+    db.employeeNotes = db.employeeNotes.filter((n) => n.id !== id);
+    if (db.employeeNotes.length === before) throw new Error('Note not found');
+    saveAndEmit(['employee_note']);
   },
 
   // ---- warnings + fines ---------------------------------------------------------------

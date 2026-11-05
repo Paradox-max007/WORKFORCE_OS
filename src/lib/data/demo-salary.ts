@@ -857,6 +857,11 @@ export const buildSalarySheet = (
       trade_name: pe.trade_id_snapshot
         ? database.trades.find((t) => t.id === pe.trade_id_snapshot)?.name ?? null
         : null,
+      // payment method (live employee fields — same data as the Employees page)
+      payment_type: emp?.payment_type ?? null,
+      card_type: emp?.card_type_id
+        ? database.cardTypes.find((c) => c.id === emp.card_type_id)?.name ?? null
+        : null,
       salary_role: pe.salary_role_snapshot,
       total_hours: pe.total_hours,
       opening_lifetime_hours: pe.opening_lifetime_hours,

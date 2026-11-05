@@ -3,9 +3,13 @@
 // ============================================================================
 // PULSE Workforce OS — Phone input with a country-code dropdown
 // ----------------------------------------------------------------------------
-// A country select (+971, +966, +91 …) next to the local number field. The
-// stored value keeps the legacy free-text format "+<dial> <number>" so every
-// existing record (and the whole data layer) stays compatible:
+// A dial-code select (+971, +966, +91 …) next to the local number field. The
+// dropdown lists ONLY the codes (no country names) and is curated for this
+// workforce — African and Asian countries first (Gulf, South Asia,
+// South-East Asia, Africa), with just a couple of common extras at the end.
+//
+// The stored value keeps the legacy free-text format "+<dial> <number>" so
+// every existing record (and the whole data layer) stays compatible:
 //
 //   • existing values are parsed back into (country, local number) on load —
 //     longest dial-code prefix wins (+971 before +97 before +9)
@@ -22,86 +26,57 @@ import {
 
 interface PhoneCountry {
   iso: string;
-  name: string;
   dial: string;
 }
 
-/** Workforce-relevant countries (mirrors the Nationality list) + common others */
+/** Workforce-relevant dial codes — mostly African & Asian countries.
+ *  Order = the dropdown order (Gulf first, then South Asia, South-East &
+ *  other Asia, Africa, then a couple of common extras). */
 const PHONE_COUNTRIES: PhoneCountry[] = [
-  { iso: 'AE', name: 'United Arab Emirates', dial: '971' },
-  { iso: 'SA', name: 'Saudi Arabia', dial: '966' },
-  { iso: 'IN', name: 'India', dial: '91' },
-  { iso: 'PK', name: 'Pakistan', dial: '92' },
-  { iso: 'BD', name: 'Bangladesh', dial: '880' },
-  { iso: 'NP', name: 'Nepal', dial: '977' },
-  { iso: 'LK', name: 'Sri Lanka', dial: '94' },
-  { iso: 'PH', name: 'Philippines', dial: '63' },
-  { iso: 'EG', name: 'Egypt', dial: '20' },
-  { iso: 'SD', name: 'Sudan', dial: '249' },
-  { iso: 'ET', name: 'Ethiopia', dial: '251' },
-  { iso: 'ER', name: 'Eritrea', dial: '291' },
-  { iso: 'KE', name: 'Kenya', dial: '254' },
-  { iso: 'UG', name: 'Uganda', dial: '256' },
-  { iso: 'TZ', name: 'Tanzania', dial: '255' },
-  { iso: 'RW', name: 'Rwanda', dial: '250' },
-  { iso: 'NG', name: 'Nigeria', dial: '234' },
-  { iso: 'GH', name: 'Ghana', dial: '233' },
-  { iso: 'SN', name: 'Senegal', dial: '221' },
-  { iso: 'SL', name: 'Sierra Leone', dial: '232' },
-  { iso: 'ML', name: 'Mali', dial: '223' },
-  { iso: 'NE', name: 'Niger', dial: '227' },
-  { iso: 'SO', name: 'Somalia', dial: '252' },
-  { iso: 'ZM', name: 'Zambia', dial: '260' },
-  { iso: 'ZW', name: 'Zimbabwe', dial: '263' },
-  { iso: 'MW', name: 'Malawi', dial: '265' },
-  { iso: 'MG', name: 'Madagascar', dial: '261' },
-  { iso: 'AF', name: 'Afghanistan', dial: '93' },
-  { iso: 'IR', name: 'Iran', dial: '98' },
-  { iso: 'IQ', name: 'Iraq', dial: '964' },
-  { iso: 'JO', name: 'Jordan', dial: '962' },
-  { iso: 'LB', name: 'Lebanon', dial: '961' },
-  { iso: 'SY', name: 'Syria', dial: '963' },
-  { iso: 'PS', name: 'Palestine', dial: '970' },
-  { iso: 'YE', name: 'Yemen', dial: '967' },
-  { iso: 'OM', name: 'Oman', dial: '968' },
-  { iso: 'KW', name: 'Kuwait', dial: '965' },
-  { iso: 'QA', name: 'Qatar', dial: '974' },
-  { iso: 'BH', name: 'Bahrain', dial: '973' },
-  { iso: 'MY', name: 'Malaysia', dial: '60' },
-  { iso: 'ID', name: 'Indonesia', dial: '62' },
-  { iso: 'SG', name: 'Singapore', dial: '65' },
-  { iso: 'TH', name: 'Thailand', dial: '66' },
-  { iso: 'VN', name: 'Vietnam', dial: '84' },
-  { iso: 'KH', name: 'Cambodia', dial: '855' },
-  { iso: 'LA', name: 'Laos', dial: '856' },
-  { iso: 'MM', name: 'Myanmar', dial: '95' },
-  { iso: 'BN', name: 'Brunei', dial: '673' },
-  { iso: 'CN', name: 'China', dial: '86' },
-  { iso: 'HK', name: 'Hong Kong', dial: '852' },
-  { iso: 'BT', name: 'Bhutan', dial: '975' },
-  { iso: 'MV', name: 'Maldives', dial: '960' },
-  { iso: 'MR', name: 'Mauritania', dial: '222' },
-  { iso: 'MA', name: 'Morocco', dial: '212' },
-  { iso: 'TN', name: 'Tunisia', dial: '216' },
-  { iso: 'UZ', name: 'Uzbekistan', dial: '998' },
-  { iso: 'TR', name: 'Turkey', dial: '90' },
-  { iso: 'US', name: 'United States / Canada', dial: '1' },
-  { iso: 'GB', name: 'United Kingdom', dial: '44' },
-  { iso: 'IE', name: 'Ireland', dial: '353' },
-  { iso: 'DE', name: 'Germany', dial: '49' },
-  { iso: 'FR', name: 'France', dial: '33' },
-  { iso: 'IT', name: 'Italy', dial: '39' },
-  { iso: 'ES', name: 'Spain', dial: '34' },
-  { iso: 'PT', name: 'Portugal', dial: '351' },
-  { iso: 'NL', name: 'Netherlands', dial: '31' },
-  { iso: 'PL', name: 'Poland', dial: '48' },
-  { iso: 'RO', name: 'Romania', dial: '40' },
-  { iso: 'UA', name: 'Ukraine', dial: '380' },
-  { iso: 'RU', name: 'Russia / Kazakhstan', dial: '7' },
-  { iso: 'AU', name: 'Australia', dial: '61' },
-  { iso: 'NZ', name: 'New Zealand', dial: '64' },
-  { iso: 'BR', name: 'Brazil', dial: '55' },
-  { iso: 'ZA', name: 'South Africa', dial: '27' },
+  // Gulf & Middle East
+  { iso: 'AE', dial: '971' }, { iso: 'SA', dial: '966' }, { iso: 'OM', dial: '968' },
+  { iso: 'KW', dial: '965' }, { iso: 'QA', dial: '974' }, { iso: 'BH', dial: '973' },
+  { iso: 'YE', dial: '967' }, { iso: 'IQ', dial: '964' }, { iso: 'JO', dial: '962' },
+  { iso: 'LB', dial: '961' }, { iso: 'SY', dial: '963' }, { iso: 'PS', dial: '970' },
+  { iso: 'IR', dial: '98' }, { iso: 'TR', dial: '90' },
+  // South Asia
+  { iso: 'IN', dial: '91' }, { iso: 'PK', dial: '92' }, { iso: 'BD', dial: '880' },
+  { iso: 'NP', dial: '977' }, { iso: 'LK', dial: '94' }, { iso: 'AF', dial: '93' },
+  { iso: 'MV', dial: '960' }, { iso: 'BT', dial: '975' },
+  // South-East Asia
+  { iso: 'PH', dial: '63' }, { iso: 'ID', dial: '62' }, { iso: 'MY', dial: '60' },
+  { iso: 'TH', dial: '66' }, { iso: 'VN', dial: '84' }, { iso: 'KH', dial: '855' },
+  { iso: 'LA', dial: '856' }, { iso: 'MM', dial: '95' }, { iso: 'SG', dial: '65' },
+  { iso: 'BN', dial: '673' },
+  // Other Asia
+  { iso: 'CN', dial: '86' }, { iso: 'HK', dial: '852' }, { iso: 'UZ', dial: '998' },
+  { iso: 'KZ', dial: '7' }, { iso: 'MN', dial: '976' },
+  // East & Horn of Africa
+  { iso: 'EG', dial: '20' }, { iso: 'SD', dial: '249' }, { iso: 'SS', dial: '211' },
+  { iso: 'ET', dial: '251' }, { iso: 'ER', dial: '291' }, { iso: 'SO', dial: '252' },
+  { iso: 'DJ', dial: '253' }, { iso: 'KE', dial: '254' }, { iso: 'UG', dial: '256' },
+  { iso: 'TZ', dial: '255' }, { iso: 'RW', dial: '250' }, { iso: 'BI', dial: '257' },
+  // Central Africa
+  { iso: 'CD', dial: '243' }, { iso: 'CG', dial: '242' }, { iso: 'CM', dial: '237' },
+  { iso: 'CF', dial: '236' }, { iso: 'GA', dial: '241' }, { iso: 'TD', dial: '235' },
+  { iso: 'GQ', dial: '240' }, { iso: 'ST', dial: '239' },
+  // West Africa
+  { iso: 'NG', dial: '234' }, { iso: 'GH', dial: '233' }, { iso: 'CI', dial: '225' },
+  { iso: 'SN', dial: '221' }, { iso: 'ML', dial: '223' }, { iso: 'NE', dial: '227' },
+  { iso: 'BF', dial: '226' }, { iso: 'GN', dial: '224' }, { iso: 'SL', dial: '232' },
+  { iso: 'LR', dial: '231' }, { iso: 'TG', dial: '228' }, { iso: 'BJ', dial: '229' },
+  { iso: 'GM', dial: '220' }, { iso: 'GW', dial: '245' }, { iso: 'CV', dial: '238' },
+  { iso: 'MR', dial: '222' },
+  // Southern Africa
+  { iso: 'ZM', dial: '260' }, { iso: 'ZW', dial: '263' }, { iso: 'MW', dial: '265' },
+  { iso: 'MZ', dial: '258' }, { iso: 'MG', dial: '261' }, { iso: 'MU', dial: '230' },
+  { iso: 'AO', dial: '244' }, { iso: 'NA', dial: '264' }, { iso: 'BW', dial: '267' },
+  { iso: 'LS', dial: '266' }, { iso: 'SZ', dial: '268' }, { iso: 'ZA', dial: '27' },
+  // North Africa
+  { iso: 'MA', dial: '212' }, { iso: 'DZ', dial: '213' }, { iso: 'TN', dial: '216' },
+  { iso: 'LY', dial: '218' },
+  // common extras
+  { iso: 'US', dial: '1' }, { iso: 'GB', dial: '44' },
 ];
 
 const OTHER = '__other__';
@@ -127,11 +102,14 @@ export function PhoneInput({
   onChange,
   placeholder = '5xx xxx xxxx',
   ariaLabel = 'Phone number',
+  codeAriaLabel = 'Phone country code',
 }: {
   value: string | null;
   onChange: (v: string | null) => void;
   placeholder?: string;
   ariaLabel?: string;
+  /** aria-label of the dial-code select (distinguish multiple PhoneInputs) */
+  codeAriaLabel?: string;
 }) {
   const parsed = useMemo(() => parsePhone(value), [value]);
   const [iso, setIso] = useState<string>(parsed.country?.iso ?? (value ? OTHER : DEFAULT_ISO));
@@ -168,16 +146,14 @@ export function PhoneInput({
           emit(v, rest);
         }}
       >
-        <SelectTrigger className="h-11 w-[150px] shrink-0 bg-card font-mono text-xs" aria-label="Phone country code">
+        <SelectTrigger className="h-11 w-24 shrink-0 bg-card font-mono text-sm" aria-label={codeAriaLabel}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent className="max-h-72">
-          <SelectItem value={OTHER} className="font-mono">+? Other</SelectItem>
+          <SelectItem value={OTHER} className="font-mono">Other</SelectItem>
           {PHONE_COUNTRIES.map((c) => (
-            <SelectItem key={c.iso} value={c.iso}>
-              <span className="font-mono text-xs">+{c.dial}</span>
-              {' · '}
-              <span className="text-xs">{c.name}</span>
+            <SelectItem key={c.iso} value={c.iso} className="font-mono">
+              +{c.dial}
             </SelectItem>
           ))}
         </SelectContent>

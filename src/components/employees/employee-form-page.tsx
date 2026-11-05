@@ -596,7 +596,6 @@ export function EmployeeFormPage() {
                     onChange={(v) => setForm((f) => ({ ...f, phone: v }))}
                     placeholder="5xx xxx xxxx"
                   />
-                  <p className="text-[11px] text-muted-foreground">Pick the country code, then type the local number (saved as +code number).</p>
                 </div>
                 <div className="space-y-2">
                   <Label>Email</Label>
@@ -604,7 +603,13 @@ export function EmployeeFormPage() {
                 </div>
                 <div className="space-y-2">
                   <Label>Emergency Contact</Label>
-                  <Input value={form.emergency_contact ?? ''} onChange={(e) => setForm((f) => ({ ...f, emergency_contact: e.target.value }))} placeholder="+966 5xx xxx xxxx" className="h-11" />
+                  <PhoneInput
+                    value={form.emergency_contact}
+                    onChange={(v) => setForm((f) => ({ ...f, emergency_contact: v }))}
+                    placeholder="5xx xxx xxxx"
+                    ariaLabel="Emergency contact number"
+                    codeAriaLabel="Emergency contact country code"
+                  />
                 </div>
               </div>
               <div className="space-y-2">

@@ -1043,28 +1043,44 @@ export function EmployeeDetailsPage() {
         </div>
       </section>
 
-      {/* ============================ Detail sections ============================ */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <InfoCard index={0} icon={<UserRound size={16} />} title="Personal Information" sub="Contact & background">
-          <InfoRow label="Nationality" value={emp.nationality ?? '—'} />
-          <InfoRow label="Date of Birth" value={fmtDate(emp.date_of_birth)} />
-          <InfoRow label="Phone" value={emp.phone ?? '—'} />
-          <InfoRow label="Email" value={emp.email ?? '—'} />
-          <InfoRow label="Emergency Contact" value={emp.emergency_contact ?? '—'} />
-          <div className="sm:col-span-2">
-            <InfoRow label="Home Country Address" value={emp.address ?? '—'} />
-          </div>
-        </InfoCard>
+      {/* ============================ Detail sections ============================
+          Two columns to manage space (desktop): the LEFT column stacks the
+          personal cards (Personal Information over Notices & Fines, then the
+          passport / ID documents); the RIGHT column carries the tall
+          Professional Information card with the record metadata below it. */}
+      <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
+        {/* ---- left column: personal stack ---- */}
+        <div className="space-y-4">
+          <InfoCard index={0} icon={<UserRound size={16} />} title="Personal Information" sub="Contact & background">
+            <InfoRow label="Nationality" value={emp.nationality ?? '—'} />
+            <InfoRow label="Date of Birth" value={fmtDate(emp.date_of_birth)} />
+            <InfoRow label="Phone" value={emp.phone ?? '—'} />
+            <InfoRow label="Email" value={emp.email ?? '—'} />
+            <InfoRow label="Emergency Contact" value={emp.emergency_contact ?? '—'} />
+            <div className="sm:col-span-2">
+              <InfoRow label="Home Country Address" value={emp.address ?? '—'} />
+            </div>
+          </InfoCard>
 
-        {/* the personal-information box split in two — this half lists the
-            employee's notices & fines (carousel when there are several) */}
-        <NoticesCard
-          index={1}
-          notices={notices}
-          onOpen={(kind) => navigateToNotifications(kind === 'warning' ? 'warnings' : 'fines')}
-        />
+          {/* the personal-information box split in two — this half lists the
+              employee's notices & fines (carousel when there are several) */}
+          <NoticesCard
+            index={1}
+            notices={notices}
+            onOpen={(kind) => navigateToNotifications(kind === 'warning' ? 'warnings' : 'fines')}
+          />
 
-        <InfoCard index={2} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
+          <InfoCard index={2} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">
+            <InfoRow label="Passport Number" value={emp.passport_number ?? '—'} mono />
+            <InfoRow label="Passport Status" value={<DocStatusPill status={emp.passport_status} />} />
+            <InfoRow label="ID Number" value={emp.id_number ?? '—'} mono />
+            <InfoRow label="ID Status" value={<DocStatusPill status={emp.id_status} />} />
+          </InfoCard>
+        </div>
+
+        {/* ---- right column: professional stack ---- */}
+        <div className="space-y-4">
+        <InfoCard index={3} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
           <div className="sm:col-span-2">
             <InfoRow
               label="Total Hours"
@@ -1223,19 +1239,13 @@ export function EmployeeDetailsPage() {
 
         </InfoCard>
 
-        <InfoCard index={3} icon={<FileText size={16} />} title="Document Details" sub="Passport & ID">
-          <InfoRow label="Passport Number" value={emp.passport_number ?? '—'} mono />
-          <InfoRow label="Passport Status" value={<DocStatusPill status={emp.passport_status} />} />
-          <InfoRow label="ID Number" value={emp.id_number ?? '—'} mono />
-          <InfoRow label="ID Status" value={<DocStatusPill status={emp.id_status} />} />
-        </InfoCard>
-
-        <InfoCard index={4} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
-          <InfoRow label="Employee Code" value={emp.employee_code} mono />
-          <InfoRow label="Performance Rating" value={<RatingStars rating={emp.rating} size={13} />} />
-          <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
-          <InfoRow label="Last Updated" value={fmtDateTime(emp.updated_at)} />
-        </InfoCard>
+          <InfoCard index={4} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
+            <InfoRow label="Employee Code" value={emp.employee_code} mono />
+            <InfoRow label="Performance Rating" value={<RatingStars rating={emp.rating} size={13} />} />
+            <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
+            <InfoRow label="Last Updated" value={fmtDateTime(emp.updated_at)} />
+          </InfoCard>
+        </div>
       </div>
 
       {/* ============================ Track record ============================ */}

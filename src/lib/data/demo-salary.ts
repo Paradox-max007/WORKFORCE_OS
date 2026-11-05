@@ -849,6 +849,10 @@ export const buildSalarySheet = (
       nationality: emp?.nationality ?? null,
       photo: emp?.photo ?? null,
       status: emp?.status ?? 'active',
+      camp_id: emp?.camp_id ?? null,
+      camp_name: emp?.camp_id
+        ? database.camps.find((c) => c.id === emp.camp_id)?.name ?? null
+        : null,
       trade_id: pe.trade_id_snapshot,
       trade_name: pe.trade_id_snapshot
         ? database.trades.find((t) => t.id === pe.trade_id_snapshot)?.name ?? null

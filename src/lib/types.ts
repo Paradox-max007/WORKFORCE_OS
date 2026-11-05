@@ -536,6 +536,9 @@ export interface PayrollEmployeeVM {
   nationality: string | null;
   photo: string | null;
   status: EmployeeStatus;
+  /** accommodation camp (Payroll filters — same data as the Employees page) */
+  camp_id: string | null;
+  camp_name: string | null;
   trade_id: string | null;
   trade_name: string | null;
   salary_role: SalaryRole;

@@ -5060,6 +5060,8 @@ begin
     'nationality', e.nationality,
     'photo', e.photo,
     'status', e.status,
+    'camp_id', e.camp_id,
+    'camp_name', c.name,
     'trade_id', pe.trade_id_snapshot,
     'trade_name', t.name,
     'salary_role', pe.salary_role_snapshot,
@@ -5124,6 +5126,7 @@ begin
   from public.payroll_employee pe
   join public.employee e on e.id = pe.employee_id
   left join public.trades t on t.id = pe.trade_id_snapshot
+  left join public.camp c on c.id = e.camp_id
   where pe.payroll_period_id = v_period.id;
 
   select coalesce(jsonb_agg(jsonb_build_object(

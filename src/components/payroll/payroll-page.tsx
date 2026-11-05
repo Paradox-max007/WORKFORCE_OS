@@ -20,9 +20,10 @@
 //     rows green in every Salary Sheet section
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
 //     (Σ net of unpaid)
-//   • SEARCH (name / employee ID / trade) plus FILTERS (trade, nationality)
-//     in the sticky bar — they narrow the table; the top cards stay period
-//     totals
+//   • SEARCH (name / employee ID / trade) plus FILTERS in the sticky bar —
+//     the SAME set as the Employees page: region, country (cascading), camp,
+//     trade and status (employee status + paid/unpaid). They narrow the
+//     table; the top cards stay period totals
 //   • the AUDIT TRAIL is collapsed behind an expandable icon button; opening
 //     it lists every audit entry, written with employee names & codes
 //   • reverting a payment is super-admin only and audited with a reason
@@ -57,6 +58,7 @@ import {
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
 import { dataApi } from '@/lib/data';
 import { fmtDate, fmtDateTime, initials } from '@/lib/format';
+import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
 import { cn } from '@/lib/utils';
 import {
   type PayrollEmployeeVM, type SalarySheetReport, type Trade,
@@ -88,7 +90,7 @@ const TIER_LABEL: Record<string, string> = {
   below_threshold: 'Below 1000 h / 6 months', qualified: 'Qualified', manual: 'Manual',
 };
 
-/** sentinel trade/nationality filter values */
+/** sentinel filter values */
 const FILTER_ALL = 'all';
 const FILTER_NONE = '__none__';
 
@@ -328,7 +330,11 @@ function HoursCell({ e, year, month }: { e: PayrollEmployeeVM; year: number; mon
             {fmtHrs(e.total_hours)} h
           </button>
         </HoverCardTrigger>
-        <HoverCardContent side="top" align="start" className="w-[min(580px,88vw)] max-h-[70vh] overflow-y-auto">
+        <HoverCardContent
+          side="top" align="start"
+          className="w-[min(580px,88vw)] max-h-[min(60vh,560px)] overflow-y-auto"
+          collisionPadding={{ top: 250, right: 16, bottom: 16, left: 16 }}
+        >
           <CalculationPanel e={e} year={year} month={month} />
         </HoverCardContent>
       </HoverCard>
@@ -563,10 +569,14 @@ export function PayrollPage() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   // ---- search + filters (they narrow the table only — the top cards stay
-  //      period totals) --------------------------------------------------------
+  //      period totals). SAME set as the Employees page: region → country
+  //      (cascading), camp, trade, status (+ paid / unpaid). ---------------
   const [search, setSearch] = useState('');
   const [tradeFilter, setTradeFilter] = useState(FILTER_ALL);
-  const [nationalityFilter, setNationalityFilter] = useState(FILTER_ALL);
+  const [regionFilter, setRegionFilter] = useState(FILTER_ALL);
+  const [countryFilter, setCountryFilter] = useState(FILTER_ALL);
+  const [campFilter, setCampFilter] = useState(FILTER_ALL);
+  const [statusFilter, setStatusFilter] = useState(FILTER_ALL);
   const [auditOpen, setAuditOpen] = useState(false);
 
   const load = (): void => {
@@ -619,24 +629,79 @@ export function PayrollPage() {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [employees]);
 
-  const nationalityFilterOptions = useMemo(
-    () => [...new Set(employees.map((e) => e.nationality).filter((n): n is string => !!n))].sort(),
+  const campFilterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    employees.forEach((e) => {
+      if (e.camp_id) map.set(e.camp_id, e.camp_name ?? 'Unknown camp');
+    });
+    return [...map.entries()].map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [employees]);
+
+  // countries present in this period, grouped by region (Africans, Asians, …)
+  const regionCountries = useMemo(
+    () => countriesByRegion(employees.map((e) => e.nationality)),
     [employees],
   );
+  const countryFilterOptions = useMemo(() => {
+    const present = new Set(employees.map((e) => e.nationality).filter(Boolean) as string[]);
+    if (regionFilter === FILTER_ALL) {
+      return Object.values(regionCountries).flat().sort((a, b) => a.localeCompare(b));
+    }
+    if (regionFilter === '__others__') {
+      return [...present]
+        .filter((c) => !NATIONALITY_REGIONS.some((r) => r.countries.some((rc) => rc.toLowerCase() === c.toLowerCase())))
+        .sort((a, b) => a.localeCompare(b));
+    }
+    const region = NATIONALITY_REGIONS.find((r) => r.key === regionFilter);
+    if (!region) return [];
+    return region.countries.filter((c) => present.has(c));
+  }, [regionFilter, regionCountries, employees]);
 
-  const filtersActive = search.trim() !== '' || tradeFilter !== FILTER_ALL || nationalityFilter !== FILTER_ALL;
+  const filtersActive = search.trim() !== ''
+    || tradeFilter !== FILTER_ALL
+    || regionFilter !== FILTER_ALL
+    || countryFilter !== FILTER_ALL
+    || campFilter !== FILTER_ALL
+    || statusFilter !== FILTER_ALL;
 
   const filteredEmployees = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const region = regionFilter === FILTER_ALL
+      ? null
+      : NATIONALITY_REGIONS.find((r) => r.key === regionFilter) ?? null;
     return employees.filter((e) => {
       if (tradeFilter !== FILTER_ALL && (e.trade_id ?? FILTER_NONE) !== tradeFilter) return false;
-      if (nationalityFilter !== FILTER_ALL && (e.nationality ?? FILTER_NONE) !== nationalityFilter) return false;
+      // nationality region + country filters (same behaviour as Employees)
+      if (region) {
+        const nat = (e.nationality ?? '').trim().toLowerCase();
+        if (!nat) return false;
+        if (region.key === '__others__') {
+          const known = NATIONALITY_REGIONS.some((r) =>
+            r.countries.some((c) => c.toLowerCase() === nat));
+          if (known) return false;
+        } else if (!region.countries.some((c) => c.toLowerCase() === nat)) {
+          return false;
+        }
+      }
+      if (countryFilter !== FILTER_ALL && (e.nationality ?? FILTER_NONE) !== countryFilter) return false;
+      // camp filter ('__none__' = employees without a camp)
+      if (campFilter === FILTER_NONE && e.camp_id) return false;
+      if (campFilter !== FILTER_ALL && campFilter !== FILTER_NONE && e.camp_id !== campFilter) return false;
+      // status: payment status + employee status (mirrors the Employees page)
+      const hasSiteThisMonth = e.sites.some((s) => s.site_id != null);
+      if (statusFilter === 'paid' && e.payment_status !== 'paid') return false;
+      if (statusFilter === 'unpaid' && e.payment_status === 'paid') return false;
+      if (statusFilter === 'active' && e.status !== 'active') return false;
+      if (statusFilter === 'working' && !hasSiteThisMonth) return false;
+      if (statusFilter === 'idle' && hasSiteThisMonth) return false;
+      if (statusFilter === 'pending_deletion' && e.status !== 'pending_deletion') return false;
       if (!q) return true;
       return e.full_name.toLowerCase().includes(q)
         || e.employee_code.toLowerCase().includes(q)
         || (e.trade_name ?? '').toLowerCase().includes(q);
     });
-  }, [employees, search, tradeFilter, nationalityFilter]);
+  }, [employees, search, tradeFilter, regionFilter, countryFilter, campFilter, statusFilter]);
 
   // footer totals follow the FILTERED rows (consistent with the visible table)
   const filteredTotals = useMemo(() => ({
@@ -650,7 +715,10 @@ export function PayrollPage() {
   const clearFilters = (): void => {
     setSearch('');
     setTradeFilter(FILTER_ALL);
-    setNationalityFilter(FILTER_ALL);
+    setRegionFilter(FILTER_ALL);
+    setCountryFilter(FILTER_ALL);
+    setCampFilter(FILTER_ALL);
+    setStatusFilter(FILTER_ALL);
   };
 
   // payment cards — read from the stored settlement rows (never recalculated)
@@ -709,7 +777,7 @@ export function PayrollPage() {
   const toggleEditMode = (): void => setEditMode((o) => !o);
 
   return (
-    <div className="mx-auto max-w-6xl space-y-4">
+    <div className="mx-auto max-w-[1600px] space-y-4">
       {/* sticky action bar — Edit / Finalize / Reopen stay visible while scrolling */}
       <div className="sticky top-16 z-30 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
         <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
@@ -769,9 +837,10 @@ export function PayrollPage() {
           </div>
         </div>
 
-        {/* search + filters — always visible while scrolling */}
-        <div className="mt-2.5 flex flex-col gap-2 border-t border-border/60 pt-2.5 sm:flex-row sm:items-center">
-          <div className="relative flex-1">
+        {/* search + filters — always visible while scrolling (same set as the
+            Employees page: region, country, camp, trade, status) */}
+        <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2.5">
+          <div className="relative min-w-[170px] flex-1">
             <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={search}
@@ -791,8 +860,47 @@ export function PayrollPage() {
               </button>
             )}
           </div>
+          {/* region → country (cascading, like the Employees page) */}
+          <Select
+            value={regionFilter}
+            onValueChange={(v) => { setRegionFilter(v); setCountryFilter(FILTER_ALL); }}
+          >
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by nationality region">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All regions</SelectItem>
+              {NATIONALITY_REGIONS.map((r) => (
+                <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>
+              ))}
+              <SelectItem value="__others__">Others</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={countryFilter} onValueChange={setCountryFilter}>
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by nationality country">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All countries</SelectItem>
+              {countryFilterOptions.map((c) => (
+                <SelectItem key={c} value={c}>{c}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={campFilter} onValueChange={setCampFilter}>
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by camp">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FILTER_ALL}>All camps</SelectItem>
+              {campFilterOptions.map((c) => (
+                <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+              ))}
+              <SelectItem value={FILTER_NONE}>No camp assigned</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={tradeFilter} onValueChange={setTradeFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by trade">
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by trade">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -803,16 +911,18 @@ export function PayrollPage() {
               <SelectItem value={FILTER_NONE}>No trade</SelectItem>
             </SelectContent>
           </Select>
-          <Select value={nationalityFilter} onValueChange={setNationalityFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by nationality">
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by status">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={FILTER_ALL}>All nationalities</SelectItem>
-              {nationalityFilterOptions.map((n) => (
-                <SelectItem key={n} value={n}>{n}</SelectItem>
-              ))}
-              <SelectItem value={FILTER_NONE}>No nationality</SelectItem>
+              <SelectItem value={FILTER_ALL}>All statuses</SelectItem>
+              <SelectItem value="paid">Paid</SelectItem>
+              <SelectItem value="unpaid">Unpaid</SelectItem>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="working">Working (site this month)</SelectItem>
+              <SelectItem value="idle">Idle (no site)</SelectItem>
+              <SelectItem value="pending_deletion">Pending deletion</SelectItem>
             </SelectContent>
           </Select>
           {filtersActive && (
@@ -898,17 +1008,19 @@ export function PayrollPage() {
             ))}
           </div>
 
-          {/* consolidated table — ONE row per employee, settlement always visible */}
+          {/* consolidated table — ONE row per employee, settlement always
+              visible. Wide layout (matches the Attendance page) so the ten
+              columns breathe; cells get extra horizontal padding. */}
           <section className="card-glow overflow-hidden rounded-xl border bg-card">
             <div className="overflow-x-auto">
-              <Table>
+              <Table className="[&_td]:px-4 [&_th]:px-4 [&_td]:py-3">
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-10">Sl No</TableHead>
-                    <TableHead>Employee</TableHead>
-                    <TableHead>Code</TableHead>
+                    <TableHead className="w-14">Sl No</TableHead>
+                    <TableHead className="min-w-52">Employee</TableHead>
+                    <TableHead className="min-w-28">Code</TableHead>
                     <TableHead className="text-right">Total Hours</TableHead>
-                    <TableHead>Trade</TableHead>
+                    <TableHead className="min-w-40">Trade</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
                     <TableHead className="text-right">Deduction</TableHead>
                     <TableHead className="text-right">Amount</TableHead>

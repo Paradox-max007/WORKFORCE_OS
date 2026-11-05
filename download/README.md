@@ -2,12 +2,24 @@
 
 ## Database migrations (run in Supabase SQL Editor)
 
-**`20261105b_audit_employee_names.sql`** + **`20261105c_companies.sql`** —
-REQUIRED for this update.
+**`20261105d_payroll_camp_filters.sql`** — REQUIRED for this update (run
+after the earlier `20261105b` / `20261105c` if you haven't already).
 
-Run each whole file in Supabase → SQL Editor → New query → Run. Both are
-idempotent (`create or replace function` / `create table if not exists`) and
-safe to re-run.
+Run the whole file in Supabase → SQL Editor → New query → Run. It is
+idempotent (`create or replace function`) and safe to re-run.
+
+### `20261105d_payroll_camp_filters.sql` — camp data for the Payroll filters
+
+`get_salary_sheet` (the shared Salary Sheet / Payroll read model) now also
+returns **`camp_id` + `camp_name`** on every consolidated employee row, read
+live from `employee.camp_id → camp.name`. This powers the new **camp
+filter** on the Payroll page. Purely additive — no table or data changes.
+
+### Earlier required migrations
+
+**`20261105b_audit_employee_names.sql`** + **`20261105c_companies.sql`** —
+run each whole file in the SQL Editor if not applied yet. Both are
+idempotent and safe to re-run.
 
 ### `20261105b_audit_employee_names.sql` — human-readable payroll audit
 
@@ -40,7 +52,37 @@ Earlier migrations (only needed on a fresh database):
 
 ## What changed in this update
 
-### Salary Sheet & Payroll
+### Payroll
+
+- **Full filter set — same as the Employees page**: **region** (Africans,
+  Asians, Arabs/Middle East, …) cascading into **country**, plus **camp**
+  (with a "No camp assigned" option), **trade** and **status** (Paid /
+  Unpaid / Active / Working / Idle / Pending deletion). Search (name, ID,
+  trade) stays; a Clear button resets everything.
+- **Wider layout**: the page and the table now use the full width (matches
+  the Attendance page) with roomier cells, so the ten columns no longer
+  feel congested.
+- **Hours tooltip is viewport-aware**: it flips below the row when there is
+  no room above and never hides behind the sticky header/action bar.
+
+### Employee Details
+
+- **Space-managed two-column layout**: the left column stacks **Personal
+  Information** over **Notices & Fines** (and the passport/ID documents);
+  the tall **Professional Information** card (with salary eligibility) sits
+  on the right with the record metadata below it.
+
+### Add / Edit Employee
+
+- The phone country-code dropdowns now **list only the dial codes**
+  (+971, +966, +91, … — no country names), ordered Gulf → South Asia →
+  South-East Asia → Africa, i.e. mostly African and Asian countries.
+- **Emergency Contact** also gets the country-code dropdown.
+- The note under the phone field was removed.
+
+### Previous update (kept for reference)
+
+#### Salary Sheet & Payroll
 
 - **Search** (name / employee ID / trade) on both pages — always visible in
   the sticky bar; the Salary Sheet filters rows inside every site section
@@ -56,7 +98,7 @@ Earlier migrations (only needed on a fresh database):
 - The "always last" chip was removed from the Salary Sheet's Idle Employees
   section (it still renders last, just without the label).
 
-### Employee Details
+#### Employee Details (previous)
 
 - The **Personal Information box is split in two** — the second card is
   **Notices & Fines**: the employee's warnings + fines, newest first, as a
@@ -64,7 +106,7 @@ Earlier migrations (only needed on a fresh database):
   slide **hyperlinks to that notification** — it opens the Notifications Hub
   straight on the Warnings or Fines tab.
 
-### Add / Edit Employee
+#### Add / Edit Employee (previous)
 
 - **Phone** now has a **country-code dropdown** (+971, +966, +91, … next to
   the local number; legacy "+code number" values are parsed back in, unknown
@@ -74,7 +116,7 @@ Earlier migrations (only needed on a fresh database):
   inline **"+ Add New Company…"** option (created on the fly and selected
   automatically). Existing employee companies appear automatically.
 
-### Notifications Hub
+#### Notifications Hub (previous)
 
 - Tabs are deep-linkable — the Notices & Fines card on Employee Details
   jumps straight to the right tab; the sidebar always opens the Requests

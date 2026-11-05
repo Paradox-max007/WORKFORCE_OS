@@ -25,8 +25,8 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, Clock, Eye,
-  FileSpreadsheet, Loader2, Lock, LockOpen, PencilLine, RotateCcw, Search,
+  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, ChevronUp, Clock, Eye,
+  FileSpreadsheet, History, Loader2, Lock, LockOpen, PencilLine, RotateCcw, Search,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -206,7 +206,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
 function SiteGroup({
   group, index, onShowLines, editMode, peIdOf, siteDraftOf, onSiteDraftChange,
   onSaveSite, onResetAuto, busyKey, tradeOptions, tradeStateOf, onTradeChange,
-  paidOf,
+  paidOf, settlementOf,
 }: {
   group: SalarySheetSiteGroup;
   index: number;
@@ -222,6 +222,8 @@ function SiteGroup({
   tradeStateOf: (employeeId: string) => TradeState;
   onTradeChange: (employeeId: string, tradeId: string | null) => void;
   paidOf: (employeeId: string) => boolean;
+  /** employee-level settlement (advance / deduction) — set per employee in Payroll */
+  settlementOf: (employeeId: string) => { advance: number; deduction: number } | undefined;
 }) {
   const [open, setOpen] = useState(true);
   const idle = group.idle === true;
@@ -288,6 +290,8 @@ function SiteGroup({
                     <TableHead className="text-right">Hours</TableHead>
                     <TableHead className="text-right">Rate</TableHead>
                     <TableHead className="text-right">Gross{idle ? ' (idle)' : ' (site)'}</TableHead>
+                    <TableHead className="text-right">Advance</TableHead>
+                    <TableHead className="text-right">Deduction</TableHead>
                     {editMode && <TableHead className="w-20 text-right">Save</TableHead>}
                   </TableRow>
                 </TableHeader>
@@ -304,6 +308,7 @@ function SiteGroup({
                     const editable = editMode && peId != null && draft != null && r.synthetic !== true;
                     const paid = paidOf(r.employee_id);
                     const empBusy = peId != null && busyKey === `emp:${peId}`;
+                    const settlement = settlementOf(r.employee_id);
                     return (
                       <TableRow
                         key={`${r.employee_id}-${r.site_id ?? 'none'}`}
@@ -413,6 +418,24 @@ function SiteGroup({
                                 aria-label={`Gross at ${group.site_name}`}
                               />
                             </TableCell>
+                            {/* advance / deduction stay employee-level (Payroll) —
+                                shown read-only even in edit mode */}
+                            <TableCell className="text-right font-mono text-xs">
+                              <span
+                                className={settlement && settlement.advance > 0 ? '' : 'text-muted-foreground'}
+                                title="Advance is set per employee on the Payroll page"
+                              >
+                                {settlement && settlement.advance > 0 ? fmtMoney(settlement.advance) : '—'}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              <span
+                                className={settlement && settlement.deduction > 0 ? '' : 'text-muted-foreground'}
+                                title="Deduction is set per employee on the Payroll page"
+                              >
+                                {settlement && settlement.deduction > 0 ? fmtMoney(settlement.deduction) : '—'}
+                              </span>
+                            </TableCell>
                             <TableCell className="text-right">
                               <div className="flex justify-end gap-1">
                                 <Button
@@ -452,6 +475,25 @@ function SiteGroup({
                               )}
                             </TableCell>
                             <TableCell className="text-right font-mono text-sm font-semibold">AED {fmtMoney(r.gross_salary)}</TableCell>
+                            {/* advance / deduction — employee-level settlement
+                                values (same on every site row of the employee);
+                                administered on the Payroll page */}
+                            <TableCell className="text-right font-mono text-xs">
+                              <span
+                                className={settlement && settlement.advance > 0 ? '' : 'text-muted-foreground'}
+                                title="Advance is set per employee on the Payroll page"
+                              >
+                                {settlement && settlement.advance > 0 ? fmtMoney(settlement.advance) : '—'}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs">
+                              <span
+                                className={settlement && settlement.deduction > 0 ? '' : 'text-muted-foreground'}
+                                title="Deduction is set per employee on the Payroll page"
+                              >
+                                {settlement && settlement.deduction > 0 ? fmtMoney(settlement.deduction) : '—'}
+                              </span>
+                            </TableCell>
                             {editMode && <TableCell />}
                           </>
                         )}
@@ -497,6 +539,8 @@ export function SalarySheetPage() {
   // ---- search (name / employee ID / trade) — filters rows inside every
   //      site section; empty sections are hidden -------------------------------
   const [search, setSearch] = useState('');
+  // ---- audit trail — collapsed behind a pill button (same as Payroll) -------
+  const [auditOpen, setAuditOpen] = useState(false);
 
   const load = (): void => {
     setLoading(true);
@@ -549,6 +593,16 @@ export function SalarySheetPage() {
   /** paid employees are green in EVERY section they appear in */
   const paidOf = useCallback(
     (employeeId: string): boolean => employeeById.get(employeeId)?.payment_status === 'paid',
+    [employeeById],
+  );
+
+  /** employee-level settlement (advance / deduction) for the new columns —
+   *  same value on every site row of the employee; edited on the Payroll page */
+  const settlementOf = useCallback(
+    (employeeId: string): { advance: number; deduction: number } | undefined => {
+      const e = employeeById.get(employeeId);
+      return e ? { advance: e.advance, deduction: e.deduction } : undefined;
+    },
     [employeeById],
   );
 
@@ -657,16 +711,24 @@ export function SalarySheetPage() {
   const finalized = period?.status === 'finalized';
   const exportCsv = (): void => {
     if (!report) return;
-    const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Rate (AED/h)', 'Gross (AED)']];
-    report.sites.forEach((g) => g.rows.forEach((r, i) => rows.push([
-      g.site_name, String(i + 1), r.full_name, r.employee_code,
-      r.trade_name ?? '', r.nationality ?? '', fmtHrs(r.total_hours),
-      r.has_missing_rate ? '' : fmtMoney(effRateOf(r)), fmtMoney(r.gross_salary),
-    ])));
-    const summary: string[][] = [['', ''], ['EMPLOYEES', ''], ['Employee', 'Employee ID', 'Trade', 'Total Hours', 'Gross', 'Status']];
+    const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Rate (AED/h)', 'Gross (AED)', 'Advance (AED)', 'Deduction (AED)']];
+    report.sites.forEach((g) => g.rows.forEach((r, i) => {
+      const emp = employeeById.get(r.employee_id);
+      rows.push([
+        g.site_name, String(i + 1), r.full_name, r.employee_code,
+        r.trade_name ?? '', r.nationality ?? '', fmtHrs(r.total_hours),
+        r.has_missing_rate ? '' : fmtMoney(effRateOf(r)), fmtMoney(r.gross_salary),
+        emp && emp.advance > 0 ? fmtMoney(emp.advance) : '',
+        emp && emp.deduction > 0 ? fmtMoney(emp.deduction) : '',
+      ]);
+    }));
+    const summary: string[][] = [['', ''], ['EMPLOYEES', ''], ['Employee', 'Employee ID', 'Trade', 'Total Hours', 'Gross', 'Advance', 'Deduction', 'Status']];
     report.employees.forEach((e) => summary.push([
       e.full_name, e.employee_code, e.trade_name ?? '',
-      fmtHrs(e.total_hours), fmtMoney(e.gross_salary), e.payment_status,
+      fmtHrs(e.total_hours), fmtMoney(e.gross_salary),
+      e.advance > 0 ? fmtMoney(e.advance) : '',
+      e.deduction > 0 ? fmtMoney(e.deduction) : '',
+      e.payment_status,
     ]));
     const csv = [...rows, ...summary]
       .map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(','))
@@ -716,7 +778,7 @@ export function SalarySheetPage() {
     + idleGroups.reduce((n, g) => n + g.rows.length, 0);
 
   return (
-    <div className="mx-auto max-w-6xl space-y-4">
+    <div className="mx-auto max-w-[1600px] space-y-4">
       {/* sticky action bar — Edit / CSV / Finalize stay visible while scrolling */}
       <div className="sticky top-16 z-30 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
         <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
@@ -852,7 +914,8 @@ export function SalarySheetPage() {
             <StatCard index={1} icon={<Clock size={12} />} label="Total hours"
               value={fmtHrs(report.totals.total_hours)} />
             <StatCard index={2} icon={<Banknote size={12} />} label="Gross salary"
-              value={`AED ${fmtMoney(report.totals.gross_salary)}`} tone="brand" />
+              value={`AED ${fmtMoney(report.totals.gross_salary)}`} tone="brand"
+              hint={`Adv. ${fmtMoney(report.totals.advances)} · Ded. ${fmtMoney(report.totals.deductions)}`} />
             <StatCard index={3} icon={<BadgeCheck size={12} />} label="Paid"
               value={`${report.totals.paid_count} / ${report.totals.employees}`} tone="emerald"
               hint={`${report.totals.unpaid_count} unpaid`} />
@@ -889,6 +952,7 @@ export function SalarySheetPage() {
                   tradeStateOf={tradeStateOf}
                   onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   paidOf={paidOf}
+                  settlementOf={settlementOf}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
                 />
               ))}
@@ -909,27 +973,62 @@ export function SalarySheetPage() {
                   tradeStateOf={tradeStateOf}
                   onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   paidOf={paidOf}
+                  settlementOf={settlementOf}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
                 />
               ))}
             </div>
           )}
 
-          {/* audit trail */}
+          {/* audit trail — collapsed behind an expandable icon button (same
+              behaviour as the Payroll page) */}
           {report.audit.length > 0 && (
-            <section className="card-glow rounded-xl border bg-card p-5">
-              <SectionTitle icon={<Clock size={16} />} title="Audit trail" sub="Finalizations, reopens, edits and payments" />
-              <div className="mt-3 space-y-1.5">
-                {report.audit.map((a) => (
-                  <p key={a.id} className="text-xs text-muted-foreground">
-                    <span className="font-mono">{fmtDateTime(a.created_at)}</span>
-                    {' · '}<span className="font-semibold text-foreground">{a.actor_name ?? 'System'}</span>
-                    {' · '}{a.details}
-                  </p>
-                ))}
-              </div>
-            </section>
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => setAuditOpen((o) => !o)}
+                aria-expanded={auditOpen}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors',
+                  auditOpen
+                    ? 'border-brand/40 bg-brand/10 text-brand'
+                    : 'border-border/60 bg-card text-muted-foreground hover:text-foreground',
+                )}
+                title={auditOpen ? 'Hide the audit trail' : `Show all ${report.audit.length} audit entries`}
+              >
+                <History size={14} />
+                Audit trail
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-bold tabular-nums">
+                  {report.audit.length}
+                </span>
+                {auditOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+            </div>
           )}
+          <AnimatePresence initial={false}>
+            {auditOpen && report.audit.length > 0 && (
+              <motion.section
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.25, ease: EASE }}
+                className="overflow-hidden"
+              >
+                <div className="card-glow rounded-xl border bg-card p-5">
+                  <SectionTitle icon={<History size={16} />} title="Audit trail" sub={`All ${report.audit.length} entries — finalizations, reopens, edits and payments`} />
+                  <div className="mt-3 space-y-1.5">
+                    {report.audit.map((a) => (
+                      <p key={a.id} className="text-xs text-muted-foreground">
+                        <span className="font-mono">{fmtDateTime(a.created_at)}</span>
+                        {' · '}<span className="font-semibold text-foreground">{a.actor_name ?? 'System'}</span>
+                        {' · '}{a.details}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              </motion.section>
+            )}
+          </AnimatePresence>
         </>
       )}
 

@@ -345,8 +345,8 @@ function HoursCell({ e, year, month }: { e: PayrollEmployeeVM; year: number; mon
         </HoverCardTrigger>
         <HoverCardContent
           side="top" align="start"
-          className="w-[min(580px,88vw)] max-h-[max(150px,min(calc(100vh-540px),460px))] overflow-y-auto"
-          collisionPadding={{ top: 220, right: 16, bottom: 16, left: 16 }}
+          className="w-[min(580px,88vw)] max-h-[max(240px,min(calc(100vh-460px),560px))] overflow-y-auto border-2 border-brand/60 bg-zinc-100 shadow-xl dark:bg-zinc-900"
+          collisionPadding={{ top: 200, right: 16, bottom: 16, left: 16 }}
         >
           <CalculationPanel e={e} year={year} month={month} />
         </HoverCardContent>
@@ -487,11 +487,11 @@ function EmployeeNotesCell({ employee, notes, onChanged }: {
       <PopoverContent
         align="start"
         collisionPadding={{ top: 90, right: 16, bottom: 16, left: 16 }}
-        className="w-[min(340px,88vw)] p-0"
+        className="w-[min(340px,88vw)] border-2 border-brand/50 p-0 shadow-lg shadow-[var(--glow)]"
       >
-        <div className="border-b px-3 py-2.5">
+        <div className="border-b border-brand/20 bg-brand/10 px-3 py-2.5">
           <p className="flex items-center gap-1.5 text-sm font-semibold">
-            <StickyNote size={14} className="text-amber-500" /> Quick notes
+            <StickyNote size={14} className="text-brand" /> Quick notes
           </p>
           <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
             {employee.full_name} · <span className="font-mono">{employee.employee_code}</span> — stored on the employee for future reference
@@ -531,7 +531,7 @@ function EmployeeNotesCell({ employee, notes, onChanged }: {
           )}
         </div>
 
-        <div className="border-t p-3">
+        <div className="border-t border-brand/20 p-3">
           <Textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -540,7 +540,7 @@ function EmployeeNotesCell({ employee, notes, onChanged }: {
             }}
             placeholder="e.g. Advance every 20th · card renewed…"
             rows={2}
-            className="resize-none bg-card text-xs"
+            className="resize-none border-brand/25 bg-card text-xs focus-visible:ring-brand/40"
             aria-label={`New note about ${employee.full_name}`}
           />
           <div className="mt-2 flex items-center justify-between gap-2">
@@ -1276,6 +1276,9 @@ export function PayrollPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
+                  {/* filter results animate in with the same smooth flicker
+                      cascade the Employees page uses (staggered fade + rise) */}
+                  <AnimatePresence initial={false}>
                   {filteredEmployees.map((e, i) => {
                     const paid = e.payment_status === 'paid';
                     const tradeBusy = busyKey === `trade:${e.id}`;
@@ -1284,9 +1287,14 @@ export function PayrollPage() {
                     const editable = editMode && !paid && e.status !== 'deleted';
                     const hasSalary = e.gross_salary > 0;
                     return (
-                      <TableRow
+                      <motion.tr
                         key={e.id}
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ delay: Math.min(i * 0.03, 0.45), duration: 0.2, ease: EASE }}
                         className={cn(
+                          'border-b transition-colors hover:bg-muted/50',
                           paid && 'bg-emerald-500/[0.07]',
                           e.manually_edited && !paid && 'bg-amber-500/[0.04]',
                         )}
@@ -1426,9 +1434,10 @@ export function PayrollPage() {
                             )}
                           </div>
                         </TableCell>
-                      </TableRow>
+                      </motion.tr>
                     );
                   })}
+                  </AnimatePresence>
                   {filteredEmployees.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">

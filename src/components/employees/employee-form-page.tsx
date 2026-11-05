@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import {
-  ArrowLeft, Building2, Clock, Crown, HeartPulse, IdCard,
+  ArrowLeft, Building2, Clock, CreditCard, Crown, HeartPulse, IdCard,
   ImagePlus, Loader2, Plus, Save, Tent, UserRound, Wrench,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -35,9 +35,9 @@ import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  EXPERIENCE_TIERS, SALARY_ROLES, type CampWithCount, type Company,
+  EXPERIENCE_TIERS, SALARY_ROLES, type CampWithCount, type CardType, type Company,
   type DocumentStatus, type EmployeeInput, type EmployeeVM, type ExperienceTier,
-  type SalaryRole, type SiteWithCount, type Trade, type TradeRateInput,
+  type PaymentType, type SalaryRole, type SiteWithCount, type Trade, type TradeRateInput,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -256,6 +256,15 @@ export function EmployeeFormPage() {
   const [addingSite, setAddingSite] = useState(false);
   const [newCompanyName, setNewCompanyName] = useState<string | null>(null);
   const [addingCompany, setAddingCompany] = useState(false);
+  // ---- payment method (Documents section — same editor as the details page) --
+  const [cardTypes, setCardTypes] = useState<CardType[]>([]);
+  const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
+  const [cardTypeId, setCardTypeId] = useState<string>('none');
+  const [newCardName, setNewCardName] = useState<string | null>(null);
+  const [addingCard, setAddingCard] = useState(false);
+  /** payment values loaded from the employee being edited — the form only
+   *  saves the payment method back when the user actually changes them */
+  const initialPayment = useRef<{ type: PaymentType | null; cardId: string | null }>({ type: null, cardId: null });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ---- load reference data (+ the employee being edited) ----------------------
@@ -266,12 +275,13 @@ export function EmployeeFormPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps, trs, cmps] = await Promise.all([
+        const [emps, sts, cps, trs, cmps, cards] = await Promise.all([
           dataApi.listEmployees(),
           dataApi.listSites(),
           dataApi.listCamps(),
           dataApi.listTrades().catch(() => []),
           dataApi.listCompanies().catch(() => [] as Company[]),
+          dataApi.listCardTypes().catch(() => [] as CardType[]),
         ]);
         if (cancelled) return;
         setAllEmployees(emps);
@@ -279,6 +289,7 @@ export function EmployeeFormPage() {
         setCamps(cps);
         setTrades(trs);
         setCompanies(cmps);
+        setCardTypes(cards);
         if (isEdit && employeeId) {
           const emp = emps.find((e) => e.id === employeeId);
           if (!emp) {
@@ -288,6 +299,9 @@ export function EmployeeFormPage() {
           }
           setExistingCode(emp.employee_code);
           setOpeningHours(emp.opening_hours ? String(emp.opening_hours) : '');
+          setPaymentType(emp.payment_type);
+          setCardTypeId(emp.card_type_id ?? 'none');
+          initialPayment.current = { type: emp.payment_type, cardId: emp.card_type_id ?? null };
           setForm({
             full_name: emp.full_name,
             employee_code: null,
@@ -387,6 +401,32 @@ export function EmployeeFormPage() {
     }
   };
 
+  // ---- inline new card type (card types live in their own table) ------------
+  const pickCardType = (v: string) => {
+    if (v === '__add_new') {
+      setNewCardName('');
+      return;
+    }
+    setNewCardName(null);
+    setCardTypeId(v);
+  };
+
+  const addCardTypeInline = async () => {
+    if (!newCardName?.trim()) return;
+    setAddingCard(true);
+    try {
+      const cardType = await dataApi.createCardType(newCardName.trim());
+      toast.success('Card type created', { description: cardType.name });
+      setCardTypes((prev) => [...prev, cardType].sort((a, b) => a.name.localeCompare(b.name)));
+      setCardTypeId(cardType.id);
+      setNewCardName(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create card type');
+    } finally {
+      setAddingCard(false);
+    }
+  };
+
   // ---- photo ----------------------------------------------------------------------
   const handlePhoto = async (file: File | undefined) => {
     if (!file) return;
@@ -452,6 +492,13 @@ export function EmployeeFormPage() {
       parsedOpening = editingEmployee.opening_hours ?? 0;
     }
 
+    // payment method — card requires a card type; validated before any save
+    const nextCardId = paymentType === 'card' ? (cardTypeId !== 'none' ? cardTypeId : null) : null;
+    if (paymentType === 'card' && !nextCardId) {
+      toast.error('Select the card type first (or create one with “Add New”)');
+      return;
+    }
+
     setSaving(true);
     const payload: EmployeeInput = {
       ...form,
@@ -473,12 +520,31 @@ export function EmployeeFormPage() {
     try {
       if (isEdit && employeeId) {
         const updated = await dataApi.updateEmployee(employeeId, payload);
-        toast.success('Employee updated', { description: `${updated.full_name} saved.` });
+        // payment method — saved through its own audited setter, only when the
+        // user changed the values that were loaded from the employee
+        const paymentChanged = paymentType !== initialPayment.current.type
+          || (paymentType === 'card' && nextCardId !== initialPayment.current.cardId);
+        if (paymentChanged) {
+          await dataApi.setEmployeePaymentMethod(employeeId, paymentType, nextCardId);
+        }
+        toast.success('Employee updated', {
+          description: `${updated.full_name} saved.${paymentChanged ? ' Payment method updated.' : ''}`,
+        });
         // back to where we came from (details page keeps context)
         if (returnTo === 'employee_details') navigateToEmployeeDetails(employeeId);
         else navigateToEmployees();
       } else {
         const created = await dataApi.createEmployee(payload);
+        // a brand-new employee can be born with its payment method set
+        if (paymentType) {
+          try {
+            await dataApi.setEmployeePaymentMethod(created.id, paymentType, nextCardId);
+          } catch (err) {
+            toast.warning('Employee created, but the payment method failed', {
+              description: err instanceof Error ? err.message : 'Set it later on the Employee Details page.',
+            });
+          }
+        }
         toast.success('Employee created', { description: `${created.full_name} — ID ${created.employee_code}` });
         // fresh employee → straight to the Employee Management page
         navigateToEmployees();
@@ -875,8 +941,16 @@ export function EmployeeFormPage() {
             </div>
           </FormSection>
 
-          {/* ---------------- Documents ---------------- */}
-          <FormSection icon={<IdCard size={16} />} title="Documents" hint="Passport & ID numbers with validity">
+          {/* ---------------- Documents ----------------
+              Stacked BELOW the Historical Working Hours card, i.e. it lives in
+              the RIGHT column — the column that runs next to Work &
+              Accommodation on the left. */}
+          <FormSection
+            icon={<IdCard size={16} />}
+            title="Documents"
+            hint="Passport, ID & payment method"
+            className="lg:col-start-2"
+          >
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Passport Number</Label>
@@ -917,6 +991,70 @@ export function EmployeeFormPage() {
                     <RatingStars rating={editingEmployee.rating} />
                     <span className="text-xs text-muted-foreground">Auto-calculated from attendance</span>
                   </div>
+                </div>
+              )}
+            </div>
+
+            {/* payment method — cash / card (+ card type). Same editor as the
+                Employee Details page: saved through its own audited setter,
+                shown as the Payment Method column in Payroll */}
+            <div className="mt-5 rounded-xl border border-brand/15 bg-brand/[0.03] p-3.5">
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <CreditCard size={13} className="text-brand" /> Payment Method
+                <span className="normal-case text-muted-foreground/70">— how the salary is paid (Payroll column &amp; filter)</span>
+              </p>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Payment Type</Label>
+                  <Select
+                    value={paymentType ?? 'none'}
+                    onValueChange={(v) => {
+                      const next = v === 'none' ? null : v as PaymentType;
+                      setPaymentType(next);
+                      if (next !== 'card') setNewCardName(null);
+                    }}
+                  >
+                    <SelectTrigger className="h-11 bg-card" aria-label="Payment type"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Not set</SelectItem>
+                      <SelectItem value="cash">Cash</SelectItem>
+                      <SelectItem value="card">Card</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] text-muted-foreground">Choose Card to pick the payroll card below.</p>
+                </div>
+                {paymentType === 'card' && (
+                  <div className="space-y-2">
+                    <Label>Card Type</Label>
+                    <Select value={cardTypeId} onValueChange={pickCardType}>
+                      <SelectTrigger className="h-11 bg-card" aria-label="Card type"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Select a card…</SelectItem>
+                        {cardTypes.map((c) => (
+                          <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                        ))}
+                        <SelectItem value="__add_new" className="text-brand">+ Add New Card Type…</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground">Card types are managed in their own list — use “Add New” to create one on the fly.</p>
+                  </div>
+                )}
+              </div>
+              {paymentType === 'card' && newCardName !== null && (
+                <div className="mt-3 flex items-end gap-2">
+                  <div className="flex-1 space-y-2">
+                    <Label>New Card Type</Label>
+                    <Input
+                      value={newCardName}
+                      onChange={(e) => setNewCardName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void addCardTypeInline(); } }}
+                      placeholder="e.g. Emirates NBD Card"
+                      className="h-11 bg-card"
+                    />
+                  </div>
+                  <Button type="button" onClick={() => { void addCardTypeInline(); }} disabled={addingCard || newCardName.trim() === ''} className="brand-gradient h-11 font-semibold text-white">
+                    {addingCard ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
+                  </Button>
                 </div>
               )}
             </div>

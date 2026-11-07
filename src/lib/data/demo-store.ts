@@ -21,6 +21,7 @@ import {
   type Notification,
   type Profile,
   type SalaryRole,
+  type SharedSheetSnapshot,
   type Site,
   type SiteTransfer,
   type Trade,
@@ -166,6 +167,8 @@ export interface DemoDB {
   cardTypes: CardType[];
   // employee sticky notes (Payroll page — quick reference comments)
   employeeNotes: DemoEmployeeNote[];
+  // one-time shareable digital attendance sheets (per-site links)
+  shareLinks: DemoAttendanceShareLink[];
 }
 
 /** Raw employee-note row (author name resolved at read time from profiles) */
@@ -175,6 +178,25 @@ export interface DemoEmployeeNote {
   note: string;
   created_by: string | null;
   created_at: string;
+}
+
+/** One-time shareable digital attendance sheet (mirrors the
+ *  attendance_share_link Postgres table — see the 20261108 migration). */
+export interface DemoAttendanceShareLink {
+  id: string;
+  token: string;
+  site_id: string | null;
+  site_name: string;
+  month_key: string; // YYYY-MM
+  created_by: string | null;
+  created_at: string;
+  status: 'active' | 'submitted';
+  submitted_at: string | null;
+  submitted_by: string | null;
+  submit_count: number;
+  edit_granted_at: string | null;
+  edit_granted_by: string | null;
+  sheet_data: SharedSheetSnapshot | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +243,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 13,
+    version: 14,
     profiles: [],
     sites: [],
     camps: [],
@@ -249,6 +271,7 @@ function seedDB(): DemoDB {
     companies: [],
     cardTypes: [],
     employeeNotes: [],
+    shareLinks: [],
   };
 
   // ---- profiles -----------------------------------------------------------
@@ -696,7 +719,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 13) return parsed;
+      if (parsed.version === 14) return parsed;
     }
   } catch {
     // corrupted → reseed

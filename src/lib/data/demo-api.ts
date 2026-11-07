@@ -5,6 +5,7 @@
 import {
   type AdminSiteAssignment,
   type Attendance,
+  type AttendanceShareLink,
   type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
@@ -30,6 +31,11 @@ import {
   type SalarySheetReport,
   type SalarySheetRowUpdate,
   type SalaryRole,
+  type SharedSheetEmployee,
+  type SharedSheetPayload,
+  type SharedSheetSnapshot,
+  type SharedSheetSubmitEntry,
+  type SharedSheetSubmitResult,
   type Site,
   type SiteTransfer,
   type SiteWithCount,
@@ -55,6 +61,8 @@ import {
   subscribeDemo,
   toYMD,
   uid,
+  daysInMonth,
+  type DemoAttendanceShareLink,
 } from './demo-store';
 import {
   applyAssignment,
@@ -112,6 +120,105 @@ const attachEmployeeVM = (e: Employee): EmployeeVM => ({
 const profileName = (id: string | null): string | null =>
   id ? db.profiles.find((p) => p.id === id)?.name ?? null : null;
 
+/** record → sheet cell text ('' | hours | 'A' | free-text marker) */
+const recordToCellText = (r: Attendance | undefined): string => {
+  if (!r) return '';
+  if (r.status === 'absent') return 'A';
+  if (r.status === 'present' && r.hours != null) return String(r.hours);
+  if (r.note) return r.note;
+  return '';
+};
+
+/** THE shared marking engine (mirrors the mark_attendance_core SQL
+ *  function): parse → upsert → rating → 3-consecutive-absences warning.
+ *  NO permission checks inside — permission-gated callers (markAttendance)
+ *  and the token-gated shared-sheet submit both reuse the exact same rules. */
+function markCore(employeeId: string, date: string, value: string | null, byProfileId: string | null): void {
+  const e = db.employees.find((x) => x.id === employeeId);
+  if (!e) throw new Error('Employee not found');
+
+  const trimmed = (value ?? '').trim();
+  const prev = db.attendance.find((a) => a.employee_id === employeeId && a.date === date);
+
+  // cleared cell → remove the record
+  if (trimmed === '') {
+    if (prev) {
+      db.attendance = db.attendance.filter((a) => a.id !== prev.id);
+    }
+    return;
+  }
+
+  let status: Attendance['status'];
+  let hours: number | null = null;
+  let note: string | null = null;
+  if (trimmed.toLowerCase() === 'a') {
+    // ONLY "A" marks a day absent — any other free text never does
+    status = 'absent';
+  } else {
+    const n = Number(trimmed);
+    if (trimmed !== '' && !Number.isNaN(n) && Number.isFinite(n)) {
+      if (n < 0 || n > 24) throw new Error('Hours must be between 0 and 24');
+      status = 'present';
+      hours = Math.round(n * 100) / 100;
+    } else {
+      // free-text marker ("OT", "H", "travel", …) — present, no hours,
+      // text kept on the record and displayed in the cell
+      if (trimmed.length > 40) throw new Error('Free-text markers are limited to 40 characters — only A counts as absent');
+      status = 'present';
+      note = trimmed;
+    }
+  }
+
+  const otDelta = prev
+    ? Math.max(0, (hours ?? 0) - 8) - Math.max(0, (prev.hours ?? 0) - 8)
+    : Math.max(0, (hours ?? 0) - 8);
+
+  if (prev) {
+    prev.status = status;
+    prev.hours = hours;
+    prev.note = note;
+  } else {
+    db.attendance.push({
+      id: uid(), employee_id: employeeId, date, status, hours, note,
+      is_hidden: false, created_at: nowISO(),
+    });
+  }
+
+  // rating: ±0.2 stars per overtime-hour delta (hours above 8/day)
+  if (otDelta !== 0) {
+    e.rating = clampRating(e.rating + 0.2 * otDelta);
+  }
+
+  // auto-warning on 3+ consecutive absences (skipping Fridays)
+  if (status === 'absent') {
+    const absentDates: string[] = [date];
+    let walk = addDaysStr(date, -1);
+    const floorDate = addDaysStr(date, -7);
+    while (walk >= floorDate) {
+      if (isFridayStr(walk)) { walk = addDaysStr(walk, -1); continue; }
+      const rec = db.attendance.find((a) => a.employee_id === employeeId && a.date === walk && !a.is_hidden);
+      if (rec && rec.status === 'absent') {
+        absentDates.unshift(walk);
+        walk = addDaysStr(walk, -1);
+      } else break;
+    }
+    if (absentDates.length >= 3) {
+      db.warnings.push({
+        id: uid(), employee_id: employeeId,
+        reason: `Auto-generated: ${absentDates.length} consecutive absences detected (${absentDates.join(', ')})`,
+        is_auto_generated: true, absent_dates: absentDates,
+        created_by: byProfileId, is_hidden: false, created_at: nowISO(),
+      });
+      e.rating = clampRating(e.rating - 0.5);
+      notifySuperAdmins(
+        'Auto-Generated Warning',
+        `${e.full_name} (${e.employee_code}) was absent 3+ consecutive days`,
+        'warning',
+      );
+    }
+  }
+}
+
 const attachLeaveVM = (r: (typeof db.leaveRequests)[number]): LeaveRequestVM => {
   const e = db.employees.find((x) => x.id === r.employee_id);
   return {
@@ -126,6 +233,89 @@ const attachLeaveVM = (r: (typeof db.leaveRequests)[number]): LeaveRequestVM => 
     reviewed_by_name: profileName(r.reviewed_by),
   };
 };
+
+/** demo share-link row → the shared AttendanceShareLink VM (name resolved) */
+const toShareLinkVM = (l: DemoAttendanceShareLink): AttendanceShareLink => ({
+  id: l.id,
+  token: l.token,
+  site_id: l.site_id,
+  site_name: l.site_name,
+  month_key: l.month_key,
+  created_by: l.created_by,
+  created_by_name: profileName(l.created_by),
+  created_at: l.created_at,
+  status: l.status,
+  submitted_at: l.submitted_at,
+  submitted_by: l.submitted_by,
+  submit_count: l.submit_count,
+  edit_granted_at: l.edit_granted_at,
+  edit_granted_by: l.edit_granted_by,
+});
+
+/** Build the shared-sheet payload for a link (mirrors the
+ *  build_shared_sheet_snapshot SQL function): one row per employee who spent
+ *  at least one day of the month at the link's site — date-effective via the
+ *  shared site-timeline engine — with cell texts + row totals. */
+function buildSharedSnapshot(link: DemoAttendanceShareLink): SharedSheetSnapshot & {
+  employees: SharedSheetEmployee[];
+} {
+  const [year, month] = link.month_key.split('-').map(Number);
+  const days = daysInMonth(year, month);
+  const employees: SharedSheetEmployee[] = [];
+  let totalHours = 0;
+  let totalAbsents = 0;
+
+  const crew = db.employees
+    .filter((e) => e.status !== 'deleted')
+    .sort((a, b) => a.full_name.localeCompare(b.full_name));
+  for (const emp of crew) {
+    const markable: string[] = [];
+    for (let d = 1; d <= days; d++) {
+      const date = `${link.month_key}-${String(d).padStart(2, '0')}`;
+      const siteOnDate = getEmployeeSiteForDate(emp.id, date, {
+        transfers: db.siteTransfers,
+        records: db.attendance,
+        currentSiteId: emp.current_site_id,
+      });
+      if ((siteOnDate ?? null) === (link.site_id ?? null)) markable.push(date);
+    }
+    if (markable.length === 0) continue;
+
+    const cells: Record<string, string> = {};
+    let empHours = 0;
+    let empAbsents = 0;
+    for (const date of markable) {
+      const rec = db.attendance.find((a) => a.employee_id === emp.id && a.date === date && !a.is_hidden);
+      cells[date] = recordToCellText(rec);
+      if (rec?.status === 'present' && rec.hours != null) empHours += rec.hours;
+      if (rec?.status === 'absent') empAbsents += 1;
+    }
+    empHours = Math.round(empHours * 100) / 100;
+    totalHours += empHours;
+    totalAbsents += empAbsents;
+    employees.push({
+      id: emp.id,
+      name: emp.full_name,
+      code: emp.employee_code,
+      trade: emp.trade_id ? db.trades.find((t) => t.id === emp.trade_id)?.name ?? null : emp.position ?? null,
+      cells,
+      markable,
+      total_hours: empHours,
+      absents: empAbsents,
+    });
+  }
+
+  return {
+    saved_at: nowISO(),
+    site_name: link.site_name,
+    month_key: link.month_key,
+    year,
+    month,
+    days,
+    employees,
+    totals: { hours: Math.round(totalHours * 100) / 100, absents: totalAbsents },
+  };
+}
 
 const attachCancelVM = (r: (typeof db.cancellationRequests)[number]): CancellationRequestVM => {
   const e = db.employees.find((x) => x.id === r.employee_id);
@@ -784,7 +974,7 @@ export const demoApi = {
    *  as absent), a numeric hours string ('8', '10.5'), ANY OTHER FREE TEXT
    *  (stored as a marker, shown in the cell, never absent — present day with
    *  no tracked hours) or '' / null to clear the cell. Mirrors the Postgres
-   *  RPC exactly. */
+   *  RPC exactly (permission checks here, shared engine in markCore). */
   async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
@@ -811,90 +1001,8 @@ export const demoApi = {
       }
     }
 
-    const trimmed = (value ?? '').trim();
-    const prev = db.attendance.find((a) => a.employee_id === employeeId && a.date === date);
-
-    // cleared cell → remove the record
-    if (trimmed === '') {
-      if (prev) {
-        db.attendance = db.attendance.filter((a) => a.id !== prev.id);
-        saveAndEmit(['attendance']);
-      }
-      return;
-    }
-
-    let status: Attendance['status'];
-    let hours: number | null = null;
-    let note: string | null = null;
-    if (trimmed.toLowerCase() === 'a') {
-      // ONLY "A" marks a day absent — any other free text never does
-      status = 'absent';
-    } else {
-      const n = Number(trimmed);
-      if (trimmed !== '' && !Number.isNaN(n) && Number.isFinite(n)) {
-        if (n < 0 || n > 24) throw new Error('Hours must be between 0 and 24');
-        status = 'present';
-        hours = Math.round(n * 100) / 100;
-      } else {
-        // free-text marker ("OT", "H", "travel", …) — present, no hours,
-        // text kept on the record and displayed in the cell
-        if (trimmed.length > 40) throw new Error('Free-text markers are limited to 40 characters — only A counts as absent');
-        status = 'present';
-        note = trimmed;
-      }
-    }
-
-    const otDelta = prev
-      ? Math.max(0, (hours ?? 0) - 8) - Math.max(0, (prev.hours ?? 0) - 8)
-      : Math.max(0, (hours ?? 0) - 8);
-
-    if (prev) {
-      prev.status = status;
-      prev.hours = hours;
-      prev.note = note;
-    } else {
-      db.attendance.push({
-        id: uid(), employee_id: employeeId, date, status, hours, note,
-        is_hidden: false, created_at: nowISO(),
-      });
-    }
-
-    // rating: ±0.2 stars per overtime-hour delta (hours above 8/day)
-    if (otDelta !== 0) {
-      e.rating = clampRating(e.rating + 0.2 * otDelta);
-    }
-
-    // auto-warning on 3+ consecutive absences (skipping Fridays)
-    if (status === 'absent') {
-      const absentDates: string[] = [date];
-      let walk = addDaysStr(date, -1);
-      const floorDate = addDaysStr(date, -7);
-      while (walk >= floorDate) {
-        if (isFridayStr(walk)) { walk = addDaysStr(walk, -1); continue; }
-        const rec = db.attendance.find((a) => a.employee_id === employeeId && a.date === walk && !a.is_hidden);
-        if (rec && rec.status === 'absent') {
-          absentDates.unshift(walk);
-          walk = addDaysStr(walk, -1);
-        } else break;
-      }
-      if (absentDates.length >= 3) {
-        db.warnings.push({
-          id: uid(), employee_id: employeeId,
-          reason: `Auto-generated: ${absentDates.length} consecutive absences detected (${absentDates.join(', ')})`,
-          is_auto_generated: true, absent_dates: absentDates,
-          created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
-        });
-        e.rating = clampRating(e.rating - 0.5);
-        notifySuperAdmins(
-          'Auto-Generated Warning',
-          `${e.full_name} (${e.employee_code}) was absent 3+ consecutive days`,
-          'warning',
-        );
-        saveAndEmit(['warning', 'notification', 'employee', 'attendance']);
-        return;
-      }
-    }
-    saveAndEmit(['attendance', 'employee']);
+    markCore(employeeId, date, value, me?.id ?? null);
+    saveAndEmit(['attendance', 'employee', 'warning', 'notification']);
   },
 
   /** Bulk day entry — reuses the single-cell engine (date-effective site
@@ -904,6 +1012,175 @@ export const demoApi = {
     for (const entry of entries) {
       await this.markAttendance(entry.employee_id, entry.date, entry.value);
     }
+  },
+
+  // ---- shareable digital attendance sheets (per-site WhatsApp links) ------
+  // Mirrors the 20261108 RPCs: admins generate one-time links for their
+  // sites, the site supervisor opens the digital sheet without a login,
+  // submits it once, and any responsible admin can re-grant edit access.
+  async listAttendanceShareLinks(): Promise<AttendanceShareLink[]> {
+    const me = currentProfile();
+    if (!me) throw new Error('Not signed in');
+    if (me.role !== 'super_admin') {
+      const mine = new Set(
+        db.siteAssignments.filter((x) => x.profile_id === me.id).map((x) => x.site_id),
+      );
+      return db.shareLinks
+        .filter((l) => l.site_id !== null && mine.has(l.site_id))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .map(toShareLinkVM);
+    }
+    return [...db.shareLinks]
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map(toShareLinkVM);
+  },
+
+  async createAttendanceShareLink(siteId: string, monthKey: string): Promise<AttendanceShareLink> {
+    const me = currentProfile();
+    if (!me) throw new Error('Not signed in');
+    const site = db.sites.find((s) => s.id === siteId);
+    if (!site || !site.is_active) throw new Error('Site not found');
+    if (me.role !== 'super_admin' &&
+        !db.siteAssignments.some((x) => x.profile_id === me.id && x.site_id === siteId)) {
+      throw new Error('Access denied — you can only share links for your assigned sites');
+    }
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthKey)) {
+      throw new Error('Invalid month — expected YYYY-MM');
+    }
+    const link: DemoAttendanceShareLink = {
+      id: uid(),
+      token: (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
+        .replace(/-/g, '').slice(0, 20),
+      site_id: site.id,
+      site_name: site.name,
+      month_key: monthKey,
+      created_by: me.id,
+      created_at: nowISO(),
+      status: 'active',
+      submitted_at: null,
+      submitted_by: null,
+      submit_count: 0,
+      edit_granted_at: null,
+      edit_granted_by: null,
+      sheet_data: null,
+    };
+    db.shareLinks.push(link);
+    saveAndEmit(['attendance_share_link']);
+    return toShareLinkVM(link);
+  },
+
+  async grantAttendanceShareEdit(token: string): Promise<void> {
+    const me = currentProfile();
+    if (!me) throw new Error('Not signed in');
+    const link = db.shareLinks.find((l) => l.token === token);
+    if (!link) throw new Error('Link not found');
+    if (me.role !== 'super_admin' &&
+        !db.siteAssignments.some((x) => x.profile_id === me.id && x.site_id === link.site_id)) {
+      throw new Error('Access denied — you can only manage links for your assigned sites');
+    }
+    link.status = 'active';
+    link.edit_granted_at = nowISO();
+    link.edit_granted_by = me.id;
+    saveAndEmit(['attendance_share_link']);
+  },
+
+  /** PUBLIC — the digital sheet behind a link (no login: the token is the
+   *  capability). Active link → live crew + current marks; submitted → the
+   *  frozen snapshot with its save date/time. */
+  async getSharedAttendanceSheet(token: string): Promise<SharedSheetPayload> {
+    const link = db.shareLinks.find((l) => l.token === token);
+    if (!link) return { exists: false, token, site_name: '', month_key: '', status: 'active', submitted_at: null, submitted_by: null, edit_granted_at: null, created_at: '', today: toYMD(new Date()), employees: [], snapshot: null };
+
+    if (link.status === 'submitted' && link.sheet_data) {
+      return {
+        exists: true,
+        token: link.token,
+        site_id: link.site_id,
+        site_name: link.site_name,
+        month_key: link.month_key,
+        status: link.status,
+        submitted_at: link.submitted_at,
+        submitted_by: link.submitted_by,
+        submit_count: link.submit_count,
+        edit_granted_at: link.edit_granted_at,
+        created_at: link.created_at,
+        today: toYMD(new Date()),
+        employees: [],
+        snapshot: link.sheet_data,
+      };
+    }
+
+    const snap = buildSharedSnapshot(link);
+    return {
+      exists: true,
+      token: link.token,
+      site_id: link.site_id,
+      site_name: link.site_name,
+      month_key: link.month_key,
+      year: snap.year,
+      month: snap.month,
+      days: snap.days,
+      status: link.status,
+      submitted_at: link.submitted_at,
+      submitted_by: link.submitted_by,
+      submit_count: link.submit_count,
+      edit_granted_at: link.edit_granted_at,
+      created_at: link.created_at,
+      today: toYMD(new Date()),
+      employees: snap.employees,
+      snapshot: null,
+    };
+  },
+
+  /** PUBLIC — one-time submit: applies every changed cell through the shared
+   *  marking engine, freezes the snapshot + save timestamp, locks the link. */
+  async submitSharedAttendanceSheet(
+    token: string,
+    entries: SharedSheetSubmitEntry[],
+    submittedBy?: string | null,
+  ): Promise<SharedSheetSubmitResult> {
+    const link = db.shareLinks.find((l) => l.token === token);
+    if (!link) throw new Error('Link not found');
+    if (link.status !== 'active') {
+      throw new Error('This sheet was already submitted and is locked — ask an admin to grant edit access to the link');
+    }
+
+    const [y, m] = link.month_key.split('-').map(Number);
+    const first = `${link.month_key}-01`;
+    const last = `${link.month_key}-${String(daysInMonth(y, m)).padStart(2, '0')}`;
+    const today = toYMD(new Date());
+
+    let applied = 0;
+    let skipped = 0;
+    for (const entry of entries) {
+      const emp = db.employees.find((x) => x.id === entry.employee_id);
+      if (!emp || emp.status === 'deleted') { skipped += 1; continue; }
+      const date = entry.date;
+      if (date < first || date > last || date > today) { skipped += 1; continue; }
+      // date-effective: only days this employee belonged to the link's site
+      const siteOnDate = getEmployeeSiteForDate(emp.id, date, {
+        transfers: db.siteTransfers,
+        records: db.attendance,
+        currentSiteId: emp.current_site_id,
+      });
+      if ((siteOnDate ?? null) !== (link.site_id ?? null)) { skipped += 1; continue; }
+      try {
+        markCore(emp.id, date, entry.value ?? '', link.created_by);
+        applied += 1;
+      } catch (err) {
+        throw new Error(`${emp.full_name} — ${err instanceof Error ? err.message : 'Invalid value'}`);
+      }
+    }
+
+    const snap = buildSharedSnapshot(link);
+    link.status = 'submitted';
+    link.submitted_at = nowISO();
+    link.submitted_by = submittedBy?.trim() || null;
+    link.submit_count += 1;
+    link.sheet_data = snap;
+    saveAndEmit(['attendance', 'attendance_share_link', 'employee', 'warning', 'notification']);
+
+    return { ok: true, applied, skipped, saved_at: link.submitted_at };
   },
 
   async getMonthlyAttendanceSummary(months = 6): Promise<MonthlySummaryRow[]> {

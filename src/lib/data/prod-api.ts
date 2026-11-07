@@ -36,6 +36,10 @@ import {
   type SalarySheetReport,
   type SalarySheetRowUpdate,
   type SalaryRole,
+  type SharedSheetPayload,
+  type SharedSheetSubmitEntry,
+  type SharedSheetSubmitResult,
+  type AttendanceShareLink,
   type Site,
   type SiteTransfer,
   type SiteWithCount,
@@ -108,6 +112,7 @@ function ensureRealtimeChannel(): void {
     'employee_salary_assignment',
     'payroll_period',
     'payroll_employee',
+    'attendance_share_link',
   ];
 
   // Clean up any stale channel on the same topic before subscribing
@@ -626,6 +631,49 @@ export const prodApi = {
       })),
     });
     assertOk(error);
+  },
+
+  // ---- shareable digital attendance sheets (per-site WhatsApp links) ------
+  async listAttendanceShareLinks(): Promise<AttendanceShareLink[]> {
+    const { data, error } = await sb().rpc('list_attendance_share_links');
+    assertOk(error);
+    return (data ?? []) as unknown as AttendanceShareLink[];
+  },
+
+  async createAttendanceShareLink(siteId: string, monthKey: string): Promise<AttendanceShareLink> {
+    const { data, error } = await sb().rpc('create_attendance_share_link', {
+      p_site_id: siteId,
+      p_month: monthKey,
+    });
+    assertOk(error);
+    return data as unknown as AttendanceShareLink;
+  },
+
+  async grantAttendanceShareEdit(token: string): Promise<void> {
+    const { error } = await sb().rpc('grant_attendance_share_edit', { p_token: token });
+    assertOk(error);
+  },
+
+  /** PUBLIC — called from /share/[token] without a session (anon-key RPC). */
+  async getSharedAttendanceSheet(token: string): Promise<SharedSheetPayload> {
+    const { data, error } = await sb().rpc('get_shared_attendance_sheet', { p_token: token });
+    assertOk(error);
+    return data as unknown as SharedSheetPayload;
+  },
+
+  /** PUBLIC — one-time submit of a shared sheet (token-gated RPC). */
+  async submitSharedAttendanceSheet(
+    token: string,
+    entries: SharedSheetSubmitEntry[],
+    submittedBy?: string | null,
+  ): Promise<SharedSheetSubmitResult> {
+    const { data, error } = await sb().rpc('submit_shared_attendance_sheet', {
+      p_token: token,
+      p_entries: entries,
+      p_submitted_by: submittedBy ?? null,
+    });
+    assertOk(error);
+    return data as unknown as SharedSheetSubmitResult;
   },
 
   async getMonthlyAttendanceSummary(months = 6): Promise<MonthlySummaryRow[]> {

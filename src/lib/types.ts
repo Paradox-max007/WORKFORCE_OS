@@ -706,7 +706,8 @@ export type RealtimeTable =
   | 'trade_rate_history'
   | 'employee_salary_assignment'
   | 'payroll_period'
-  | 'payroll_employee';
+  | 'payroll_employee'
+  | 'attendance_share_link';
 
 export interface MonthlySummaryRow {
   month: string; // YYYY-MM
@@ -720,6 +721,94 @@ export interface BulkAttendanceEntry {
   date: string; // YYYY-MM-DD
   /** 'A' (absent) | numeric hours text ('10', '8.5') | '' / null (clear) */
   value: string | null;
+}
+
+// ============================================================================
+// Shareable digital attendance sheets (per-site links sent over WhatsApp)
+// ============================================================================
+
+/** A one-time share link row as shown in the attendance page's right sidebar */
+export interface AttendanceShareLink {
+  id: string;
+  token: string;
+  site_id: string | null;
+  site_name: string;
+  month_key: string; // YYYY-MM
+  created_by: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+  /** active = editable through the link; submitted = locked (saved sheet) */
+  status: 'active' | 'submitted';
+  submitted_at: string | null;
+  submitted_by: string | null;
+  submit_count: number;
+  edit_granted_at: string | null;
+  edit_granted_by: string | null;
+}
+
+/** One employee row of a shared digital sheet */
+export interface SharedSheetEmployee {
+  id: string;
+  name: string;
+  code: string;
+  trade: string | null;
+  /** 'YYYY-MM-DD' → cell text ('' | hours | 'A' | free-text marker) */
+  cells: Record<string, string>;
+  /** dates the employee belongs to the link's site (date-effective) */
+  markable: string[];
+  /** snapshot rows carry their frozen totals */
+  total_hours?: number;
+  absents?: number;
+}
+
+/** The frozen copy stored when a shared sheet is submitted */
+export interface SharedSheetSnapshot {
+  saved_at: string;
+  site_name: string;
+  month_key: string;
+  year: number;
+  month: number;
+  days: number;
+  employees: SharedSheetEmployee[];
+  totals: { hours: number; absents: number };
+}
+
+/** get_shared_attendance_sheet payload — active link: live crew; submitted: snapshot */
+export interface SharedSheetPayload {
+  exists: boolean;
+  token: string;
+  site_id?: string | null;
+  site_name: string;
+  month_key: string;
+  year?: number;
+  month?: number;
+  days?: number;
+  status: 'active' | 'submitted';
+  submitted_at: string | null;
+  submitted_by: string | null;
+  submit_count?: number;
+  edit_granted_at: string | null;
+  created_at: string;
+  today: string;
+  /** crew + current marks (status = 'active' only) */
+  employees: SharedSheetEmployee[];
+  /** the saved sheet (status = 'submitted' only) */
+  snapshot: SharedSheetSnapshot | null;
+}
+
+/** One changed cell of a shared-sheet submission */
+export interface SharedSheetSubmitEntry {
+  employee_id: string;
+  date: string; // YYYY-MM-DD
+  value: string | null;
+}
+
+/** submit_shared_attendance_sheet result */
+export interface SharedSheetSubmitResult {
+  ok: boolean;
+  applied: number;
+  skipped: number;
+  saved_at: string;
 }
 
 // ============================================================================

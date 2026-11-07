@@ -48,10 +48,10 @@
 //   and clicking a site jumps the sheet straight to it.
 // ============================================================================
 
-import { motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeftRight, Building2, CalendarCheck, CalendarDays, CheckCheck, ChevronLeft, ChevronRight, Loader2, Search, Shield,
-  Tent, UserCheck, UserX, Users, Zap,
+  ArrowLeftRight, Building2, CalendarCheck, CalendarDays, Check, CheckCheck, ChevronLeft, ChevronRight, Copy, ExternalLink, Link2, Loader2, Lock, MessageCircle, Search, Send, Shield,
+  Tent, Unlock, UserCheck, UserX, Users, X, Zap,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -79,7 +79,7 @@ import {
   type SiteTimelineInput,
 } from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
-import type { AdminSiteAssignment, Attendance, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
+import type { AdminSiteAssignment, Attendance, AttendanceShareLink, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -139,6 +139,28 @@ const formatDatePretty = (date: string): string => {
 const isSunday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 0;
 const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
 
+// ---- shareable digital sheets (right sidebar) ------------------------------
+const shareUrlOf = (token: string, siteName: string): string =>
+  typeof window === 'undefined'
+    ? `/share/${token}`
+    : `${window.location.origin}/share/${token}?site=${encodeURIComponent(siteName)}`;
+
+const fmtDateTime = (iso: string | null): string => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+};
+
+const fmtTime = (iso: string): string =>
+  new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+const monthLabel = (monthKey: string): string => {
+  const [y, m] = monthKey.split('-').map(Number);
+  return `${MONTH_NAMES[m - 1]} ${y}`;
+};
+
 /** Parse a cell value → { kind, hours }. kind: 'absent' | 'hours' | 'text' | 'clear' | 'invalid'
  *  ONLY "A" is absent. Numbers 0–24 are hours. ANY other free text is a
  *  day marker — saved, displayed, never absent (present with no hours). */
@@ -172,7 +194,7 @@ interface SiteSection {
 // Page
 // ---------------------------------------------------------------------------
 export function AttendancePage() {
-  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer', 'profiles']);
+  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer', 'profiles', 'attendance_share_link']);
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
 
@@ -214,6 +236,14 @@ export function AttendancePage() {
   // "View by Supervisors" popover state
   const [supOpen, setSupOpen] = useState(false);
   const [expandedSupervisor, setExpandedSupervisor] = useState<string | null>(null);
+
+  // shareable digital sheets — one-time links per site (right sidebar)
+  const [shareLinks, setShareLinks] = useState<AttendanceShareLink[] | null>(null);
+  const [shareLinksOpen, setShareLinksOpen] = useState(false);
+  const [shareBusySite, setShareBusySite] = useState<string | null>(null);
+  const [newLinkToken, setNewLinkToken] = useState<string | null>(null); // freshly generated → highlight
+  const [grantingToken, setGrantingToken] = useState<string | null>(null);
+  const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
   const [year, month] = useMemo(() => {
     const [y, m] = monthKey.split('-').map(Number);
@@ -267,6 +297,79 @@ export function AttendancePage() {
     const t = setTimeout(() => setDebouncedSearch(search), 300);
     return () => clearTimeout(t);
   }, [search]);
+
+  // ---- shareable links (right sidebar) ----------------------------------------
+  // loaded on mount + whenever the realtime version bumps (a sheet submitted
+  // from the field refreshes the list) + each time the sidebar opens
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.listAttendanceShareLinks()
+      .then((links) => { if (!cancelled) setShareLinks(links); })
+      .catch((err) => {
+        // only surface errors when the user is actually looking at the list
+        if (!cancelled && shareLinksOpen) {
+          toast.error(err instanceof Error ? err.message : 'Failed to load links');
+        }
+      });
+    return () => { cancelled = true; };
+  }, [shareLinksOpen, realtimeVersion]);
+
+  const createShareLink = async (section: SiteSection) => {
+    if (section.isIdle || shareBusySite) return;
+    setShareBusySite(section.key);
+    try {
+      const link = await dataApi.createAttendanceShareLink(section.key, monthKey);
+      setShareLinks((prev) => [link, ...(prev ?? []).filter((l) => l.token !== link.token)]);
+      setNewLinkToken(link.token);
+      setShareLinksOpen(true);
+      toast.success(`Link ready — ${section.title} · ${monthLabel(monthKey)}`, {
+        description: 'Send it on WhatsApp — the sheet stays editable until it is submitted, then locks (any admin can re-grant edit access).',
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create link');
+    } finally {
+      setShareBusySite(null);
+    }
+  };
+
+  const grantShareEdit = async (link: AttendanceShareLink) => {
+    setGrantingToken(link.token);
+    try {
+      await dataApi.grantAttendanceShareEdit(link.token);
+      const links = await dataApi.listAttendanceShareLinks();
+      setShareLinks(links);
+      toast.success('Edit access granted', {
+        description: `${link.site_name} — the link is editable again until the next submission.`,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to grant edit access');
+    } finally {
+      setGrantingToken(null);
+    }
+  };
+
+  const copyShareLink = async (link: AttendanceShareLink) => {
+    try {
+      await navigator.clipboard.writeText(shareUrlOf(link.token, link.site_name));
+      setCopiedToken(link.token);
+      setTimeout(() => setCopiedToken((t) => (t === link.token ? null : t)), 1600);
+      toast.success('Link copied');
+    } catch {
+      toast.error('Could not copy — copy it from the address-style text instead');
+    }
+  };
+
+  const sendShareLinkOnWhatsApp = (link: AttendanceShareLink) => {
+    const url = shareUrlOf(link.token, link.site_name);
+    const text = [
+      'PULSE — Attendance Sheet',
+      `${link.site_name} · ${monthLabel(link.month_key)}`,
+      '',
+      'Please mark attendance for every day (hours e.g. 8 or 10.5, A for absent, or any short text marker) and submit:',
+      url,
+    ].join('\n');
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+  };
 
   // ---- date-effective site timelines for the viewed month ---------------------
   // ONE shared engine (src/lib/site-timeline.ts — mirrored by the
@@ -740,6 +843,34 @@ export function AttendancePage() {
   const loading = !employees || !records || !sites || !transfers || (!isSuperAdmin && assignedSiteIds === null);
   const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
 
+  // share links grouped DATE-WISE (newest date first, newest link first
+  // inside each group) — the structure of the right sidebar
+  const linkGroups = useMemo(() => {
+    const todayStr = todayYMD();
+    const yestStr = yesterdayYMD();
+    const groups: { key: string; label: string; links: AttendanceShareLink[] }[] = [];
+    const byKey = new Map<string, { key: string; label: string; links: AttendanceShareLink[] }>();
+    const sorted = [...(shareLinks ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    for (const l of sorted) {
+      const day = l.created_at.slice(0, 10);
+      let g = byKey.get(day);
+      if (!g) {
+        const label = day === todayStr
+          ? 'Today'
+          : day === yestStr
+            ? 'Yesterday'
+            : new Date(`${day}T00:00:00`).toLocaleDateString(undefined, {
+                weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+              });
+        g = { key: day, label, links: [] };
+        byKey.set(day, g);
+        groups.push(g);
+      }
+      g.links.push(l);
+    }
+    return groups;
+  }, [shareLinks]);
+
   const dayColumns = useMemo(() => {
     // always show the FULL month (1 … last day): un-entered days stay blank,
     // future days are rendered but locked against editing.
@@ -871,6 +1002,19 @@ export function AttendancePage() {
                 {movedCount} moved
               </span>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 px-2.5 text-[11px]"
+              disabled={shareBusySite === section.key}
+              onClick={() => createShareLink(section)}
+              title={`Generate a shareable digital attendance sheet for ${section.title} — ${MONTH_NAMES[month - 1]} ${year}. Send it on WhatsApp; it locks after the supervisor submits it.`}
+            >
+              {shareBusySite === section.key
+                ? <Loader2 size={12} className="animate-spin" />
+                : <Send size={12} />}
+              Send Link
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -1085,6 +1229,7 @@ export function AttendancePage() {
           <p className="mt-1 text-sm text-muted-foreground">
             Sitewise Excel-style marking — type custom hours per day, <span className="font-semibold text-rose-500">A</span> for absent, or any free-text marker (only <span className="font-semibold text-rose-500">A</span> counts as absent).
             Bulk-fill a whole day in one go via <span className="font-semibold text-foreground">Bulk Day</span> (defaults to 10h).
+            <span className="font-semibold text-foreground"> Send Link</span> shares a digital copy of a site's sheet on WhatsApp — the supervisor marks it without a login and the link locks once submitted.
             Employees moved mid-month appear under both sites — bottom of the crew, faded, moved days merged — so they stay markable at each site
             (a day already marked before the move keeps its original site).
           </p>
@@ -1308,6 +1453,21 @@ export function AttendancePage() {
                 </div>
               </PopoverContent>
             </Popover>
+            <Button
+              variant="outline"
+              className="h-10 gap-1.5"
+              disabled={loading}
+              onClick={() => setShareLinksOpen(true)}
+              title="Every shareable attendance sheet link, stored date-wise — send on WhatsApp, copy, or re-grant edit access after a submission"
+            >
+              <Link2 size={15} />
+              Links
+              {(shareLinks ?? []).length > 0 && (
+                <span className="rounded-full bg-brand/15 px-1.5 text-[10px] font-bold tabular-nums text-brand">
+                  {shareLinks!.length}
+                </span>
+              )}
+            </Button>
             <Button
               className="h-10 gap-1.5"
               disabled={loading}
@@ -1743,6 +1903,201 @@ export function AttendancePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ============================ SHARE LINKS SIDEBAR (date-wise) ============================ */}
+      <AnimatePresence>
+        {shareLinksOpen && (
+          <>
+            <motion.div
+              key="share-overlay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="fixed inset-0 z-40 bg-black/45 backdrop-blur-[2px]"
+              onClick={() => setShareLinksOpen(false)}
+              aria-hidden
+            />
+            <motion.aside
+              key="share-sidebar"
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'tween', duration: 0.32, ease: EASE }}
+              className="fixed inset-y-0 right-0 z-50 flex w-[min(94vw,390px)] flex-col border-l bg-card shadow-2xl"
+              role="dialog"
+              aria-label="Shared attendance sheet links"
+            >
+              {/* header */}
+              <div className="flex items-center gap-2.5 border-b px-4 py-3.5">
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand">
+                  <Send size={16} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-sm font-semibold leading-tight">Shared Sheet Links</h3>
+                  <p className="text-[11px] leading-tight text-muted-foreground">
+                    One-time digital sheets, stored date-wise
+                  </p>
+                </div>
+                <Button
+                  variant="ghost" size="icon" className="size-8 shrink-0"
+                  onClick={() => setShareLinksOpen(false)} aria-label="Close links sidebar"
+                >
+                  <X size={16} />
+                </Button>
+              </div>
+
+              {/* body: date groups */}
+              <div className="flex-1 overflow-y-auto p-3">
+                {shareLinks === null ? (
+                  <div className="space-y-2 p-1">
+                    <Skeleton className="h-20 rounded-xl" />
+                    <Skeleton className="h-20 rounded-xl" />
+                    <Skeleton className="h-20 rounded-xl" />
+                  </div>
+                ) : linkGroups.length === 0 ? (
+                  <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
+                    <span className="flex size-11 items-center justify-center rounded-2xl bg-brand/10 text-brand">
+                      <Link2 size={20} />
+                    </span>
+                    <p className="text-sm font-medium">No links yet</p>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      Click <span className="font-semibold text-foreground">Send Link</span> on any site section above —
+                      the link opens a digital copy of that site's sheet, ready to send on WhatsApp.
+                    </p>
+                  </div>
+                ) : (
+                  linkGroups.map((g) => (
+                    <div key={g.key} className="mb-4">
+                      <p className="mb-1.5 flex items-center gap-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {g.label}
+                        <span className="rounded-full bg-muted px-1.5 py-0.5 tabular-nums">
+                          {g.links.length}
+                        </span>
+                      </p>
+                      <div className="space-y-2">
+                        {g.links.map((l) => {
+                          const isNew = l.token === newLinkToken;
+                          const submitted = l.status === 'submitted';
+                          return (
+                            <motion.div
+                              key={l.id}
+                              initial={isNew ? { opacity: 0, y: -8, scale: 0.98 } : false}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              className={cn(
+                                'rounded-xl border bg-card p-3',
+                                isNew && 'border-brand/50 ring-2 ring-brand/25',
+                              )}
+                            >
+                              {/* site + status */}
+                              <div className="flex items-start gap-2">
+                                <span className={cn(
+                                  'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg',
+                                  submitted ? 'bg-emerald-500/10 text-emerald-500' : 'bg-brand/10 text-brand',
+                                )}>
+                                  {submitted ? <Lock size={13} /> : <Building2 size={13} />}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate text-[13px] font-semibold leading-tight">{l.site_name}</p>
+                                  <p className="text-[11px] leading-tight text-muted-foreground">
+                                    {monthLabel(l.month_key)} · {fmtTime(l.created_at)}
+                                    {l.created_by_name ? ` · by ${l.created_by_name}` : ''}
+                                  </p>
+                                </div>
+                                <span
+                                  className={cn(
+                                    'shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold',
+                                    submitted
+                                      ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                                      : 'border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+                                  )}
+                                >
+                                  {submitted ? 'Submitted' : 'Editable'}
+                                </span>
+                              </div>
+
+                              {/* saved stamp (submitted links) */}
+                              {submitted && l.submitted_at && (
+                                <p className="mt-1.5 rounded-md bg-muted/60 px-2 py-1 text-[10.5px] leading-snug text-muted-foreground">
+                                  Saved on <span className="font-semibold text-foreground">{fmtDateTime(l.submitted_at)}</span>
+                                  {l.submit_count > 1 ? ` · submission #${l.submit_count}` : ''}
+                                </p>
+                              )}
+
+                              {/* url (fresh links show it in full) */}
+                              <p
+                                className={cn(
+                                  'mt-1.5 truncate rounded-md border bg-muted/40 px-2 py-1 font-mono text-[10px] text-muted-foreground',
+                                  isNew && 'text-foreground',
+                                )}
+                                title={shareUrlOf(l.token, l.site_name)}
+                              >
+                                {shareUrlOf(l.token, l.site_name)}
+                              </p>
+
+                              {/* actions */}
+                              <div className="mt-2 flex items-center gap-1.5">
+                                <Button
+                                  size="sm"
+                                  className="h-7 flex-1 gap-1 bg-[#25D366] px-2 text-[11px] font-semibold text-white hover:bg-[#1ebe57] hover:text-white"
+                                  onClick={() => sendShareLinkOnWhatsApp(l)}
+                                  title="Send the link + instructions on WhatsApp"
+                                >
+                                  <MessageCircle size={12} />
+                                  WhatsApp
+                                </Button>
+                                <Button
+                                  variant="outline" size="sm"
+                                  className="h-7 gap-1 px-2 text-[11px]"
+                                  onClick={() => copyShareLink(l)}
+                                  title="Copy the link"
+                                >
+                                  {copiedToken === l.token ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                                  {copiedToken === l.token ? 'Copied' : 'Copy'}
+                                </Button>
+                                <Button
+                                  variant="outline" size="sm"
+                                  className="h-7 gap-1 px-2 text-[11px]"
+                                  onClick={() => window.open(shareUrlOf(l.token, l.site_name), '_blank', 'noopener,noreferrer')}
+                                  title={submitted ? 'Open the saved sheet' : 'Open the digital sheet'}
+                                >
+                                  <ExternalLink size={12} />
+                                  Open
+                                </Button>
+                                {submitted && (
+                                  <Button
+                                    variant="outline" size="sm"
+                                    className="h-7 gap-1 px-2 text-[11px] font-semibold text-brand hover:bg-brand/10 hover:text-brand"
+                                    disabled={grantingToken === l.token}
+                                    onClick={() => grantShareEdit(l)}
+                                    title="Let the supervisor edit this sheet again through the same link"
+                                  >
+                                    {grantingToken === l.token
+                                      ? <Loader2 size={12} className="animate-spin" />
+                                      : <Unlock size={12} />}
+                                    Edit Access
+                                  </Button>
+                                )}
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* footer hint */}
+              <div className="border-t bg-muted/40 px-4 py-3 text-[10.5px] leading-relaxed text-muted-foreground">
+                One-time use: a link stays editable until its sheet is submitted — then it shows the
+                saved sheet only. Need changes? Grant <span className="font-semibold text-foreground">Edit Access</span> and
+                the same link opens editable again.
+              </div>
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

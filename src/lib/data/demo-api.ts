@@ -32,9 +32,11 @@ import {
   type SalarySheetRowUpdate,
   type SalaryRole,
   type SharedSheetEmployee,
+  type SharedSheetExtra,
   type SharedSheetPayload,
   type SharedSheetSnapshot,
   type SharedSheetSubmitEntry,
+  type SharedSheetSubmitMeta,
   type SharedSheetSubmitResult,
   type Site,
   type SiteTransfer,
@@ -255,12 +257,14 @@ const toShareLinkVM = (l: DemoAttendanceShareLink): AttendanceShareLink => ({
 /** Build the shared-sheet payload for a link (mirrors the
  *  build_shared_sheet_snapshot SQL function): one row per employee who spent
  *  at least one day of the month at the link's site — date-effective via the
- *  shared site-timeline engine — with cell texts + row totals. */
+ *  shared site-timeline engine — with cell texts + row totals + the paper's
+ *  TL / SUPERVISOR flags and client / project header names. */
 function buildSharedSnapshot(link: DemoAttendanceShareLink): SharedSheetSnapshot & {
   employees: SharedSheetEmployee[];
 } {
   const [year, month] = link.month_key.split('-').map(Number);
   const days = daysInMonth(year, month);
+  const site = db.sites.find((x) => x.id === link.site_id) ?? null;
   const employees: SharedSheetEmployee[] = [];
   let totalHours = 0;
   let totalAbsents = 0;
@@ -281,6 +285,9 @@ function buildSharedSnapshot(link: DemoAttendanceShareLink): SharedSheetSnapshot
     }
     if (markable.length === 0) continue;
 
+    const trade = emp.trade_id
+      ? db.trades.find((t) => t.id === emp.trade_id)?.name ?? null
+      : emp.position ?? null;
     const cells: Record<string, string> = {};
     let empHours = 0;
     let empAbsents = 0;
@@ -297,7 +304,9 @@ function buildSharedSnapshot(link: DemoAttendanceShareLink): SharedSheetSnapshot
       id: emp.id,
       name: emp.full_name,
       code: emp.employee_code,
-      trade: emp.trade_id ? db.trades.find((t) => t.id === emp.trade_id)?.name ?? null : emp.position ?? null,
+      trade,
+      is_team_leader: !!emp.is_team_leader && emp.team_leader_site_id === link.site_id,
+      is_supervisor: (trade ?? '').toLowerCase().includes('supervisor'),
       cells,
       markable,
       total_hours: empHours,
@@ -308,6 +317,8 @@ function buildSharedSnapshot(link: DemoAttendanceShareLink): SharedSheetSnapshot
   return {
     saved_at: nowISO(),
     site_name: link.site_name,
+    client_name: site?.client_name ?? null,
+    project_name: site?.project_name?.trim() || link.site_name,
     month_key: link.month_key,
     year,
     month,
@@ -1084,14 +1095,22 @@ export const demoApi = {
     saveAndEmit(['attendance_share_link']);
   },
 
-  /** PUBLIC — the digital sheet behind a link (no login: the token is the
+  /** PUBLIC — the digital paper behind a link (no login: the token is the
    *  capability). Active link → live crew + current marks; submitted → the
-   *  frozen snapshot with its save date/time. */
+   *  frozen snapshot with its save date/time (legacy snapshots get their
+   *  paper_date back-filled with the save date). */
   async getSharedAttendanceSheet(token: string): Promise<SharedSheetPayload> {
     const link = db.shareLinks.find((l) => l.token === token);
     if (!link) return { exists: false, token, site_name: '', month_key: '', status: 'active', submitted_at: null, submitted_by: null, edit_granted_at: null, created_at: '', today: toYMD(new Date()), employees: [], snapshot: null };
 
     if (link.status === 'submitted' && link.sheet_data) {
+      const snap: SharedSheetSnapshot = link.sheet_data.paper_date
+        ? link.sheet_data
+        : {
+            ...link.sheet_data,
+            // legacy month-grid snapshot → render the paper for the save date
+            paper_date: (link.submitted_at ?? link.created_at).slice(0, 10),
+          };
       return {
         exists: true,
         token: link.token,
@@ -1106,7 +1125,7 @@ export const demoApi = {
         created_at: link.created_at,
         today: toYMD(new Date()),
         employees: [],
-        snapshot: link.sheet_data,
+        snapshot: snap,
       };
     }
 
@@ -1120,6 +1139,8 @@ export const demoApi = {
       year: snap.year,
       month: snap.month,
       days: snap.days,
+      client_name: snap.client_name,
+      project_name: snap.project_name,
       status: link.status,
       submitted_at: link.submitted_at,
       submitted_by: link.submitted_by,
@@ -1132,12 +1153,15 @@ export const demoApi = {
     };
   },
 
-  /** PUBLIC — one-time submit: applies every changed cell through the shared
-   *  marking engine, freezes the snapshot + save timestamp, locks the link. */
+  /** PUBLIC — one-time submit: applies every changed signature mark through
+   *  the shared marking engine into the SAME attendance table the in-app Excel
+   *  reads, then freezes the paper (date shown, extra rows, totals) + save
+   *  timestamp and locks the link. */
   async submitSharedAttendanceSheet(
     token: string,
     entries: SharedSheetSubmitEntry[],
     submittedBy?: string | null,
+    meta?: SharedSheetSubmitMeta,
   ): Promise<SharedSheetSubmitResult> {
     const link = db.shareLinks.find((l) => l.token === token);
     if (!link) throw new Error('Link not found');
@@ -1172,15 +1196,68 @@ export const demoApi = {
       }
     }
 
+    // the date the paper was showing — clamped into the month, never future
+    const paperDate = (() => {
+      const d = meta?.paper_date ?? today;
+      if (d < first) return first;
+      if (d > last || d > today) return last < today ? last : today;
+      return d;
+    })();
+
+    // sanitised EXTRA EMPLOYEES rows (max 10, trimmed, capped like the RPC)
+    const extras: SharedSheetExtra[] = (meta?.extras ?? [])
+      .slice(0, 10)
+      .map((x) => ({
+        name: (x.name ?? '').trim().slice(0, 80),
+        code: (x.code ?? '').trim().slice(0, 40),
+        trade: (x.trade ?? '').trim().slice(0, 60),
+        mark: (x.mark ?? '').trim().slice(0, 40),
+      }));
+
+    // TOTAL PRESENT / TOTAL ABSENT — computed from the FINAL marks of the
+    // paper's date (crew records + extra rows), exactly like the RPC
+    const crewOnPaper = db.employees.filter((e) => {
+      if (e.status === 'deleted') return false;
+      const siteOnDate = getEmployeeSiteForDate(e.id, paperDate, {
+        transfers: db.siteTransfers,
+        records: db.attendance,
+        currentSiteId: e.current_site_id,
+      });
+      return (siteOnDate ?? null) === (link.site_id ?? null);
+    });
+    let totalPresent = crewOnPaper.filter((e) => {
+      const rec = db.attendance.find((a) => a.employee_id === e.id && a.date === paperDate && !a.is_hidden);
+      return rec?.status === 'present';
+    }).length;
+    let totalAbsent = crewOnPaper.filter((e) => {
+      const rec = db.attendance.find((a) => a.employee_id === e.id && a.date === paperDate && !a.is_hidden);
+      return rec?.status === 'absent';
+    }).length;
+    for (const x of extras) {
+      if (x.mark === '') continue;
+      if (x.mark.toUpperCase() === 'A') totalAbsent += 1;
+      else totalPresent += 1;
+    }
+
     const snap = buildSharedSnapshot(link);
+    const sheetData: SharedSheetSnapshot = {
+      ...snap,
+      paper_date: paperDate,
+      extras,
+      total_present: totalPresent,
+      total_absent: totalAbsent,
+    };
     link.status = 'submitted';
     link.submitted_at = nowISO();
     link.submitted_by = submittedBy?.trim() || null;
     link.submit_count += 1;
-    link.sheet_data = snap;
+    link.sheet_data = sheetData;
     saveAndEmit(['attendance', 'attendance_share_link', 'employee', 'warning', 'notification']);
 
-    return { ok: true, applied, skipped, saved_at: link.submitted_at };
+    return {
+      ok: true, applied, skipped, saved_at: link.submitted_at,
+      paper_date: paperDate, total_present: totalPresent, total_absent: totalAbsent,
+    };
   },
 
   async getMonthlyAttendanceSummary(months = 6): Promise<MonthlySummaryRow[]> {

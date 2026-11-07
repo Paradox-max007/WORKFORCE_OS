@@ -38,6 +38,7 @@ import {
   type SalaryRole,
   type SharedSheetPayload,
   type SharedSheetSubmitEntry,
+  type SharedSheetSubmitMeta,
   type SharedSheetSubmitResult,
   type AttendanceShareLink,
   type Site,
@@ -661,16 +662,21 @@ export const prodApi = {
     return data as unknown as SharedSheetPayload;
   },
 
-  /** PUBLIC — one-time submit of a shared sheet (token-gated RPC). */
+  /** PUBLIC — one-time submit of a shared sheet (token-gated RPC). The
+   * paper form's date + EXTRA EMPLOYEES rows are frozen with the snapshot;
+   * signature marks flow into the same attendance table as the Excel. */
   async submitSharedAttendanceSheet(
     token: string,
     entries: SharedSheetSubmitEntry[],
     submittedBy?: string | null,
+    meta?: SharedSheetSubmitMeta,
   ): Promise<SharedSheetSubmitResult> {
     const { data, error } = await sb().rpc('submit_shared_attendance_sheet', {
       p_token: token,
       p_entries: entries,
       p_submitted_by: submittedBy ?? null,
+      p_paper_date: meta?.paper_date ?? null,
+      p_extras: meta?.extras ?? [],
     });
     assertOk(error);
     return data as unknown as SharedSheetSubmitResult;

@@ -752,6 +752,9 @@ export interface SharedSheetEmployee {
   name: string;
   code: string;
   trade: string | null;
+  /** paper row tints + trade suffixes (TL / SUPERVISOR), as on the A4 form */
+  is_team_leader?: boolean;
+  is_supervisor?: boolean;
   /** 'YYYY-MM-DD' → cell text ('' | hours | 'A' | free-text marker) */
   cells: Record<string, string>;
   /** dates the employee belongs to the link's site (date-effective) */
@@ -761,16 +764,36 @@ export interface SharedSheetEmployee {
   absents?: number;
 }
 
+/** An EXTRA EMPLOYEES row of the shared paper (walk-ins: kept with the saved
+ * form only — they have no employee record, so they never reach the
+ * attendance table) */
+export interface SharedSheetExtra {
+  name: string;
+  code: string;
+  trade: string;
+  /** signature-column mark: hours | 'A' | short free text | '' */
+  mark: string;
+}
+
 /** The frozen copy stored when a shared sheet is submitted */
 export interface SharedSheetSnapshot {
   saved_at: string;
   site_name: string;
+  client_name?: string | null;
+  project_name?: string | null;
   month_key: string;
   year: number;
   month: number;
   days: number;
   employees: SharedSheetEmployee[];
   totals: { hours: number; absents: number };
+  /** the date the submitted paper was showing (YYYY-MM-DD) */
+  paper_date?: string;
+  /** the paper's EXTRA EMPLOYEES rows at save time */
+  extras?: SharedSheetExtra[];
+  /** the paper's TOTAL PRESENT / TOTAL ABSENT boxes (server-computed) */
+  total_present?: number;
+  total_absent?: number;
 }
 
 /** get_shared_attendance_sheet payload — active link: live crew; submitted: snapshot */
@@ -783,6 +806,9 @@ export interface SharedSheetPayload {
   year?: number;
   month?: number;
   days?: number;
+  /** paper header fields (active links; submitted → snapshot carries them) */
+  client_name?: string | null;
+  project_name?: string | null;
   status: 'active' | 'submitted';
   submitted_at: string | null;
   submitted_by: string | null;
@@ -803,12 +829,23 @@ export interface SharedSheetSubmitEntry {
   value: string | null;
 }
 
+/** The paper-form metadata frozen with a submission (20261108b): the date
+ * the paper was showing and its EXTRA EMPLOYEES rows. Totals are computed
+ * server-side from the final marks. */
+export interface SharedSheetSubmitMeta {
+  paper_date: string; // YYYY-MM-DD
+  extras: SharedSheetExtra[];
+}
+
 /** submit_shared_attendance_sheet result */
 export interface SharedSheetSubmitResult {
   ok: boolean;
   applied: number;
   skipped: number;
   saved_at: string;
+  paper_date?: string;
+  total_present?: number;
+  total_absent?: number;
 }
 
 // ============================================================================

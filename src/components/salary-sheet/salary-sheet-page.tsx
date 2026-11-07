@@ -29,7 +29,7 @@ import {
   FileSpreadsheet, History, Loader2, Lock, LockOpen, PencilLine, RotateCcw, Search,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { EmptyState, SectionTitle } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
@@ -542,8 +542,18 @@ export function SalarySheetPage() {
   // ---- audit trail — collapsed behind a pill button (same as Payroll) -------
   const [auditOpen, setAuditOpen] = useState(false);
 
+  // SILENT REFRESH — skeleton only on the FIRST load of a period (same
+  // pattern as the Payroll page): later reloads (row edited, trade picked,
+  // realtime bump) keep the sheet mounted and update in place, so the scroll
+  // position and the row being edited stay put.
+  const loadedPeriod = useRef<string | null>(null);
+
   const load = (): void => {
-    setLoading(true);
+    const key = `${year}:${month}`;
+    if (loadedPeriod.current !== key) {
+      loadedPeriod.current = key;
+      setLoading(true);
+    }
     dataApi.getSalarySheet(year, month)
       .then(setReport)
       .catch((err) => {

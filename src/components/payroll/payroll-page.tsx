@@ -44,7 +44,7 @@ import {
   History, Loader2, Lock, LockOpen, PencilLine, Scale, Search, StickyNote,
   Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { EmptyState, SectionTitle } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
@@ -793,8 +793,22 @@ export function PayrollPage() {
     return () => { cancelled = true; };
   }, [cardVersion]);
 
+  // SILENT REFRESH — the skeleton shows only for the FIRST load of a
+  // period. Every later reload (trade picked, settlement saved, mark paid,
+  // finalize/reopen, realtime bump) keeps the table mounted and updates the
+  // rows IN PLACE, exactly like the Employees page: the scroll position,
+  // the row being edited and the open dropdown all stay put, so employees
+  // can be edited in ANY order — not just top-to-bottom. (Unmounting the
+  // table on every save made rows vanish + replay the flicker cascade,
+  // which ate clicks on rows further down the list.)
+  const loadedPeriod = useRef<string | null>(null);
+
   const load = (): void => {
-    setLoading(true);
+    const key = `${year}:${month}`;
+    if (loadedPeriod.current !== key) {
+      loadedPeriod.current = key;
+      setLoading(true);
+    }
     dataApi.getSalarySheet(year, month)
       .then(setReport)
       .catch((err) => {

@@ -322,9 +322,20 @@ export function AttendancePage() {
       setShareLinks((prev) => [link, ...(prev ?? []).filter((l) => l.token !== link.token)]);
       setNewLinkToken(link.token);
       setShareLinksOpen(true);
-      toast.success(`Link ready — ${section.title} · ${monthLabel(monthKey)}`, {
-        description: 'Send it on WhatsApp — it opens the site\u2019s DAILY ATTENDANCE paper, where the supervisor signs each employee Present / Absent at the signature column. It locks once submitted (any admin can re-grant edit access).',
-      });
+      if (link.reused) {
+        // ONE LINK PER SITE + DAY: today's link already exists — just open
+        // the sidebar with it instead of creating a duplicate
+        toast.info(`Today's link already exists — ${section.title}`, {
+          description:
+            link.status === 'submitted'
+              ? 'One link per site per day: this is the link generated earlier today (already submitted). Resend it on WhatsApp, or grant edit access to let the supervisor update it again.'
+              : 'One link per site per day: this is the link generated earlier today — resend it on WhatsApp from the panel below.',
+        });
+      } else {
+        toast.success(`Link ready — ${section.title} · ${monthLabel(monthKey)}`, {
+          description: 'Send it on WhatsApp — it opens the site\u2019s DAILY ATTENDANCE paper, where the supervisor signs each employee Present / Absent at the signature column. It locks once submitted (any admin can re-grant edit access).',
+        });
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to create link');
     } finally {
@@ -1008,7 +1019,7 @@ export function AttendancePage() {
               className="h-7 gap-1 px-2.5 text-[11px]"
               disabled={shareBusySite === section.key}
               onClick={() => createShareLink(section)}
-              title={`Generate a shareable DAILY ATTENDANCE paper for ${section.title} — ${MONTH_NAMES[month - 1]} ${year}. Send it on WhatsApp — the supervisor signs each employee at the signature column; it locks after submitting.`}
+              title={`Generate a shareable DAILY ATTENDANCE paper for ${section.title} — ${MONTH_NAMES[month - 1]} ${year}. Send it on WhatsApp — the supervisor signs each employee at the signature column; it locks after submitting. One link per site per day: clicking again opens today's existing link.`}
             >
               {shareBusySite === section.key
                 ? <Loader2 size={12} className="animate-spin" />

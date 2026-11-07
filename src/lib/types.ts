@@ -744,6 +744,10 @@ export interface AttendanceShareLink {
   submit_count: number;
   edit_granted_at: string | null;
   edit_granted_by: string | null;
+  /** create only: true when today's link for this site + month already
+   *  existed and was handed back instead of creating a new one (ONE link
+   *  per site per day — clicking Send Link again just opens the sidebar) */
+  reused?: boolean;
 }
 
 /** One employee row of a shared digital sheet */

@@ -124,6 +124,12 @@ for name, files in [
 
 ok, out, err = psql([os.path.join(MIG, '20261108_attendance_share_links.sql')], [])
 step('ID re-run 20261108 (idempotency)', ok, err[-2000:])
+# re-running 20261108 re-creates the old 3-arg submit overload that 20261108b
+# dropped — re-apply the rest of the chain (real migration order) so the final
+# state converges back to the single 5-arg overload a deployed database has
+for _mig in ('20261108b_attendance_paper_share.sql', '20261108c_share_link_one_per_day.sql'):
+    ok, out, err = psql([os.path.join(MIG, _mig)], [])
+    step(f'ID chain re-run {_mig}', ok, err[-2000:])
 
 ok, out, err = as_uid(SUPER, f"""
 insert into public.site (id, name, client_name, project_name) values
@@ -243,9 +249,19 @@ ok, out, err = as_uid(SUPER, f"select public.create_attendance_share_link('{SITE
 step('T11 invalid month rejected', ok, err[-600:])
 
 # T12 skipped entries (future + other site + bad employee) ---------------------
-ok, out, err = as_uid(SUPER, f"select public.create_attendance_share_link('{SITE}', '2026-11');")
+# ONE LINK PER SITE + DAY (20261108c): SITE's link was already created today
+# (T3a) and is submitted now — age it by a day to model the next day, so this
+# create inserts a fresh active link for SITE again
+ok, out, err = as_uid(SUPER, f"""
+update public.attendance_share_link
+   set created_at = created_at - interval '1 day'
+ where site_id = '{SITE}';
+select public.create_attendance_share_link('{SITE}', '2026-11');
+""")
+step('T12a day rollover → fresh SITE link', ok, err[-800:])
 token3 = q(SUPER, f"""select token from public.attendance_share_link
  where site_id = '{SITE}' and status = 'active' order by created_at desc limit 1""")
+step('T12b fresh active link captured', len(token3) == 20, token3)
 res = q('', f"""select public.submit_shared_attendance_sheet('{token3}',
  '[{{"employee_id":"{E1}","date":"2099-01-01","value":"8"}},
    {{"employee_id":"{E3}","date":"2026-11-06","value":"8"}},

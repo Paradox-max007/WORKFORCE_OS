@@ -71,3 +71,4 @@ scripts/pgdata_att_free_text/
 # share-links migration test harness — local artifacts (regenerated per run)
 scripts/pgdata_share_links/
 scripts/pgdata_paper_share/
+scripts/pgdata_share_dedup/

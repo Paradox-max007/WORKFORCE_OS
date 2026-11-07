@@ -1058,6 +1058,18 @@ export const demoApi = {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthKey)) {
       throw new Error('Invalid month — expected YYYY-MM');
     }
+    // ONE LINK PER SITE + DAY: if a link for this site + month was already
+    // generated TODAY, hand it back (reused) instead of creating another —
+    // clicking Send Link again just opens the sidebar with today's link.
+    // (Same calendar-day key the sidebar groups by: created_at's date part.)
+    const todayPrefix = nowISO().slice(0, 10);
+    const existing = [...db.shareLinks]
+      .filter((l) => l.site_id === site.id && l.month_key === monthKey)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .find((l) => l.created_at.slice(0, 10) === todayPrefix);
+    if (existing) {
+      return { ...toShareLinkVM(existing), reused: true };
+    }
     const link: DemoAttendanceShareLink = {
       id: uid(),
       token: (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
@@ -1077,7 +1089,7 @@ export const demoApi = {
     };
     db.shareLinks.push(link);
     saveAndEmit(['attendance_share_link']);
-    return toShareLinkVM(link);
+    return { ...toShareLinkVM(link), reused: false };
   },
 
   async grantAttendanceShareEdit(token: string): Promise<void> {

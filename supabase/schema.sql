@@ -6498,7 +6498,9 @@ begin
 end; $$;
 
 -- 3. admin-side lifecycle ------------------------------------------------------
--- create a fresh link for a site + month (the "Send Link" button)
+-- create a link for a site + month (the "Send Link" button) — ONE per
+-- site + month per day: today's existing link is handed back (reused = true)
+-- so clicking Send Link again just opens the links sidebar, never a duplicate
 create or replace function public.create_attendance_share_link(
   p_site_id uuid, p_month text
 )
@@ -6508,6 +6510,7 @@ as $$
 declare
   v_site public.site%rowtype;
   v_link public.attendance_share_link%rowtype;
+  v_reused boolean := false;
 begin
   if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
     raise exception 'Access denied';
@@ -6531,13 +6534,28 @@ begin
     raise exception 'Invalid month — expected YYYY-MM';
   end if;
 
-  insert into public.attendance_share_link
-    (token, site_id, site_name, month_key, created_by)
-  values (
-    substr(md5(gen_random_uuid()::text || clock_timestamp()::text || random()::text), 1, 20),
-    v_site.id, v_site.name, p_month, auth.uid()
-  )
-  returning * into v_link;
+  -- ONE LINK PER SITE + DAY: today's link for this site + month already
+  -- exists → hand it back instead of creating another (newest wins when
+  -- legacy same-day duplicates are present)
+  select * into v_link
+  from public.attendance_share_link
+  where site_id = p_site_id
+    and month_key = p_month
+    and created_at::date = current_date
+  order by created_at desc
+  limit 1;
+
+  if v_link.id is not null then
+    v_reused := true;
+  else
+    insert into public.attendance_share_link
+      (token, site_id, site_name, month_key, created_by)
+    values (
+      substr(md5(gen_random_uuid()::text || clock_timestamp()::text || random()::text), 1, 20),
+      v_site.id, v_site.name, p_month, auth.uid()
+    )
+    returning * into v_link;
+  end if;
 
   return jsonb_build_object(
     'id', v_link.id, 'token', v_link.token,
@@ -6548,7 +6566,8 @@ begin
     'created_at', v_link.created_at,
     'status', v_link.status, 'submitted_at', v_link.submitted_at,
     'submitted_by', v_link.submitted_by, 'submit_count', v_link.submit_count,
-    'edit_granted_at', v_link.edit_granted_at, 'edit_granted_by', v_link.edit_granted_by);
+    'edit_granted_at', v_link.edit_granted_at, 'edit_granted_by', v_link.edit_granted_by,
+    'reused', v_reused);
 end; $$;
 
 -- every link the caller may see, newest first (the right sidebar)

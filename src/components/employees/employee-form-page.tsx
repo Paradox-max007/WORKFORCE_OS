@@ -591,7 +591,7 @@ export function EmployeeFormPage() {
       ) : (
         <div className="grid items-start gap-5 lg:grid-cols-2">
           {/* ---------------- Identity ---------------- */}
-          <FormSection icon={<UserRound size={16} />} title="Identity" hint="Name, Employee ID, nationality & photo">
+          <FormSection icon={<UserRound size={16} />} title="Identity" hint="Name, Employee ID, nationality & photo" className="lg:col-start-1 lg:row-start-1">
             <div className="flex items-center gap-4">
               <span className="flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl border-2 border-dashed border-border bg-muted text-xs font-bold text-brand">
                 {form.photo ? <img src={form.photo} alt="Preview" className="size-full object-cover" /> : initials(form.full_name || 'New') || <ImagePlus size={20} />}
@@ -648,7 +648,7 @@ export function EmployeeFormPage() {
           </FormSection>
 
           {/* ---------------- Personal ---------------- */}
-          <FormSection icon={<HeartPulse size={16} />} title="Personal & Contact" hint="Birth date, phones and home-country address">
+          <FormSection icon={<HeartPulse size={16} />} title="Personal & Contact" hint="Birth date, phones and home-country address" className="lg:col-start-2 lg:row-start-1">
             <div className="grid gap-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
@@ -692,7 +692,7 @@ export function EmployeeFormPage() {
           </FormSection>
 
           {/* ---------------- Work & Accommodation ---------------- */}
-          <FormSection icon={<Building2 size={16} />} title="Work & Accommodation" hint="Trade, site, camp with block & room">
+          <FormSection icon={<Building2 size={16} />} title="Work & Accommodation" hint="Trade, site, camp with block & room" className="lg:col-start-1 lg:row-start-2">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Trade</Label>
@@ -899,166 +899,172 @@ export function EmployeeFormPage() {
             </div>
           </FormSection>
 
-          {/* ---------------- Historical Working Hours ---------------- */}
-          <FormSection
-            icon={<Clock size={16} />}
-            title="Historical Working Hours"
-            hint="For employees who worked before PULSE started tracking attendance"
-          >
-            <div className="space-y-2">
-              <Label htmlFor="opening-hours">
-                Previous Total Working Hours <span className="text-muted-foreground/60">(opening balance)</span>
-              </Label>
-              <div className="relative">
-                <Input
-                  id="opening-hours"
-                  type="number"
-                  inputMode="decimal"
-                  min={0}
-                  step="any"
-                  value={openingHours}
-                  onChange={(e) => setOpeningHours(e.target.value)}
-                  disabled={isEdit && !isSuperAdmin}
-                  placeholder="Enter previous hours, e.g. 2000"
-                  className="h-11 pr-12"
-                />
-                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
-                  hrs
-                </span>
-              </div>
-              <p className="text-[11px] text-muted-foreground">
-                Optional — leave blank for new employees. Added to attendance-recorded hours for the
-                lifetime total on the Working Hours page; it is never spread across months or sites.
-              </p>
-              <div className="flex items-center gap-2 rounded-lg border border-brand/15 bg-brand/5 px-3 py-2 text-[11px] text-muted-foreground">
-                <Clock size={12} className="shrink-0 text-brand" />
-                <span>
-                  Lifetime hours = opening balance + attendance-recorded hours.
-                  {isEdit && !isSuperAdmin && ' Only super admins can adjust this balance.'}
-                  {isEdit && isSuperAdmin && ' Blank keeps the current balance; type 0 to reset it.'}
-                </span>
-              </div>
-            </div>
-          </FormSection>
-
-          {/* ---------------- Documents ----------------
-              Stacked BELOW the Historical Working Hours card, i.e. it lives in
-              the RIGHT column — the column that runs next to Work &
-              Accommodation on the left. */}
-          <FormSection
-            icon={<IdCard size={16} />}
-            title="Documents"
-            hint="Passport, ID & payment method"
-            className="lg:col-start-2"
-          >
-            <div className="grid gap-4 sm:grid-cols-2">
+          {/* ------------- Historical Working Hours + Documents -------------
+              Both cards share ONE wrapper pinned to the RIGHT column (row 2),
+              so Documents stacks directly under Historical Working Hours with
+              the normal card gap. The tall Work & Accommodation card on the
+              left can no longer stretch this grid row and push Documents down.
+              Below lg everything stays a single column in the same DOM order. */}
+          <div className="grid gap-5 lg:col-start-2 lg:row-start-2">
+            {/* ---------------- Historical Working Hours ---------------- */}
+            <FormSection
+              icon={<Clock size={16} />}
+              title="Historical Working Hours"
+              hint="For employees who worked before PULSE started tracking attendance"
+            >
               <div className="space-y-2">
-                <Label>Passport Number</Label>
-                <Input value={form.passport_number ?? ''} onChange={(e) => setForm((f) => ({ ...f, passport_number: e.target.value }))} placeholder="P1234567" className="h-11" />
-              </div>
-              <div className="space-y-2">
-                <Label>Passport Status</Label>
-                <Select value={form.passport_status ?? 'none'} onValueChange={(v) => setForm((f) => ({ ...f, passport_status: v === 'none' ? null : v as DocumentStatus }))}>
-                  <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">Not set</SelectItem>
-                    {DOC_STATUSES.map((d) => (
-                      <SelectItem key={d.value} value={d.value} className={d.cls}>{d.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>ID Number</Label>
-                <Input value={form.id_number ?? ''} onChange={(e) => setForm((f) => ({ ...f, id_number: e.target.value }))} placeholder="UAE-IQ-20260001" className="h-11" />
-              </div>
-              <div className="space-y-2">
-                <Label>ID Status</Label>
-                <Select value={form.id_status ?? 'none'} onValueChange={(v) => setForm((f) => ({ ...f, id_status: v === 'none' ? null : v as DocumentStatus }))}>
-                  <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">Not set</SelectItem>
-                    {DOC_STATUSES.map((d) => (
-                      <SelectItem key={d.value} value={d.value} className={d.cls}>{d.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {isEdit && editingEmployee && (
-                <div className="space-y-2 sm:col-span-2">
-                  <Label>Performance Rating</Label>
-                  <div className="flex h-11 items-center gap-2 rounded-xl border bg-muted/40 px-3">
-                    <RatingStars rating={editingEmployee.rating} />
-                    <span className="text-xs text-muted-foreground">Auto-calculated from attendance</span>
-                  </div>
+                <Label htmlFor="opening-hours">
+                  Previous Total Working Hours <span className="text-muted-foreground/60">(opening balance)</span>
+                </Label>
+                <div className="relative">
+                  <Input
+                    id="opening-hours"
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step="any"
+                    value={openingHours}
+                    onChange={(e) => setOpeningHours(e.target.value)}
+                    disabled={isEdit && !isSuperAdmin}
+                    placeholder="Enter previous hours, e.g. 2000"
+                    className="h-11 pr-12"
+                  />
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+                    hrs
+                  </span>
                 </div>
-              )}
-            </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Optional — leave blank for new employees. Added to attendance-recorded hours for the
+                  lifetime total on the Working Hours page; it is never spread across months or sites.
+                </p>
+                <div className="flex items-center gap-2 rounded-lg border border-brand/15 bg-brand/5 px-3 py-2 text-[11px] text-muted-foreground">
+                  <Clock size={12} className="shrink-0 text-brand" />
+                  <span>
+                    Lifetime hours = opening balance + attendance-recorded hours.
+                    {isEdit && !isSuperAdmin && ' Only super admins can adjust this balance.'}
+                    {isEdit && isSuperAdmin && ' Blank keeps the current balance; type 0 to reset it.'}
+                  </span>
+                </div>
+              </div>
+            </FormSection>
 
-            {/* payment method — cash / card (+ card type). Same editor as the
-                Employee Details page: saved through its own audited setter,
-                shown as the Payment Method column in Payroll */}
-            <div className="mt-5 rounded-xl border border-brand/15 bg-brand/[0.03] p-3.5">
-              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                <CreditCard size={13} className="text-brand" /> Payment Method
-                <span className="normal-case text-muted-foreground/70">— how the salary is paid (Payroll column &amp; filter)</span>
-              </p>
-              <div className="mt-3 grid gap-4 sm:grid-cols-2">
+            {/* ---------------- Documents ----------------
+                Directly below Historical Working Hours inside the same
+                right-column wrapper — tight stack, no stretched-grid void. */}
+            <FormSection
+              icon={<IdCard size={16} />}
+              title="Documents"
+              hint="Passport, ID & payment method"
+            >
+              <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label>Payment Type</Label>
-                  <Select
-                    value={paymentType ?? 'none'}
-                    onValueChange={(v) => {
-                      const next = v === 'none' ? null : v as PaymentType;
-                      setPaymentType(next);
-                      if (next !== 'card') setNewCardName(null);
-                    }}
-                  >
-                    <SelectTrigger className="h-11 bg-card" aria-label="Payment type"><SelectValue /></SelectTrigger>
+                  <Label>Passport Number</Label>
+                  <Input value={form.passport_number ?? ''} onChange={(e) => setForm((f) => ({ ...f, passport_number: e.target.value }))} placeholder="P1234567" className="h-11" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Passport Status</Label>
+                  <Select value={form.passport_status ?? 'none'} onValueChange={(v) => setForm((f) => ({ ...f, passport_status: v === 'none' ? null : v as DocumentStatus }))}>
+                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="none">Not set</SelectItem>
-                      <SelectItem value="cash">Cash</SelectItem>
-                      <SelectItem value="card">Card</SelectItem>
+                      {DOC_STATUSES.map((d) => (
+                        <SelectItem key={d.value} value={d.value} className={d.cls}>{d.label}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-[11px] text-muted-foreground">Choose Card to pick the payroll card below.</p>
                 </div>
-                {paymentType === 'card' && (
-                  <div className="space-y-2">
-                    <Label>Card Type</Label>
-                    <Select value={cardTypeId} onValueChange={pickCardType}>
-                      <SelectTrigger className="h-11 bg-card" aria-label="Card type"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">Select a card…</SelectItem>
-                        {cardTypes.map((c) => (
-                          <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                        ))}
-                        <SelectItem value="__add_new" className="text-brand">+ Add New Card Type…</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p className="text-[11px] text-muted-foreground">Card types are managed in their own list — use “Add New” to create one on the fly.</p>
+                <div className="space-y-2">
+                  <Label>ID Number</Label>
+                  <Input value={form.id_number ?? ''} onChange={(e) => setForm((f) => ({ ...f, id_number: e.target.value }))} placeholder="UAE-IQ-20260001" className="h-11" />
+                </div>
+                <div className="space-y-2">
+                  <Label>ID Status</Label>
+                  <Select value={form.id_status ?? 'none'} onValueChange={(v) => setForm((f) => ({ ...f, id_status: v === 'none' ? null : v as DocumentStatus }))}>
+                    <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Not set</SelectItem>
+                      {DOC_STATUSES.map((d) => (
+                        <SelectItem key={d.value} value={d.value} className={d.cls}>{d.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {isEdit && editingEmployee && (
+                  <div className="space-y-2 sm:col-span-2">
+                    <Label>Performance Rating</Label>
+                    <div className="flex h-11 items-center gap-2 rounded-xl border bg-muted/40 px-3">
+                      <RatingStars rating={editingEmployee.rating} />
+                      <span className="text-xs text-muted-foreground">Auto-calculated from attendance</span>
+                    </div>
                   </div>
                 )}
               </div>
-              {paymentType === 'card' && newCardName !== null && (
-                <div className="mt-3 flex items-end gap-2">
-                  <div className="flex-1 space-y-2">
-                    <Label>New Card Type</Label>
-                    <Input
-                      value={newCardName}
-                      onChange={(e) => setNewCardName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void addCardTypeInline(); } }}
-                      placeholder="e.g. Emirates NBD Card"
-                      className="h-11 bg-card"
-                    />
+
+              {/* payment method — cash / card (+ card type). Same editor as the
+                  Employee Details page: saved through its own audited setter,
+                  shown as the Payment Method column in Payroll */}
+              <div className="mt-5 rounded-xl border border-brand/15 bg-brand/[0.03] p-3.5">
+                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <CreditCard size={13} className="text-brand" /> Payment Method
+                  <span className="normal-case text-muted-foreground/70">— how the salary is paid (Payroll column &amp; filter)</span>
+                </p>
+                <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Payment Type</Label>
+                    <Select
+                      value={paymentType ?? 'none'}
+                      onValueChange={(v) => {
+                        const next = v === 'none' ? null : v as PaymentType;
+                        setPaymentType(next);
+                        if (next !== 'card') setNewCardName(null);
+                      }}
+                    >
+                      <SelectTrigger className="h-11 bg-card" aria-label="Payment type"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Not set</SelectItem>
+                        <SelectItem value="cash">Cash</SelectItem>
+                        <SelectItem value="card">Card</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground">Choose Card to pick the payroll card below.</p>
                   </div>
-                  <Button type="button" onClick={() => { void addCardTypeInline(); }} disabled={addingCard || newCardName.trim() === ''} className="brand-gradient h-11 font-semibold text-white">
-                    {addingCard ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
-                  </Button>
+                  {paymentType === 'card' && (
+                    <div className="space-y-2">
+                      <Label>Card Type</Label>
+                      <Select value={cardTypeId} onValueChange={pickCardType}>
+                        <SelectTrigger className="h-11 bg-card" aria-label="Card type"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">Select a card…</SelectItem>
+                          {cardTypes.map((c) => (
+                            <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                          ))}
+                          <SelectItem value="__add_new" className="text-brand">+ Add New Card Type…</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">Card types are managed in their own list — use “Add New” to create one on the fly.</p>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </FormSection>
+                {paymentType === 'card' && newCardName !== null && (
+                  <div className="mt-3 flex items-end gap-2">
+                    <div className="flex-1 space-y-2">
+                      <Label>New Card Type</Label>
+                      <Input
+                        value={newCardName}
+                        onChange={(e) => setNewCardName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void addCardTypeInline(); } }}
+                        placeholder="e.g. Emirates NBD Card"
+                        className="h-11 bg-card"
+                      />
+                    </div>
+                    <Button type="button" onClick={() => { void addCardTypeInline(); }} disabled={addingCard || newCardName.trim() === ''} className="brand-gradient h-11 font-semibold text-white">
+                      {addingCard ? <Loader2 size={14} className="mr-1 animate-spin" /> : <Plus size={14} className="mr-1" />} Add
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </FormSection>
+          </div>
         </div>
       )}
 

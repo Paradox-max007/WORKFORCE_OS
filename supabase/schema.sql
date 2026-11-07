@@ -141,13 +141,16 @@ alter table public.employee add column if not exists opening_hours numeric(12,2)
 alter table public.employee drop constraint if exists employee_opening_hours_check;
 alter table public.employee add constraint employee_opening_hours_check check (opening_hours >= 0);
 
--- Daily attendance (Excel-style marking: hours worked, or absent)
+-- Daily attendance (Excel-style marking: hours worked, absent, or any
+-- free-text marker — only "A" counts as absent, everything else is stored
+-- in `note` as a present day with no tracked hours)
 create table if not exists public.attendance (
   id             uuid primary key default gen_random_uuid(),
   employee_id    uuid not null references public.employee(id) on delete cascade,
   date           date not null,
   status         text not null default 'present' check (status in ('present','absent','not_marked')),
   hours          numeric(4,2) check (hours is null or (hours >= 0 and hours <= 24)),
+  note           text,
   is_hidden      boolean not null default false,
   created_at     timestamptz not null default now(),
   unique (employee_id, date)
@@ -1127,10 +1130,12 @@ declare
   prev public.attendance;
   v_hours numeric := null;
   v_status text;
+  v_note text := null;
   ot_delta numeric := 0;
   walk date;
   absent_dates date[] := array[p_date];
   v_emp_site uuid;
+  v_trimmed text;
 begin
   if not public.has_menu_permission('attendance') and not public.has_menu_permission('employees') then
     raise exception 'Access denied';
@@ -1153,22 +1158,33 @@ begin
   end if;
 
   -- parse the cell value
-  if p_value is null or btrim(p_value) = '' then
+  v_trimmed := btrim(coalesce(p_value, ''));
+  if v_trimmed = '' then
     -- cleared cell: remove the record entirely
     delete from public.attendance where employee_id = p_employee_id and date = p_date;
     return prev;
-  elsif lower(btrim(p_value)) in ('a', 'absent') then
+  elsif lower(v_trimmed) = 'a' then
+    -- ONLY "A" marks a day absent — any other free text never does
     v_status := 'absent';
   else
+    -- numeric → hours; anything else → free-text marker (present, no hours)
     begin
-      v_hours := btrim(p_value)::numeric;
+      v_hours := v_trimmed::numeric;
     exception when others then
-      raise exception 'Invalid value %. Enter hours (e.g. 8, 10.5) or A for absent', p_value;
+      v_hours := null;
     end;
-    if v_hours < 0 or v_hours > 24 then
-      raise exception 'Hours must be between 0 and 24';
+    if v_hours is not null then
+      if v_hours < 0 or v_hours > 24 then
+        raise exception 'Hours must be between 0 and 24';
+      end if;
+      v_status := 'present';
+    else
+      if length(v_trimmed) > 40 then
+        raise exception 'Free-text markers are limited to 40 characters — only A counts as absent';
+      end if;
+      v_status := 'present';
+      v_note := v_trimmed;
     end if;
-    v_status := 'present';
   end if;
 
   select * into prev from public.attendance
@@ -1179,11 +1195,14 @@ begin
     ot_delta := greatest(0, coalesce(v_hours,0) - 8);
   end if;
 
-  insert into public.attendance (employee_id, date, status, hours)
-  values (p_employee_id, p_date, v_status, case when v_status = 'present' then v_hours else null end)
+  insert into public.attendance (employee_id, date, status, hours, note)
+  values (p_employee_id, p_date, v_status,
+          case when v_status = 'present' then v_hours else null end,
+          v_note)
   on conflict (employee_id, date) do update set
     status = excluded.status,
-    hours = excluded.hours
+    hours = excluded.hours,
+    note = excluded.note
   returning * into result;
 
   -- rating: +/- 0.2 stars per overtime-hour delta (hours above 8/day)

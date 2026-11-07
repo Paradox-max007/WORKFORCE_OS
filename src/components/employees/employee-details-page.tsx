@@ -370,11 +370,12 @@ function MonthGrid({ year, month, records, print = false }: {
         const sun = isSunday(date);
         const absent = rec?.status === 'absent';
         const hasHours = rec?.status === 'present' && rec.hours != null;
+        const marker = rec?.status === 'present' && rec.hours == null ? rec.note ?? null : null;
         return (
           <div
             key={d}
             role="img"
-            aria-label={`${date}${sun ? ', Sunday' : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : ', not marked'}`}
+            aria-label={`${date}${sun ? ', Sunday' : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : marker ? `, marked ${marker}` : ', not marked'}`}
             className={cn(
               'relative flex min-h-16 flex-col items-center justify-center rounded-lg border text-sm',
               print ? 'border-zinc-300 bg-white text-zinc-900' : 'border-border/60 bg-background/60',
@@ -391,6 +392,10 @@ function MonthGrid({ year, month, records, print = false }: {
             ) : hasHours ? (
               <span className={cn('text-base font-semibold tabular-nums', print ? 'text-emerald-700' : 'text-emerald-500')}>
                 {rec?.hours}h
+              </span>
+            ) : marker ? (
+              <span className={cn('max-w-full truncate px-1 text-[11px] font-semibold', print ? 'text-violet-700' : 'text-brand')} title={marker}>
+                {marker}
               </span>
             ) : (
               <span className={cn('text-xs', print ? 'text-zinc-400' : 'text-muted-foreground/50')}>—</span>

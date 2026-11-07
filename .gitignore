@@ -66,3 +66,4 @@ scripts/pgdata_pay_test/
 scripts/base_schema.sql
 scripts/base_schema_local.sql
 scripts/migration_buggy.sql
+scripts/pgdata_att_free_text/

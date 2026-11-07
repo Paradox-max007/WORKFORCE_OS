@@ -167,6 +167,11 @@ export interface Attendance {
   status: AttendanceStatus;
   /** Worked hours for the day (custom hours per site); null when absent/unmarked */
   hours: number | null;
+  /** Free-text marker typed into the sheet (e.g. "OT", "H", "travel").
+   *  ANY text other than "A" is stored here, shown in the cell and is NEVER
+   *  counted as absent — it is a present day with no tracked hours.
+   *  Optional: records persisted before this field existed don't have it. */
+  note?: string | null;
   is_hidden: boolean;
   created_at: string;
 }

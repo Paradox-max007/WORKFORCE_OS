@@ -538,7 +538,8 @@ function seedDB(): DemoDB {
           }
         }
         db.attendance.push({
-          id: uid(), employee_id: e.id, date: dateStr, status, hours, is_hidden: false, created_at: nowISO(),
+          id: uid(), employee_id: e.id, date: dateStr, status, hours, note: null,
+          is_hidden: false, created_at: nowISO(),
         });
       }
     }

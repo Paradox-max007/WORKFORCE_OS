@@ -780,8 +780,11 @@ export const demoApi = {
     });
   },
 
-  /** Excel-style marking: value is 'A' (absent), a numeric hours string ('8',
-   *  '10.5') or '' / null to clear the cell. Mirrors the Postgres RPC exactly. */
+  /** Excel-style marking: value is 'A' (absent — the ONLY text that counts
+   *  as absent), a numeric hours string ('8', '10.5'), ANY OTHER FREE TEXT
+   *  (stored as a marker, shown in the cell, never absent — present day with
+   *  no tracked hours) or '' / null to clear the cell. Mirrors the Postgres
+   *  RPC exactly. */
   async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
@@ -822,14 +825,23 @@ export const demoApi = {
 
     let status: Attendance['status'];
     let hours: number | null = null;
-    if (trimmed.toLowerCase() === 'a' || trimmed.toLowerCase() === 'absent') {
+    let note: string | null = null;
+    if (trimmed.toLowerCase() === 'a') {
+      // ONLY "A" marks a day absent — any other free text never does
       status = 'absent';
     } else {
       const n = Number(trimmed);
-      if (Number.isNaN(n) || !Number.isFinite(n)) throw new Error(`Invalid value "${trimmed}". Enter hours (e.g. 8, 10.5) or A for absent.`);
-      if (n < 0 || n > 24) throw new Error('Hours must be between 0 and 24');
-      status = 'present';
-      hours = Math.round(n * 100) / 100;
+      if (trimmed !== '' && !Number.isNaN(n) && Number.isFinite(n)) {
+        if (n < 0 || n > 24) throw new Error('Hours must be between 0 and 24');
+        status = 'present';
+        hours = Math.round(n * 100) / 100;
+      } else {
+        // free-text marker ("OT", "H", "travel", …) — present, no hours,
+        // text kept on the record and displayed in the cell
+        if (trimmed.length > 40) throw new Error('Free-text markers are limited to 40 characters — only A counts as absent');
+        status = 'present';
+        note = trimmed;
+      }
     }
 
     const otDelta = prev
@@ -839,9 +851,10 @@ export const demoApi = {
     if (prev) {
       prev.status = status;
       prev.hours = hours;
+      prev.note = note;
     } else {
       db.attendance.push({
-        id: uid(), employee_id: employeeId, date, status, hours,
+        id: uid(), employee_id: employeeId, date, status, hours, note,
         is_hidden: false, created_at: nowISO(),
       });
     }

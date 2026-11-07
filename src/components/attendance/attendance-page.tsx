@@ -6,8 +6,10 @@
 // • The sheet is grouped per WORK SITE (attendance is marked sitewise) and each
 //   section's crew is ALPHABETICAL. An "Unassigned / Idle" section (super
 //   admins only) lists employees without a site.
-// • Every cell is an always-editable input: type custom hours (e.g. 8, 10.5)
-//   or "A" for absent, or clear it to unmark the day.
+// • Every cell is an always-editable input: type custom hours (e.g. 8, 10.5),
+//   "A" for absent, ANY OTHER FREE TEXT as a day marker (e.g. "OT", "H",
+//   "travel") — free text is stored, shown in the cell and is NEVER counted
+//   as absent — or clear it to unmark the day.
 // • BULK DAY ENTRY: fill an entire day for a whole site crew in one action —
 //   hours DEFAULT TO 10 but every value is editable before the save, and the
 //   sheet cells stay editable any time afterwards.
@@ -137,14 +139,19 @@ const formatDatePretty = (date: string): string => {
 const isSunday = (date: string): boolean => new Date(`${date}T00:00:00`).getDay() === 0;
 const daysInMonth = (y: number, m: number): number => new Date(y, m, 0).getDate();
 
-/** Parse a cell value → { kind, hours }. kind: 'absent' | 'hours' | 'clear' | 'invalid' */
-function parseCell(raw: string): { kind: 'absent' | 'hours' | 'clear' | 'invalid'; hours: number | null } {
+/** Parse a cell value → { kind, hours }. kind: 'absent' | 'hours' | 'text' | 'clear' | 'invalid'
+ *  ONLY "A" is absent. Numbers 0–24 are hours. ANY other free text is a
+ *  day marker — saved, displayed, never absent (present with no hours). */
+function parseCell(raw: string): { kind: 'absent' | 'hours' | 'text' | 'clear' | 'invalid'; hours: number | null } {
   const v = raw.trim();
   if (v === '') return { kind: 'clear', hours: null };
-  if (v.toLowerCase() === 'a' || v.toLowerCase() === 'absent') return { kind: 'absent', hours: null };
+  if (v.toLowerCase() === 'a') return { kind: 'absent', hours: null };
   const n = Number(v);
-  if (Number.isNaN(n) || !Number.isFinite(n) || n < 0 || n > 24) return { kind: 'invalid', hours: null };
-  return { kind: 'hours', hours: Math.round(n * 100) / 100 };
+  if (!Number.isNaN(n) && Number.isFinite(n) && n >= 0 && n <= 24) {
+    return { kind: 'hours', hours: Math.round(n * 100) / 100 };
+  }
+  if (v.length <= 40) return { kind: 'text', hours: null };
+  return { kind: 'invalid', hours: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +465,7 @@ export function AttendancePage() {
     if (!r) return '';
     if (r.status === 'absent') return 'A';
     if (r.status === 'present' && r.hours != null) return String(r.hours);
+    if (r.note) return r.note; // free-text marker — shown as typed
     return '';
   };
 
@@ -480,7 +488,7 @@ export function AttendancePage() {
 
     const parsed = parseCell(raw);
     if (parsed.kind === 'invalid') {
-      toast.error('Invalid value', { description: 'Enter hours (0–24, e.g. 8 or 10.5) or A for absent.' });
+      toast.error('Invalid value', { description: 'Enter hours (0–24, e.g. 8 or 10.5), A for absent, or any short free-text marker (max 40 characters). Only A counts as absent.' });
       setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
       return;
     }
@@ -500,6 +508,7 @@ export function AttendancePage() {
           date,
           status: parsed.kind === 'absent' ? 'absent' : 'present',
           hours: parsed.hours,
+          note: parsed.kind === 'text' ? raw.trim() : null,
           is_hidden: false,
           created_at: base?.created_at ?? new Date().toISOString(),
         }];
@@ -610,7 +619,7 @@ export function AttendancePage() {
 
   // live stats for the footer chips
   const bulkStats = useMemo(() => {
-    let selected = 0, present = 0, absent = 0, changes = 0, invalid = 0;
+    let selected = 0, present = 0, absent = 0, text = 0, changes = 0, invalid = 0;
     for (const emp of bulkCrew) {
       if (!bulkInclude[emp.id]) continue;
       selected += 1;
@@ -619,10 +628,11 @@ export function AttendancePage() {
       if (parsed.kind === 'invalid') invalid += 1;
       if (parsed.kind === 'hours') present += 1;
       if (parsed.kind === 'absent') absent += 1;
+      if (parsed.kind === 'text') text += 1;
       const existing = recordToText(recordMap.get(`${emp.id}|${bulkDate}`));
       if (raw !== existing) changes += 1;
     }
-    return { selected, present, absent, changes, invalid };
+    return { selected, present, absent, text, changes, invalid };
   }, [bulkCrew, bulkInclude, bulkValues, recordMap, bulkDate]);
 
   const bulkAllIncluded = bulkCrew.length > 0 && bulkCrew.every((e) => bulkInclude[e.id]);
@@ -673,7 +683,7 @@ export function AttendancePage() {
       if (!bulkInclude[emp.id]) continue;
       const raw = (bulkValues[emp.id] ?? '').trim();
       if (parseCell(raw).kind === 'invalid') {
-        toast.error(`Invalid value for ${emp.full_name}`, { description: 'Enter hours (0–24, e.g. 8 or 10.5) or A for absent.' });
+        toast.error(`Invalid value for ${emp.full_name}`, { description: 'Enter hours (0–24, e.g. 8 or 10.5), A for absent, or any short free-text marker (max 40 characters). Only A counts as absent.' });
         return;
       }
     }
@@ -704,11 +714,12 @@ export function AttendancePage() {
             continue;
           }
           const rec: Attendance = idx >= 0
-            ? { ...list[idx], status: parsed.kind === 'absent' ? 'absent' : 'present', hours: parsed.hours }
+            ? { ...list[idx], status: parsed.kind === 'absent' ? 'absent' : 'present', hours: parsed.hours, note: parsed.kind === 'text' ? (entry.value ?? '').trim() : null }
             : {
                 id: `local-${entry.employee_id}-${entry.date}`, employee_id: entry.employee_id,
                 date: entry.date, status: parsed.kind === 'absent' ? 'absent' : 'present',
-                hours: parsed.hours, is_hidden: false, created_at: new Date().toISOString(),
+                hours: parsed.hours, note: parsed.kind === 'text' ? (entry.value ?? '').trim() : null,
+                is_hidden: false, created_at: new Date().toISOString(),
               };
           if (idx >= 0) list[idx] = rec; else list.push(rec);
         }
@@ -745,6 +756,7 @@ export function AttendancePage() {
     const sun = isSunday(date);
     const future = date > today;
     const isA = value.trim().toLowerCase() === 'a';
+    const parsed = parseCell(value);
     return (
       <td
         key={key}
@@ -776,7 +788,9 @@ export function AttendancePage() {
                 'h-8 w-full bg-transparent text-center text-[11px] font-medium tabular-nums outline-none transition-colors',
                 'hover:bg-brand/10 focus:bg-brand/15 focus:ring-1 focus:ring-brand/60 focus:ring-inset',
                 isA && 'bg-rose-500/10 font-bold text-rose-500',
-                value !== '' && !isA && 'text-foreground',
+                parsed.kind === 'text' && 'bg-brand/[0.08] font-semibold text-brand',
+                parsed.kind === 'hours' && 'text-foreground',
+                value !== '' && parsed.kind !== 'hours' && parsed.kind !== 'text' && 'text-foreground',
                 busy && 'opacity-50',
                 faded && 'opacity-60',
               )}
@@ -1069,7 +1083,7 @@ export function AttendancePage() {
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ ease: EASE }}>
           <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Attendance</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Sitewise Excel-style marking — type custom hours per day, or <span className="font-semibold text-rose-500">A</span> for absent.
+            Sitewise Excel-style marking — type custom hours per day, <span className="font-semibold text-rose-500">A</span> for absent, or any free-text marker (only <span className="font-semibold text-rose-500">A</span> counts as absent).
             Bulk-fill a whole day in one go via <span className="font-semibold text-foreground">Bulk Day</span> (defaults to 10h).
             Employees moved mid-month appear under both sites — bottom of the crew, faded, moved days merged — so they stay markable at each site
             (a day already marked before the move keeps its original site).
@@ -1317,6 +1331,7 @@ export function AttendancePage() {
         <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/20 ring-1 ring-rose-500/40" />A = Absent</span>
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-emerald-500/20 ring-1 ring-emerald-500/40" />Hours</span>
+          <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-brand/15 ring-1 ring-brand/40" />Free text = marker (not absent)</span>
           <span className="flex items-center gap-1.5"><span className="size-2.5 rounded-sm bg-rose-500/[0.06] ring-1 ring-border" />Sunday</span>
           <span className="hidden items-center gap-1.5 lg:flex"><span className="size-2.5 rounded-sm bg-muted/60 ring-1 ring-border/70" />Future (locked)</span>
           <span className="hidden items-center gap-1.5 lg:flex"><span className="size-2.5 rounded-sm bg-brand/15 ring-1 ring-brand/40" />Moved mid-month (faded)</span>
@@ -1410,6 +1425,8 @@ export function AttendancePage() {
                           <span className="text-lg font-bold text-rose-500">A</span>
                         ) : parsed.kind === 'hours' ? (
                           <span className="text-base font-semibold tabular-nums text-emerald-500">{parsed.hours}h</span>
+                        ) : parsed.kind === 'text' ? (
+                          <span className="max-w-full truncate px-1 text-[11px] font-semibold text-brand" title={value}>{value}</span>
                         ) : (
                           <span className="text-xs text-muted-foreground/50">—</span>
                         )}
@@ -1423,12 +1440,15 @@ export function AttendancePage() {
                         autoFocus
                         value={value}
                         disabled={future}
-                        placeholder="Hours (8) or A"
+                        placeholder="Hours, A or free text"
                         onChange={(e) => setCell(calendarEmployee.id, date, e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                         onBlur={() => commitCell(calendarEmployee.id, date)}
                         className="h-9 text-center font-semibold tabular-nums"
                       />
+                      <p className="mt-1.5 text-[10px] leading-snug text-muted-foreground">
+                        Only <b className="text-rose-500">A</b> counts as absent — any other free text is saved as a day marker.
+                      </p>
                       <div className="mt-2 grid grid-cols-4 gap-1">
                         {['8', '10', '12'].map((h) => (
                           <Button key={h} variant="outline" size="sm" className="h-7 px-0 text-xs" onClick={() => { setCell(calendarEmployee.id, date, h); setTimeout(() => commitCell(calendarEmployee.id, date), 0); }}>
@@ -1607,6 +1627,7 @@ export function AttendancePage() {
                 const parsed = parseCell(raw);
                 const invalid = parsed.kind === 'invalid';
                 const isA = parsed.kind === 'absent';
+                const isText = parsed.kind === 'text';
                 const existing = recordToText(recordMap.get(`${emp.id}|${bulkDate}`));
                 const changed = raw.trim() !== existing;
                 const included = bulkInclude[emp.id] ?? false;
@@ -1647,8 +1668,9 @@ export function AttendancePage() {
                       onKeyDown={(e) => gridCellKeyDown(e, BULK_VALUE_NAV)}
                       aria-label={`Hours for ${emp.full_name} on ${bulkDate}`}
                       className={cn(
-                        'h-9 w-16 shrink-0 text-center font-semibold tabular-nums',
+                        'h-9 w-20 shrink-0 text-center text-xs font-semibold tabular-nums',
                         isA && 'bg-rose-500/10 text-rose-500',
+                        isText && 'bg-brand/10 text-brand',
                         invalid && 'border-rose-500/60 bg-rose-500/10 text-rose-500',
                       )}
                     />
@@ -1690,6 +1712,11 @@ export function AttendancePage() {
               )}>
                 {bulkStats.absent} absent
               </span>
+              {bulkStats.text > 0 && (
+                <span className="rounded-full border border-brand/25 bg-brand/10 px-2 py-0.5 font-semibold tabular-nums text-brand">
+                  {bulkStats.text} text marker{bulkStats.text !== 1 ? 's' : ''}
+                </span>
+              )}
               <span className={cn(
                 'rounded-full border px-2 py-0.5 font-semibold tabular-nums',
                 bulkStats.changes > 0

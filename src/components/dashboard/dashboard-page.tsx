@@ -82,6 +82,10 @@ export function DashboardPage() {
   const [month, setMonth] = useState(now.getMonth()); // 0-indexed
   const [day, setDay] = useState(now.getDate());
 
+  /** Drill level of the Monthly Attendance card: year → month → day.
+   *  Default is the current month (day 1 → last day) present/absent chart. */
+  const [level, setLevel] = useState<'year' | 'month' | 'day'>('month');
+
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [attendance, setAttendance] = useState<Attendance[] | null>(null);
@@ -97,7 +101,9 @@ export function DashboardPage() {
       const [emps, sts, sum] = await Promise.all([
         dataApi.listEmployees(),
         dataApi.listSites(),
-        dataApi.getMonthlyAttendanceSummary(6),
+        // 48 months of per-status counts — covers every year the header
+        // picker offers (now-2 … now+1) for the year drill-down view
+        dataApi.getMonthlyAttendanceSummary(48),
       ]);
       if (!cancelled) {
         setEmployees(emps);
@@ -149,23 +155,86 @@ export function DashboardPage() {
   const workingEmployees = activeEmployees.filter((e) => e.status === 'active' && e.current_site_id);
   const pendingEmployees = activeEmployees.filter((e) => e.status === 'pending_deletion');
 
-  // 6-month chart data
-  const chartData = useMemo(() => {
-    const byMonth = new Map<string, { month: string; present: number; absent: number }>();
+  // ---- drillable Monthly Attendance chart data --------------------------------
+  // YEAR: 12 calendar months of the selected year (Jan–Dec buckets from the
+  // 48-month summary). Clicking a month bar zooms into that month.
+  const yearChartData = useMemo(() => {
+    const buckets = new Map<number, { present: number; absent: number }>();
     (summary ?? []).forEach((row) => {
-      const entry = byMonth.get(row.month) ?? { month: row.month, present: 0, absent: 0 };
-      if (row.status in entry) {
-        (entry as unknown as Record<string, number>)[row.status] = row.count;
-      }
-      byMonth.set(row.month, entry);
+      const [y, m] = row.month.split('-').map((v) => parseInt(v, 10));
+      if (y !== year) return;
+      const b = buckets.get(m) ?? { present: 0, absent: 0 };
+      if (row.status === 'present' || row.status === 'absent') b[row.status] = row.count;
+      buckets.set(m, b);
     });
-    return Array.from(byMonth.values())
-      .sort((a, b) => a.month.localeCompare(b.month))
-      .map((m) => ({
-        ...m,
-        label: MONTH_NAMES[parseInt(m.month.slice(5), 10) - 1].slice(0, 3),
-      }));
-  }, [summary]);
+    return Array.from({ length: 12 }, (_, i) => ({
+      month: `${year}-${String(i + 1).padStart(2, '0')}`,
+      label: MONTH_NAMES[i].slice(0, 3),
+      present: buckets.get(i + 1)?.present ?? 0,
+      absent: buckets.get(i + 1)?.absent ?? 0,
+    }));
+  }, [summary, year]);
+
+  // MONTH (default): one stacked bar per day, day 1 → last day (28/29/30/31),
+  // aggregated from the month's attendance records already loaded for the
+  // stat cards. Clicking a day bar zooms into that day.
+  const monthChartData = useMemo(() => {
+    const byDay = new Map<number, { present: number; absent: number }>();
+    (attendance ?? []).forEach((a) => {
+      if (a.status !== 'present' && a.status !== 'absent') return;
+      const d = parseInt(a.date.slice(8), 10);
+      const b = byDay.get(d) ?? { present: 0, absent: 0 };
+      b[a.status] += 1;
+      byDay.set(d, b);
+    });
+    return Array.from({ length: daysInMonth }, (_, i) => ({
+      date: `${monthStr}-${String(i + 1).padStart(2, '0')}`,
+      label: String(i + 1),
+      present: byDay.get(i + 1)?.present ?? 0,
+      absent: byDay.get(i + 1)?.absent ?? 0,
+    }));
+  }, [attendance, daysInMonth, monthStr]);
+
+  // DAY: the selected day's record — one stacked bar per site. The site is the
+  // employee's current site, the same snapshot the site-wise breakdown card
+  // below uses.
+  const dayChartData = useMemo(() => {
+    const siteName = new Map((sites ?? []).map((s) => [s.id, s.name]));
+    const empSite = new Map((employees ?? []).map((e) => [e.id, e.current_site_id]));
+    const bySite = new Map<string, { present: number; absent: number }>();
+    (attendance ?? []).forEach((a) => {
+      if (a.date !== selectedDate || (a.status !== 'present' && a.status !== 'absent')) return;
+      const sid = empSite.get(a.employee_id) ?? 'none';
+      const b = bySite.get(sid) ?? { present: 0, absent: 0 };
+      b[a.status] += 1;
+      bySite.set(sid, b);
+    });
+    return Array.from(bySite.entries())
+      .map(([sid, counts]) => ({
+        label: sid === 'none' ? 'No Site' : siteName.get(sid) ?? 'Unknown site',
+        present: counts.present,
+        absent: counts.absent,
+      }))
+      .sort((a, b) => (b.present + b.absent) - (a.present + a.absent));
+  }, [attendance, selectedDate, sites, employees]);
+
+  const chartData = level === 'year' ? yearChartData : level === 'month' ? monthChartData : dayChartData;
+  const chartHasData = chartData.some((d) => d.present > 0 || d.absent > 0);
+
+  /** Bar clicks drill the chart one level down (year → month → day) and sync
+   *  the header date pickers so the stat cards follow the drill. */
+  const drillDown = (entry: unknown): void => {
+    // recharts hands the clicked bar's datum either directly or under `.payload`
+    const datum = ((entry as { payload?: unknown } | null)?.payload ?? entry) as
+      | { month?: string; date?: string } | undefined;
+    if (level === 'year' && datum?.month) {
+      setMonth(parseInt(datum.month.slice(5), 10) - 1);
+      setLevel('month');
+    } else if (level === 'month' && datum?.date) {
+      setDay(parseInt(datum.date.slice(8), 10));
+      setLevel('day');
+    }
+  };
 
   // donut data
   const donutData = [
@@ -282,30 +351,88 @@ export function DashboardPage() {
 
       {/* Charts row */}
       <div className="grid gap-4 lg:grid-cols-5">
-        {/* Attendance bar chart */}
+        {/* Attendance bar chart — drillable year / month / day */}
         <motion.div
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.08 }}
           className="card-glow rounded-xl border bg-card p-5 lg:col-span-3"
         >
-          <SectionTitle icon={<Clock size={15} />} title="Monthly Attendance" sub="Last 6 months, per status" />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <SectionTitle
+              icon={<Clock size={15} />}
+              title="Monthly Attendance"
+              sub={
+                level === 'year'
+                  ? `Year ${year} · click a month bar to zoom in`
+                  : level === 'month'
+                    ? `${MONTH_NAMES[month]} ${year} · day 1–${daysInMonth} · click a day bar to zoom in`
+                    : `${new Date(year, month, effectiveDay).toLocaleDateString('en-US', { weekday: 'short' })}, ${MONTH_NAMES[month]} ${effectiveDay}, ${year} · by site`
+              }
+            />
+            {/* drill level switch — Year / Month / Day */}
+            <div className="flex items-center gap-1 rounded-lg border bg-muted/50 p-1">
+              {(['year', 'month', 'day'] as const).map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => setLevel(l)}
+                  className={cn(
+                    'rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors',
+                    level === l ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="mt-4 h-72">
             {loading ? (
               <Skeleton className="h-full w-full" />
+            ) : !chartHasData ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                {level === 'year'
+                  ? `No attendance records in ${year} yet`
+                  : level === 'month'
+                    ? `No attendance records in ${MONTH_NAMES[month]} ${year}`
+                    : 'No attendance records on this day'}
+              </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={chartData} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 12, fill: 'var(--muted-foreground)' }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 12, fill: 'var(--muted-foreground)' }} axisLine={false} tickLine={false} />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 12, fill: 'var(--muted-foreground)' }}
+                    axisLine={false}
+                    tickLine={false}
+                    interval={level === 'month' && daysInMonth > 16 ? 2 : 0}
+                    tickFormatter={level === 'day' ? (v: string) => (v.length > 12 ? `${v.slice(0, 11)}…` : v) : undefined}
+                  />
+                  <YAxis tick={{ fontSize: 12, fill: 'var(--muted-foreground)' }} axisLine={false} tickLine={false} allowDecimals={false} />
                   <Tooltip
                     cursor={{ fill: 'rgba(128,128,128,0.08)' }}
                     content={<ChartTooltip />}
                   />
                   <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="present" name="Present" stackId="a" fill={STATUS_COLORS.present} animationDuration={900} />
-                  <Bar dataKey="absent" name="Absent" stackId="a" fill={STATUS_COLORS.absent} radius={[4, 4, 0, 0]} animationDuration={900} />
+                  <Bar
+                    dataKey="present"
+                    name="Present"
+                    stackId="a"
+                    fill={STATUS_COLORS.present}
+                    animationDuration={900}
+                    onClick={(d) => drillDown(d)}
+                  />
+                  <Bar
+                    dataKey="absent"
+                    name="Absent"
+                    stackId="a"
+                    fill={STATUS_COLORS.absent}
+                    radius={[4, 4, 0, 0]}
+                    animationDuration={900}
+                    onClick={(d) => drillDown(d)}
+                  />
                 </BarChart>
               </ResponsiveContainer>
             )}

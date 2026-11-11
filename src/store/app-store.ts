@@ -5,7 +5,7 @@
 // ============================================================================
 
 import { create } from 'zustand';
-import type { EmployeeVM } from '@/lib/types';
+import type { EmployeeVM, PayrollEmployeeVM } from '@/lib/types';
 
 export type AppView =
   | 'dashboard'
@@ -19,6 +19,7 @@ export type AppView =
   | 'working_hours'
   | 'salary_sheet'
   | 'payroll'
+  | 'payroll_export'
   | 'trade_management'
   | 'uniform_registry'
   | 'leave_requests'
@@ -38,6 +39,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   working_hours: 'Working Hours',
   salary_sheet: 'Salary Sheet',
   payroll: 'Payroll',
+  payroll_export: 'Payroll Excel Preview',
   trade_management: 'Trade Management',
   uniform_registry: 'Uniform Registry',
   leave_requests: 'Leave Requests',
@@ -59,6 +61,17 @@ interface AppStore {
   employeeFormReturnTo: 'employees' | 'employee_details';
   /** Payload of the Excel export preview page (filtered rows + filename) */
   exportPreview: { rows: EmployeeVM[]; fileName: string } | null;
+  /** Payload of the PAYROLL Excel export preview page — the currently
+   *  filtered rows of the selected period, the active filter chips and the
+   *  pre-built download filename. */
+  payrollExportPreview: {
+    rows: PayrollEmployeeVM[];
+    year: number;
+    month: number;
+    fileName: string;
+    filters: string[];
+    totalCount: number;
+  } | null;
   /** Shared payroll month selection — Salary Sheet and Payroll use the SAME
    *  period; switching pages keeps the month. */
   salaryPeriodYear: number;
@@ -77,6 +90,16 @@ interface AppStore {
   ) => void;
   /** Export Excel flow — opens the preview page for the filtered rows */
   navigateToExportPreview: (rows: EmployeeVM[], fileName: string) => void;
+  /** Payroll Export Excel flow — opens the payroll preview page for the
+   *  currently filtered rows (columns are picked on the preview itself). */
+  navigateToPayrollExport: (
+    rows: PayrollEmployeeVM[],
+    year: number,
+    month: number,
+    fileName: string,
+    filters: string[],
+    totalCount: number,
+  ) => void;
   setSidebarOpen: (open: boolean) => void;
   consumeEmployeeFilter: () => string;
 }
@@ -90,6 +113,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   employeeFormId: null,
   employeeFormReturnTo: 'employees' as const,
   exportPreview: null,
+  payrollExportPreview: null,
   salaryPeriodYear: new Date().getFullYear(),
   salaryPeriodMonth: new Date().getMonth() + 1,
   setSalaryPeriod: (year, month) => set({ salaryPeriodYear: year, salaryPeriodMonth: month }),
@@ -110,6 +134,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ currentView: 'employee_form', employeeFormMode: mode, employeeFormId: employeeId ?? null, employeeFormReturnTo: returnTo }),
   navigateToExportPreview: (rows, fileName) =>
     set({ currentView: 'employee_export', exportPreview: { rows, fileName } }),
+  navigateToPayrollExport: (rows, year, month, fileName, filters, totalCount) =>
+    set({
+      currentView: 'payroll_export',
+      payrollExportPreview: { rows, year, month, fileName, filters, totalCount },
+    }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   consumeEmployeeFilter: () => {
     const f = get().employeeFilter;

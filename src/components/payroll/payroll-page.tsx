@@ -35,14 +35,18 @@
 //   • the AUDIT TRAIL is collapsed behind an expandable icon button; opening
 //     it lists every audit entry, written with employee names & codes
 //   • reverting a payment is super-admin only and audited with a reason
+//   • EXCEL button (top bar) opens the export PREVIEW page with the CURRENTLY
+//     FILTERED rows — there the columns can be toggled (all on by default)
+//     before downloading the .xlsx (lib/export-payroll-xlsx.ts)
+//   • column order: AMOUNT comes BEFORE ADVANCE (page table AND the Excel)
 //   • shares the selected month with the Salary Sheet (app store)
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
-  History, Loader2, Lock, LockOpen, PencilLine, Scale, Search, StickyNote,
-  Trash2, TriangleAlert, UserX, Users, Wallet, X,
+  FileSpreadsheet, History, Loader2, Lock, LockOpen, PencilLine, Scale, Search,
+  StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -69,6 +73,7 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
 import { dataApi } from '@/lib/data';
+import { payrollExportFileName } from '@/lib/export-payroll-xlsx';
 import { fmtDate, fmtDateTime, fmtTimeAgo, initials } from '@/lib/format';
 import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
 import { cn } from '@/lib/utils';
@@ -101,6 +106,12 @@ const ROLE_LABEL: Record<string, string> = {
 };
 const TIER_LABEL: Record<string, string> = {
   below_threshold: 'Below 1000 h / 6 months', qualified: 'Qualified', manual: 'Manual',
+};
+
+/** display names of the STATUS filter values (export chips + filter bar) */
+const STATUS_LABELS: Record<string, string> = {
+  paid: 'Paid', unpaid: 'Unpaid', active: 'Active', working: 'Working',
+  idle: 'Idle', pending_deletion: 'Pending Deletion',
 };
 
 /** sentinel filter values */
@@ -772,6 +783,9 @@ export function PayrollPage() {
   const [statusFilter, setStatusFilter] = useState(FILTER_ALL);
   const [payFilter, setPayFilter] = useState(FILTER_ALL);
   const [auditOpen, setAuditOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const navigateToPayrollExport = useAppStore((s) => s.navigateToPayrollExport);
 
   // ---- payment-method data (card types list + employee sticky notes) -------
   const [cardTypes, setCardTypes] = useState<CardType[]>([]);
@@ -967,6 +981,56 @@ export function PayrollPage() {
     setPayFilter(FILTER_ALL);
   };
 
+  // ---- Excel export --------------------------------------------------------
+  // Opens the PREVIEW page with the CURRENTLY FILTERED rows; the columns are
+  // picked (all on by default) and the file downloaded from there. The chips
+  // describe the active filters — they show on the preview and shape the
+  // download filename (Pulse_Payroll_<Month>-<Year>_<chips>_<date>.xlsx).
+  const exportChips = (): string[] => {
+    const chips: string[] = [];
+    const q = search.trim();
+    if (q) chips.push(`Search: ${q}`);
+    if (regionFilter !== FILTER_ALL) {
+      const label = regionFilter === '__others__'
+        ? 'Others'
+        : NATIONALITY_REGIONS.find((r) => r.key === regionFilter)?.label ?? 'Region';
+      chips.push(`Region: ${label}`);
+    }
+    if (countryFilter !== FILTER_ALL) chips.push(`Country: ${countryFilter}`);
+    if (campFilter !== FILTER_ALL) {
+      chips.push(campFilter === FILTER_NONE
+        ? 'Camp: none assigned'
+        : `Camp: ${campFilterOptions.find((c) => c.id === campFilter)?.name ?? 'Camp'}`);
+    }
+    if (tradeFilter !== FILTER_ALL) {
+      chips.push(tradeFilter === FILTER_NONE
+        ? 'Trade: none'
+        : `Trade: ${tradeFilterOptions.find((t) => t.id === tradeFilter)?.name ?? 'Trade'}`);
+    }
+    if (payFilter !== FILTER_ALL) {
+      chips.push(payFilter === 'cash'
+        ? 'Payment: Cash'
+        : payFilter === '__unset__' ? 'Payment: not set' : `Payment: ${payFilter}`);
+    }
+    if (statusFilter !== FILTER_ALL) chips.push(`Status: ${STATUS_LABELS[statusFilter] ?? statusFilter}`);
+    return chips;
+  };
+
+  const exportToExcel = (): void => {
+    if (filteredEmployees.length === 0) {
+      toast.error('Nothing to export', { description: 'The current filters match no employees.' });
+      return;
+    }
+    setExporting(true);
+    const filters = exportChips();
+    const fileName = payrollExportFileName(year, month, filters);
+    // give the button its spinner frame, then switch to the preview page
+    setTimeout(() => {
+      navigateToPayrollExport(filteredEmployees, year, month, fileName, filters, employees.length);
+      setExporting(false);
+    }, 120);
+  };
+
   // payment cards — read from the stored settlement rows (never recalculated)
   const paidNet = useMemo(
     () => round2(employees.filter((e) => e.payment_status === 'paid').reduce((n, e) => n + e.net_salary, 0)),
@@ -1058,6 +1122,23 @@ export function PayrollPage() {
                 {selectableYears().map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}
               </SelectContent>
             </Select>
+            {report?.exists && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={exportToExcel}
+                disabled={exporting || filteredEmployees.length === 0}
+                title={filteredEmployees.length === 0
+                  ? 'The current filters match no employees'
+                  : `Preview the filtered payroll (${filteredEmployees.length} employee${filteredEmployees.length === 1 ? '' : 's'}) as an Excel sheet`}
+                className="h-9 font-medium"
+              >
+                {exporting
+                  ? <Loader2 size={14} className="mr-1 animate-spin" />
+                  : <FileSpreadsheet size={14} className="mr-1 text-emerald-600 dark:text-emerald-400" />}
+                Excel
+              </Button>
+            )}
             {report?.exists && (
               <Button
                 variant={editMode ? 'default' : 'outline'}
@@ -1282,9 +1363,9 @@ export function PayrollPage() {
                     <TableHead className="text-right">Total Hours</TableHead>
                     <TableHead className="min-w-40">Trade</TableHead>
                     <TableHead className="min-w-32">Payment Method</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
                     <TableHead className="text-right">Deduction</TableHead>
-                    <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead>
                   </TableRow>
@@ -1378,6 +1459,11 @@ export function PayrollPage() {
                         <TableCell className="text-xs">
                           <PaymentMethodCell e={e} />
                         </TableCell>
+                        {/* amount (gross) — BEFORE advance / deduction, same
+                            order as the header and the Excel export */}
+                        <TableCell className="text-right font-mono text-sm font-semibold">
+                          AED {fmtMoney(e.gross_salary)}
+                        </TableCell>
                         <TableCell className="text-right">
                           {editable ? (
                             <div className="flex justify-end">
@@ -1405,9 +1491,6 @@ export function PayrollPage() {
                               {e.deduction > 0 ? fmtMoney(e.deduction) : '—'}
                             </span>
                           )}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm font-semibold">
-                          AED {fmtMoney(e.gross_salary)}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
                           AED {fmtMoney(e.net_salary)}
@@ -1472,9 +1555,9 @@ export function PayrollPage() {
                       <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.hours)} h</TableCell>
                       <TableCell />
                       <TableCell />
+                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(filteredTotals.gross)}</TableCell>
                       <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.advances)}</TableCell>
                       <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.deductions)}</TableCell>
-                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(filteredTotals.gross)}</TableCell>
                       <TableCell className="text-right font-mono text-sm text-emerald-600 dark:text-emerald-400">
                         AED {fmtMoney(filteredTotals.net)}
                       </TableCell>

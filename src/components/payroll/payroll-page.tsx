@@ -24,7 +24,10 @@
 //     the SAME set as the Employees page: region, country (cascading), camp,
 //     trade, status (employee status + paid/unpaid) and PAYMENT METHOD
 //     (cash / Lulu Cards / C3 Cards / any other card type in the DB / not
-//     set). They narrow the table; the top cards stay period totals
+//     set). They narrow the table; the top cards stay period totals.
+//     On screens < lg the six dropdowns collapse behind a FILTERS icon
+//     (bottom sheet) so the sticky bar stays one compact row and never
+//     covers the table on phones
 //   • a STICKY-NOTE ICON next to every employee name opens a quick-notes
 //     popover — notepad-style comments stored on the EMPLOYEE (not the
 //     period) for quick future reference; the icon lights up amber and
@@ -45,10 +48,10 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
-  FileSpreadsheet, History, Loader2, Lock, LockOpen, PencilLine, Scale, Search,
-  StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
+  FileSpreadsheet, History, ListFilter, Loader2, Lock, LockOpen, PencilLine,
+  Scale, Search, StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { EmptyState, SectionTitle } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
@@ -66,6 +69,9 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import {
+  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
+} from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow,
@@ -782,6 +788,9 @@ export function PayrollPage() {
   const [campFilter, setCampFilter] = useState(FILTER_ALL);
   const [statusFilter, setStatusFilter] = useState(FILTER_ALL);
   const [payFilter, setPayFilter] = useState(FILTER_ALL);
+  // mobile (< lg): the six dropdown filters live in a bottom sheet behind a
+  // filter icon in the sticky bar — open state lives here
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
 
@@ -918,6 +927,11 @@ export function PayrollPage() {
     || campFilter !== FILTER_ALL
     || statusFilter !== FILTER_ALL
     || payFilter !== FILTER_ALL;
+
+  // how many of the six DROPDOWN filters are set — badge on the mobile
+  // Filters icon (the search box is visible on its own and not counted)
+  const activeFilterCount = [tradeFilter, regionFilter, countryFilter, campFilter, statusFilter, payFilter]
+    .filter((f) => f !== FILTER_ALL).length;
 
   const filteredEmployees = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1086,6 +1100,91 @@ export function PayrollPage() {
 
   const toggleEditMode = (): void => setEditMode((o) => !o);
 
+  // ---- the six filter dropdowns, rendered in TWO places: inline in the
+  //      desktop sticky bar (≥ lg) and full-width inside the mobile bottom
+  //      sheet (< lg). Identical options and behaviour in both. -------------
+  const renderFilterSelects = (): ReactNode => (<>
+    {/* region → country (cascading, like the Employees page) */}
+    <Select
+      value={regionFilter}
+      onValueChange={(v) => { setRegionFilter(v); setCountryFilter(FILTER_ALL); }}
+    >
+      <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by nationality region">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={FILTER_ALL}>All regions</SelectItem>
+        {NATIONALITY_REGIONS.map((r) => (
+          <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>
+        ))}
+        <SelectItem value="__others__">Others</SelectItem>
+      </SelectContent>
+    </Select>
+    <Select value={countryFilter} onValueChange={setCountryFilter}>
+      <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by nationality country">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={FILTER_ALL}>All countries</SelectItem>
+        {countryFilterOptions.map((c) => (
+          <SelectItem key={c} value={c}>{c}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+    <Select value={campFilter} onValueChange={setCampFilter}>
+      <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by camp">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={FILTER_ALL}>All camps</SelectItem>
+        {campFilterOptions.map((c) => (
+          <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+        ))}
+        <SelectItem value={FILTER_NONE}>No camp assigned</SelectItem>
+      </SelectContent>
+    </Select>
+    <Select value={tradeFilter} onValueChange={setTradeFilter}>
+      <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by trade">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={FILTER_ALL}>All trades</SelectItem>
+        {tradeFilterOptions.map((t) => (
+          <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+        ))}
+        <SelectItem value={FILTER_NONE}>No trade</SelectItem>
+      </SelectContent>
+    </Select>
+    {/* payment method — All / Cash / every card type in the DB / Not set */}
+    <Select value={payFilter} onValueChange={setPayFilter}>
+      <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by payment method">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={FILTER_ALL}>All payment methods</SelectItem>
+        <SelectItem value="cash">Cash</SelectItem>
+        {cardTypes.map((c) => (
+          <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>
+        ))}
+        <SelectItem value="__unset__">Not set</SelectItem>
+      </SelectContent>
+    </Select>
+    <Select value={statusFilter} onValueChange={setStatusFilter}>
+      <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by status">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={FILTER_ALL}>All statuses</SelectItem>
+        <SelectItem value="paid">Paid</SelectItem>
+        <SelectItem value="unpaid">Unpaid</SelectItem>
+        <SelectItem value="active">Active</SelectItem>
+        <SelectItem value="working">Working (site this month)</SelectItem>
+        <SelectItem value="idle">Idle (no site)</SelectItem>
+        <SelectItem value="pending_deletion">Pending deletion</SelectItem>
+      </SelectContent>
+    </Select>
+  </>);
+
   return (
     <div className="mx-auto max-w-[1600px] space-y-4">
       {/* sticky action bar — Edit / Finalize / Reopen stay visible while scrolling */}
@@ -1165,9 +1264,11 @@ export function PayrollPage() {
         </div>
 
         {/* search + filters — always visible while scrolling (same set as the
-            Employees page: region, country, camp, trade, status) */}
-        <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2.5">
-          <div className="relative min-w-[170px] flex-1">
+            Employees page: region, country, camp, trade, payment method,
+            status). Below lg the six dropdowns collapse behind a FILTERS
+            icon (bottom sheet) so the bar stays one compact row on phones */}
+        <div className="mt-2.5 flex items-center gap-2 border-t border-border/60 pt-2.5">
+          <div className="relative min-w-0 flex-1 lg:min-w-[170px]">
             <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={search}
@@ -1187,97 +1288,73 @@ export function PayrollPage() {
               </button>
             )}
           </div>
-          {/* region → country (cascading, like the Employees page) */}
-          <Select
-            value={regionFilter}
-            onValueChange={(v) => { setRegionFilter(v); setCountryFilter(FILTER_ALL); }}
+          {/* MOBILE (< lg): a single FILTERS icon carries ALL the filter
+              fields — it opens the bottom sheet below, so this sticky bar
+              stays one compact row and the table is never covered */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setFiltersOpen(true)}
+            aria-label={`Open filters${activeFilterCount > 0 ? ` (${activeFilterCount} active)` : ''}`}
+            className="h-9 shrink-0 gap-1.5 px-3 text-xs lg:hidden"
           >
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by nationality region">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FILTER_ALL}>All regions</SelectItem>
-              {NATIONALITY_REGIONS.map((r) => (
-                <SelectItem key={r.key} value={r.key}>{r.label}</SelectItem>
-              ))}
-              <SelectItem value="__others__">Others</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={countryFilter} onValueChange={setCountryFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by nationality country">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FILTER_ALL}>All countries</SelectItem>
-              {countryFilterOptions.map((c) => (
-                <SelectItem key={c} value={c}>{c}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={campFilter} onValueChange={setCampFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by camp">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FILTER_ALL}>All camps</SelectItem>
-              {campFilterOptions.map((c) => (
-                <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-              ))}
-              <SelectItem value={FILTER_NONE}>No camp assigned</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={tradeFilter} onValueChange={setTradeFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-40" aria-label="Filter by trade">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FILTER_ALL}>All trades</SelectItem>
-              {tradeFilterOptions.map((t) => (
-                <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-              ))}
-              <SelectItem value={FILTER_NONE}>No trade</SelectItem>
-            </SelectContent>
-          </Select>
-          {/* payment method — All / Cash / every card type in the DB / Not set */}
-          <Select value={payFilter} onValueChange={setPayFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by payment method">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FILTER_ALL}>All payment methods</SelectItem>
-              <SelectItem value="cash">Cash</SelectItem>
-              {cardTypes.map((c) => (
-                <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>
-              ))}
-              <SelectItem value="__unset__">Not set</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="h-9 w-full bg-card text-xs sm:w-44" aria-label="Filter by status">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FILTER_ALL}>All statuses</SelectItem>
-              <SelectItem value="paid">Paid</SelectItem>
-              <SelectItem value="unpaid">Unpaid</SelectItem>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="working">Working (site this month)</SelectItem>
-              <SelectItem value="idle">Idle (no site)</SelectItem>
-              <SelectItem value="pending_deletion">Pending deletion</SelectItem>
-            </SelectContent>
-          </Select>
-          {filtersActive && (
-            <>
-              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title="Employees shown / total">
-                {filteredEmployees.length}/{employees.length}
+            <ListFilter size={14} />
+            Filters
+            {activeFilterCount > 0 && (
+              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[10px] font-bold leading-none text-white">
+                {activeFilterCount}
               </span>
-              <Button variant="ghost" size="sm" className="h-9 shrink-0 px-2.5 text-xs" onClick={clearFilters}>
-                <X size={13} /> Clear
-              </Button>
-            </>
+            )}
+          </Button>
+          {filtersActive && (
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground lg:hidden" title="Employees shown / total">
+              {filteredEmployees.length}/{employees.length}
+            </span>
           )}
+
+          {/* DESKTOP (≥ lg): the six dropdowns stay inline in the bar */}
+          <div className="hidden flex-wrap items-center gap-2 lg:flex">
+            {renderFilterSelects()}
+            {filtersActive && (
+              <>
+                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title="Employees shown / total">
+                  {filteredEmployees.length}/{employees.length}
+                </span>
+                <Button variant="ghost" size="sm" className="h-9 shrink-0 px-2.5 text-xs" onClick={clearFilters}>
+                  <X size={13} /> Clear
+                </Button>
+              </>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* MOBILE (< lg): ALL filter fields live in this bottom sheet behind
+          the Filters icon — region, country, camp, trade, payment method,
+          status, with a live result count and Clear all */}
+      <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
+        <SheetContent side="bottom" className="max-h-[85dvh] gap-0 overflow-y-auto rounded-t-2xl p-0">
+          <SheetHeader className="border-b border-border/60 px-4 py-3">
+            <SheetTitle className="text-sm">Filters</SheetTitle>
+            <SheetDescription className="text-xs">
+              {filteredEmployees.length} of {employees.length} employees shown — changes apply live
+            </SheetDescription>
+          </SheetHeader>
+          <div className="grid gap-2.5 px-4 py-4 [&_[data-slot=select-trigger]]:w-full">
+            {renderFilterSelects()}
+          </div>
+          <div className="sticky bottom-0 flex gap-2 border-t border-border/60 bg-background/95 px-4 py-3 backdrop-blur">
+            {filtersActive && (
+              <Button variant="outline" className="h-10 flex-1 text-xs" onClick={clearFilters}>
+                <X size={14} /> Clear all
+              </Button>
+            )}
+            <Button className="brand-gradient h-10 flex-1 font-semibold text-white" onClick={() => setFiltersOpen(false)}>
+              Show {filteredEmployees.length} employee{filteredEmployees.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
 
       {loading ? (
         <div className="space-y-4">

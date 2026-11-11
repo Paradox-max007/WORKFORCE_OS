@@ -1,12 +1,13 @@
 'use client';
 
 // ============================================================================
-// PULSE Workforce OS — Trade Management
+// PULSE Workforce OS — Trade / Deduction Management
 // ----------------------------------------------------------------------------
-// Trades (Electrician, Plumber, …) with EFFECTIVE-DATED hourly rates per
-// salary role (standard / team leader / supervisor) × experience tier
-// (below-threshold / qualified).
+// Two tabs:
 //
+//   TRADES — trades (Electrician, Plumber, …) with EFFECTIVE-DATED hourly
+//   rates per salary role (standard / team leader / supervisor) × experience
+//   tier (below-threshold / qualified).
 //   • Editing a rate closes the previous period and starts a new one from the
 //     effective date (default today, future allowed) — historical payroll is
 //     never silently re-priced. Backdating is super-admin only.
@@ -14,11 +15,19 @@
 //     new employee selection.
 //   • A new trade can be activated only once all SIX rate cells are configured;
 //     incomplete trades are saved as inactive drafts and never price salary.
+//
+//   DEDUCTIONS — Deduction Management: the ABSENT DEDUCTION rule used by the
+//   payroll engine is configurable here — how many absences per payroll month
+//   are FREE and how much (AED) every absence after those costs. Stored in the
+//   deduction_settings table (20261111c); read by payroll_upsert_employee when
+//   a payroll is generated. DRAFT periods recalculate on their next view;
+//   FINALIZED periods stay locked as paid.
 // ============================================================================
 
 import { motion } from 'framer-motion';
 import {
-  BadgeCheck, BadgeX, History, Loader2, Pencil, Plus, Power, PowerOff, Wrench,
+  BadgeCheck, BadgeX, History, Loader2, Pencil, Percent, Plus, Power, PowerOff,
+  Save, Wrench,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -31,12 +40,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { dataApi } from '@/lib/data';
-import { fmtDate } from '@/lib/format';
+import { fmtDate, fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  EXPERIENCE_TIERS, SALARY_ROLES, type ExperienceTier, type SalaryRole,
-  type Trade, type TradeRate, type TradeRateInput,
+  EXPERIENCE_TIERS, SALARY_ROLES, type DeductionSettings, type ExperienceTier,
+  type SalaryRole, type Trade, type TradeRate, type TradeRateInput,
 } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -512,6 +522,220 @@ function TradeCard({ trade, index, onEditRates, onEditDetails }: {
 }
 
 // ---------------------------------------------------------------------------
+// Deduction Management (the Deductions tab) — the absent deduction rule
+// ---------------------------------------------------------------------------
+function DeductionSettingsCard() {
+  const settingsVersion = useRealtimeVersion(['deduction_settings']);
+  const [settings, setSettings] = useState<DeductionSettings | null>(null);
+  const [freeDays, setFreeDays] = useState('');
+  const [amount, setAmount] = useState('');
+  const [tryDays, setTryDays] = useState('5');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.getDeductionSettings()
+      .then((s) => {
+        if (cancelled) return;
+        setSettings(s);
+        setFreeDays(String(s.absent_free_days));
+        setAmount(String(s.absent_deduction_amount));
+      })
+      .catch((err) => {
+        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load deduction settings');
+      });
+    return () => { cancelled = true; };
+  }, [settingsVersion]);
+
+  const parsedFree = Number(freeDays);
+  const parsedAmount = Number(amount);
+  const freeValid = freeDays.trim() !== '' && Number.isInteger(parsedFree) && parsedFree >= 0 && parsedFree <= 31;
+  const amountValid = amount.trim() !== '' && Number.isFinite(parsedAmount) && parsedAmount >= 0;
+  const dirty = settings !== null
+    && (String(settings.absent_free_days) !== freeDays.trim()
+      || String(settings.absent_deduction_amount) !== amount.trim());
+
+  const tryN = Math.max(0, Math.floor(Number(tryDays) || 0));
+  const tryChargeable = Math.max(tryN - (freeValid ? parsedFree : 0), 0);
+  const tryDeduction = round2(tryChargeable * (amountValid ? parsedAmount : 0));
+
+  const submit = async (): Promise<void> => {
+    if (!freeValid) { toast.error('Free absent days must be a whole number between 0 and 31'); return; }
+    if (!amountValid) { toast.error('Deduction per absent day must be 0 or more'); return; }
+    setSaving(true);
+    try {
+      const next = await dataApi.updateDeductionSettings({
+        absent_free_days: parsedFree,
+        absent_deduction_amount: parsedAmount,
+      });
+      setSettings(next);
+      setFreeDays(String(next.absent_free_days));
+      setAmount(String(next.absent_deduction_amount));
+      toast.success('Deduction rule saved', {
+        description: `First ${next.absent_free_days} absence${next.absent_free_days === 1 ? '' : 's'} free, `
+          + `AED ${next.absent_deduction_amount} per absence after those. Payroll picks it up on the next generation.`,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save the deduction rule');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (settings === null) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-64 rounded-xl" />
+        <Skeleton className="h-40 rounded-xl" />
+      </div>
+    );
+  }
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, ease: EASE }}
+      className="space-y-4"
+    >
+      {/* the rule editor */}
+      <div className="card-glow rounded-xl border bg-card p-5">
+        <h3 className="flex items-center gap-2 text-base font-semibold">
+          <Percent size={15} className="text-brand" /> Absent Deduction Rule
+        </h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Applied when a payroll is generated: absences are the attendance days marked{' '}
+          <span className="font-mono font-semibold text-red-500">A</span> in the payroll month.
+          The deduction shows in the Payroll page&apos;s Deduction column and on the employee&apos;s
+          attendance calendar.
+        </p>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="ded-free-days">Free absent days per month</Label>
+            <Input
+              id="ded-free-days"
+              type="number"
+              min={0}
+              max={31}
+              step={1}
+              inputMode="numeric"
+              className="h-11 bg-card font-mono"
+              value={freeDays}
+              onChange={(e) => setFreeDays(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              The first {freeValid ? parsedFree : '…'} absence{(freeValid ? parsedFree : 2) === 1 ? '' : 's'} of every
+              payroll month cost nothing.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="ded-amount">Deduction per absent day (AED)</Label>
+            <Input
+              id="ded-amount"
+              type="number"
+              min={0}
+              step="0.5"
+              inputMode="decimal"
+              className="h-11 bg-card font-mono"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Every absence after the free ones deducts AED {amountValid ? parsedAmount : '…'} from the
+              employee&apos;s net salary.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button
+            onClick={submit}
+            disabled={saving || !freeValid || !amountValid || !dirty}
+            className="brand-gradient font-semibold text-white"
+          >
+            {saving ? <Loader2 size={15} className="mr-1 animate-spin" /> : <Save size={15} className="mr-1" />}
+            Save Rule
+          </Button>
+          {dirty && <span className="text-xs text-amber-500">Unsaved changes</span>}
+          {settings.updated_at && (
+            <span className="ml-auto text-xs text-muted-foreground">
+              Last changed{settings.updated_by_name ? ` by ${settings.updated_by_name}` : ''}
+              {' '}{fmtDateTime(settings.updated_at)}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* live rule preview */}
+      <div className="card-glow rounded-xl border bg-card p-5">
+        <h4 className="text-sm font-semibold">Rule preview</h4>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Try it: how much is deducted when an employee is absent a given number of days in one payroll month.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Label htmlFor="ded-try" className="text-xs">Absent days</Label>
+            <Input
+              id="ded-try"
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              className="h-9 w-24 bg-card font-mono"
+              value={tryDays}
+              onChange={(e) => setTryDays(e.target.value)}
+            />
+          </div>
+          <p className="text-sm">
+            <span className="font-mono text-muted-foreground">
+              ({tryN} − {freeValid ? parsedFree : '…'}) free-allowance
+            </span>
+            {' '}
+            <span className="font-mono font-semibold text-red-500">
+              = AED {tryDeduction.toFixed(2)}
+            </span>
+          </p>
+        </div>
+        <div className="mt-4 overflow-hidden rounded-lg border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-muted/40">
+                <th className="px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Absent days in the month</th>
+                <th className="px-3 py-1.5 text-right text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Chargeable</th>
+                <th className="px-3 py-1.5 text-right text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Absent deduction</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[0, 1, 2, 3, 5, 8].map((n) => {
+                const chargeable = Math.max(n - (freeValid ? parsedFree : 0), 0);
+                const value = round2(chargeable * (amountValid ? parsedAmount : 0));
+                return (
+                  <tr key={n} className={cn('border-b last:border-0', n === tryN && 'bg-brand/5')}>
+                    <td className="px-3 py-1.5 font-mono text-xs">{n}</td>
+                    <td className="px-3 py-1.5 text-right font-mono text-xs">{chargeable}</td>
+                    <td className={cn('px-3 py-1.5 text-right font-mono text-xs font-semibold', value > 0 && 'text-red-500')}>
+                      AED {value.toFixed(2)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-3 text-xs text-muted-foreground">
+          Saving applies to the next payroll generation. DRAFT periods recalculate automatically the
+          next time they are viewed; FINALIZED periods stay exactly as they were paid.
+        </p>
+      </div>
+    </motion.section>
+  );
+}
+
+/** round to 2 decimals (same as the payroll engine) */
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export function TradePage() {
@@ -546,43 +770,62 @@ export function TradePage() {
     <div className="mx-auto max-w-6xl space-y-4">
       <SectionTitle
         icon={<Wrench size={16} />}
-        title="Trade Management"
-        sub="Trades & effective-dated hourly rates — 3 salary roles × 2 experience tiers each"
+        title="Trade / Deduction Management"
+        sub="Trades & effective-dated hourly rates — plus the configurable absent deduction rule"
       />
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <label className="inline-flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
-          <Switch checked={showInactive} onCheckedChange={setShowInactive} aria-label="Show inactive trades" />
-          Show inactive trades
-        </label>
-        <Button onClick={() => setCreateOpen(true)} className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]">
-          <Plus size={16} className="mr-1.5" /> Add Trade
-        </Button>
-      </div>
+      <Tabs defaultValue="trades" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="trades">
+            <Wrench size={14} className="mr-1.5" /> Trades
+          </TabsTrigger>
+          <TabsTrigger value="deductions">
+            <Percent size={14} className="mr-1.5" /> Deductions
+          </TabsTrigger>
+        </TabsList>
 
-      {trades === null ? (
-        <div className="grid gap-4 md:grid-cols-2">
-          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-64 rounded-xl" />)}
-        </div>
-      ) : visible.length === 0 ? (
-        <EmptyState
-          icon={<Wrench size={22} />}
-          title={showInactive ? 'No trades yet' : 'No active trades'}
-          description="Create a trade with its six rate cells to start pricing salary."
-        />
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {visible.map((t, i) => (
-            <TradeCard
-              key={t.id}
-              trade={t}
-              index={i}
-              onEditRates={() => setRatesTarget(t)}
-              onEditDetails={() => setEditTarget(t)}
+        {/* ---- TRADES tab ------------------------------------------------- */}
+        <TabsContent value="trades" className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="inline-flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
+              <Switch checked={showInactive} onCheckedChange={setShowInactive} aria-label="Show inactive trades" />
+              Show inactive trades
+            </label>
+            <Button onClick={() => setCreateOpen(true)} className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]">
+              <Plus size={16} className="mr-1.5" /> Add Trade
+            </Button>
+          </div>
+
+          {trades === null ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-64 rounded-xl" />)}
+            </div>
+          ) : visible.length === 0 ? (
+            <EmptyState
+              icon={<Wrench size={22} />}
+              title={showInactive ? 'No trades yet' : 'No active trades'}
+              description="Create a trade with its six rate cells to start pricing salary."
             />
-          ))}
-        </div>
-      )}
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              {visible.map((t, i) => (
+                <TradeCard
+                  key={t.id}
+                  trade={t}
+                  index={i}
+                  onEditRates={() => setRatesTarget(t)}
+                  onEditDetails={() => setEditTarget(t)}
+                />
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* ---- DEDUCTIONS tab (Deduction Management) ---------------------- */}
+        <TabsContent value="deductions">
+          <DeductionSettingsCard />
+        </TabsContent>
+      </Tabs>
 
       <CreateTradeDialog open={createOpen} onOpenChange={setCreateOpen} />
       <EditRatesDialog

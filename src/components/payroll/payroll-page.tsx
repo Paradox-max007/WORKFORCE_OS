@@ -42,8 +42,9 @@
 //     FILTERED rows — there the columns can be toggled (all on by default)
 //     before downloading the .xlsx (lib/export-payroll-xlsx.ts)
 //   • column order: AMOUNT comes BEFORE ADVANCE (page table AND the Excel)
-//   • ABSENT DEDUCTION — more than 2 absences in the month cost AED 25 each
-//     from the 3rd absence onwards; it is computed when the payroll is
+//   • ABSENT DEDUCTION — the first N absences of the month are free, every
+//     absence after those costs AED X (N and X CONFIGURABLE in Trade/Ded
+//     Management → Deductions); it is computed when the payroll is
 //     generated (separate from the manual deduction) and shows inside the
 //     Deduction column (red “A” chip). Clicking a deduction value opens the
 //     dedicated ATTENDANCE CALENDAR page — one calendar per site, with the
@@ -90,7 +91,8 @@ import { fmtDate, fmtDateTime, fmtTimeAgo, initials } from '@/lib/format';
 import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
 import { cn } from '@/lib/utils';
 import {
-  type CardType, type EmployeeNote, type PayrollEmployeeVM,
+  type CardType, DEFAULT_DEDUCTION_SETTINGS, type DeductionSettings,
+  type EmployeeNote, type PayrollEmployeeVM,
   type SalarySheetReport, type Trade,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
@@ -325,7 +327,7 @@ function CalculationPanel({ e, year, month }: {
 
       {e.unrated_hours > 0 && (
         <p className="flex items-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 p-2.5 text-xs text-amber-600 dark:text-amber-400">
-          <TriangleAlert size={13} /> {fmtHrs(e.unrated_hours)} h have a trade but no effective rate — configure the rate in Trade Management.
+          <TriangleAlert size={13} /> {fmtHrs(e.unrated_hours)} h have a trade but no effective rate — configure the rate in Trade/Ded Management.
         </p>
       )}
 
@@ -779,6 +781,11 @@ export function PayrollPage() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
 
+  // effective absent-deduction rule (Trade Management → Deductions) — used
+  // for the column tooltips / help texts; the amounts themselves come from
+  // each settlement's stored absent_deduction
+  const [dedSettings, setDedSettings] = useState<DeductionSettings>(DEFAULT_DEDUCTION_SETTINGS);
+
   const [payTarget, setPayTarget] = useState<PayrollEmployeeVM | null>(null);
   const [unpayTarget, setUnpayTarget] = useState<PayrollEmployeeVM | null>(null);
   const [finalizeOpen, setFinalizeOpen] = useState(false);
@@ -855,6 +862,16 @@ export function PayrollPage() {
   };
 
   useEffect(load, [year, month, realtimeVersion]);
+
+  // deduction rule texts — refreshed with the same realtime bump a settings
+  // save triggers (payroll_period / payroll_employee)
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.getDeductionSettings()
+      .then((s) => { if (!cancelled) setDedSettings(s); })
+      .catch(() => { /* keep the previous / default rule texts */ });
+    return () => { cancelled = true; };
+  }, [realtimeVersion]);
 
   // trades for the edit-mode dropdown
   useEffect(() => {
@@ -1456,7 +1473,7 @@ export function PayrollPage() {
                     <TableHead className="min-w-32">Payment Method</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
-                    <TableHead className="text-right" title="Manual deduction + automatic absent deduction (AED 25 per absence from the 3rd onwards) — click a value to open the attendance calendar">Deduction</TableHead>
+                    <TableHead className="text-right" title={`Manual deduction + automatic absent deduction (AED ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — click a value to open the attendance calendar`}>Deduction</TableHead>
                     <TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead>
                   </TableRow>
@@ -1603,7 +1620,7 @@ export function PayrollPage() {
                               {(e.absent_deduction ?? 0) > 0 && (
                                 <span
                                   className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
-                                  title={`Automatic absent deduction — AED ${fmtMoney(e.absent_deduction)} (AED 25 × chargeable absences, from the 3rd onwards)`}
+                                  title={`Automatic absent deduction — AED ${fmtMoney(e.absent_deduction)} (AED ${dedSettings.absent_deduction_amount} × chargeable absences, beyond the first ${dedSettings.absent_free_days})`}
                                 >
                                   A
                                 </span>
@@ -1689,7 +1706,7 @@ export function PayrollPage() {
             </div>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: AED 25 per absence from the 3rd onwards). Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: AED {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management). Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 

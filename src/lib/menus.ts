@@ -69,7 +69,7 @@ export const MENUS = [
   { id: 'working_hours', label: 'Working Hours', hint: 'Total hours & monthly history per employee', icon: Clock, managed: true, defaultOn: false },
   { id: 'salary_sheet', label: 'Salary Sheet', hint: 'Monthly payroll — sitewise salary, advances & payments', icon: Wallet, managed: true, defaultOn: false, group: 'salary_details' },
   { id: 'payroll', label: 'Payroll', hint: 'One row per employee — consolidated hours & salary', icon: Banknote, managed: true, defaultOn: false, group: 'salary_details' },
-  { id: 'trade_management', label: 'Trade Management', hint: 'Trades & effective-dated hourly rates', icon: Wrench, managed: true, defaultOn: false, group: 'salary_details' },
+  { id: 'trade_management', label: 'Trade/Ded Management', hint: 'Trades, hourly rates & the absent deduction rule', icon: Wrench, managed: true, defaultOn: false, group: 'salary_details' },
   { id: 'uniform_registry', label: 'Uniform Registry', hint: 'Uniform tokens & renewals', icon: Shirt, managed: true, defaultOn: true },
   { id: 'leave_requests', label: 'Leave Requests', hint: 'Leave applications & review', icon: FileWarning, managed: true, defaultOn: false },
   { id: 'cancellation_requests', label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban, managed: true, defaultOn: false },

@@ -12,6 +12,8 @@ import {
   type CardType,
   type Company,
   type CancellationRequestVM,
+  type DeductionSettings,
+  type DeductionSettingsInput,
   type Employee,
   type EmployeeInput,
   type EmployeeNote,
@@ -1616,6 +1618,43 @@ export const demoApi = {
   // ---- trades & salary ---------------------------------------------------------
   async listTrades(): Promise<(Trade & { current_rates: TradeRate[] })[]> {
     return tradesWithRates(db);
+  },
+
+  // ---- absent deduction settings (Trade Management → Deductions tab) -----------
+  async getDeductionSettings(): Promise<DeductionSettings> {
+    return { ...db.deductionSettings };
+  },
+
+  async updateDeductionSettings(input: DeductionSettingsInput): Promise<DeductionSettings> {
+    const freeDays = Math.round(input.absent_free_days);
+    const amount = round2(input.absent_deduction_amount);
+    if (!Number.isFinite(freeDays) || freeDays < 0 || freeDays > 31) {
+      throw new Error('Free absent days must be a whole number between 0 and 31');
+    }
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new Error('Deduction per absent day must be 0 or more');
+    }
+    const me = currentProfile();
+    const before = db.deductionSettings;
+    db.deductionSettings = {
+      absent_free_days: freeDays,
+      absent_deduction_amount: amount,
+      updated_at: nowISO(),
+      updated_by_name: me?.name ?? null,
+    };
+    if (before.absent_free_days !== freeDays || before.absent_deduction_amount !== amount) {
+      db.payrollAudit.push({
+        id: uid(), period_id: null, trade_id: null, action: 'deduction_settings',
+        actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+        details: `Absent deduction rule: first ${freeDays} absence${freeDays === 1 ? '' : 's'} free, `
+          + `AED ${amount} per absence after that (was ${before.absent_free_days} free / AED ${before.absent_deduction_amount})`,
+        created_at: nowISO(),
+      });
+    }
+    // DRAFT periods recalculate the next time the sheet is viewed — same
+    // realtime tables a rate change bumps
+    saveAndEmit(['deduction_settings', 'payroll_period', 'payroll_employee']);
+    return { ...db.deductionSettings };
   },
 
   async getTradeRateHistory(tradeId: string): Promise<TradeRate[]> {

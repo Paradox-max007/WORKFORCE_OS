@@ -182,7 +182,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
           ))}
           {employee.unrated_hours > 0 && (
             <p className="flex items-center gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/10 p-2.5 text-xs text-amber-600 dark:text-amber-400">
-              <TriangleAlert size={13} /> {fmtHrs(employee.unrated_hours)} h have a trade but no effective rate — configure the rate in Trade Management.
+              <TriangleAlert size={13} /> {fmtHrs(employee.unrated_hours)} h have a trade but no effective rate — configure the rate in Trade/Ded Management.
             </p>
           )}
           {groups.length > 0 && (

@@ -253,6 +253,45 @@ async function main(): Promise<void> {
   check('hours without trade → unassigned (no lines, no gross)',
     eq(calc8.total_hours, 6) && eq(calc8.unassigned_hours, 6) && calc8.lines.length === 0 && eq(calc8.gross_salary, 0));
 
+  // -------------------------------------------------------------------------
+  console.log('\u2014 Absent deduction: configurable rule (Deduction Management)');
+  reset();
+  db.sites = [site('s1', 'Site A')];
+  db.trades = [TR];
+  db.tradeRates = ELECTRICIAN_RATES(TR.id);
+  db.employees = [emp('e10', 'Absentee', 's1', 0, '2026-01-01', TR.id)];
+  // 5 absences + 1 worked day in October 2026
+  db.attendance = [
+    att('e10', '2026-10-01', null), att('e10', '2026-10-02', null),
+    att('e10', '2026-10-05', null), att('e10', '2026-10-06', null),
+    att('e10', '2026-10-07', null), att('e10', '2026-10-08', 8),
+  ];
+
+  // default rule (no settings row yet) — first 2 free, AED 25 each after
+  delete (db as { deductionSettings?: unknown }).deductionSettings;
+  let a = calcEmployeePayroll(db, 'e10', 2026, 10);
+  check('default rule: 5 absences \u2192 (5\u22122)\u00d725 = 75', eq(a.absent_deduction, 75) && a.absent_count === 5);
+
+  // configured rule: 3 free days, AED 10 each
+  db.deductionSettings = { absent_free_days: 3, absent_deduction_amount: 10, updated_at: null, updated_by_name: null };
+  a = calcEmployeePayroll(db, 'e10', 2026, 10);
+  check('configured 3 free / AED 10: 5 absences \u2192 (5\u22123)\u00d710 = 20', eq(a.absent_deduction, 20));
+
+  // configured rule: 0 free days, AED 5 each — every absence chargeable
+  db.deductionSettings = { absent_free_days: 0, absent_deduction_amount: 5, updated_at: null, updated_by_name: null };
+  a = calcEmployeePayroll(db, 'e10', 2026, 10);
+  check('configured 0 free / AED 5: 5 absences \u2192 5\u00d75 = 25', eq(a.absent_deduction, 25));
+
+  // generous rule: more free days than absences \u2192 no deduction
+  db.deductionSettings = { absent_free_days: 6, absent_deduction_amount: 50, updated_at: null, updated_by_name: null };
+  a = calcEmployeePayroll(db, 'e10', 2026, 10);
+  check('6 free days vs 5 absences \u2192 0', eq(a.absent_deduction, 0));
+
+  // restore the default rule for any later sections
+  db.deductionSettings = {
+    absent_free_days: 2, absent_deduction_amount: 25, updated_at: null, updated_by_name: null,
+  };
+
   // Employee Gross = Σ Salary Lines (spec \u00a711 core invariant) across scenarios
   const inv1 = calc1.lines.reduce((n, l) => n + l.gross_amount, 0);
   const inv2 = calc4.lines.reduce((n, l) => n + l.gross_amount, 0);

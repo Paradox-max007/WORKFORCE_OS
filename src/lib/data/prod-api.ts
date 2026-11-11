@@ -41,6 +41,8 @@ import {
   type SharedSheetSubmitMeta,
   type SharedSheetSubmitResult,
   type AttendanceShareLink,
+  type DeductionSettings,
+  type DeductionSettingsInput,
   type Site,
   type SiteTransfer,
   type SiteWithCount,
@@ -53,6 +55,7 @@ import {
   type UniformEntryUpdate,
   type WarningVM,
 } from '@/lib/types';
+import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE } from '@/lib/types';
 import { defaultPermissionMap } from '@/lib/menus';
 
 const sb = () => {
@@ -971,6 +974,34 @@ export const prodApi = {
       p_effective_from: effectiveFrom,
     });
     assertOk(error);
+  },
+
+  // ---- absent deduction settings (Trade Management → Deductions tab) ----------
+  async getDeductionSettings(): Promise<DeductionSettings> {
+    const { data, error } = await sb().rpc('get_deduction_settings');
+    assertOk(error);
+    const row = (data ?? {}) as Record<string, unknown>;
+    return {
+      absent_free_days: Number(row.absent_free_days ?? ABSENT_DEDUCTION_FREE_DAYS),
+      absent_deduction_amount: Number(row.absent_deduction_amount ?? ABSENT_DEDUCTION_RATE),
+      updated_at: (row.updated_at as string | null) ?? null,
+      updated_by_name: (row.updated_by_name as string | null) ?? null,
+    };
+  },
+
+  async updateDeductionSettings(input: DeductionSettingsInput): Promise<DeductionSettings> {
+    const { data, error } = await sb().rpc('update_deduction_settings', {
+      p_free_days: input.absent_free_days,
+      p_amount: input.absent_deduction_amount,
+    });
+    assertOk(error);
+    const row = (data ?? {}) as Record<string, unknown>;
+    return {
+      absent_free_days: Number(row.absent_free_days ?? input.absent_free_days),
+      absent_deduction_amount: Number(row.absent_deduction_amount ?? input.absent_deduction_amount),
+      updated_at: (row.updated_at as string | null) ?? null,
+      updated_by_name: (row.updated_by_name as string | null) ?? null,
+    };
   },
 
   async getEmployeeSalaryEligibility(employeeId: string, asOfDate?: string): Promise<SalaryEligibility> {

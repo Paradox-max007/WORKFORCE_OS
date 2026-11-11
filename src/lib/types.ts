@@ -432,12 +432,39 @@ export const SALARY_THRESHOLD_HOURS = 1000;
 export const SALARY_THRESHOLD_MONTHS = 6;
 
 /** ABSENT DEDUCTION RULE — the first N absent days of a payroll month are
- *  free; every absent day from the (N+1)th onwards costs ABSENT_DEDUCTION_RATE
- *  (AED). The deduction is computed when the payroll is generated and stored
- *  on the settlement as `absent_deduction` (separate from the manually edited
- *  `deduction`). Mirrors the 20261111b SQL migration exactly. */
+ *  free; every absent day from the (N+1)th onwards costs
+ *  `absent_deduction_amount` (AED). N and the amount are CONFIGURABLE in
+ *  Trade Management → Deductions (stored in the deduction_settings table,
+ *  see the 20261111c SQL migration); these constants are only the DEFAULTS
+ *  used when no settings row exists. The deduction is computed when the
+ *  payroll is generated and stored on the settlement as `absent_deduction`
+ *  (separate from the manually edited `deduction`). */
 export const ABSENT_DEDUCTION_FREE_DAYS = 2;
 export const ABSENT_DEDUCTION_RATE = 25;
+
+/** Effective absent-deduction rule (Trade Management → Deductions tab).
+ *  `absent_free_days` = how many absences per payroll month are free;
+ *  `absent_deduction_amount` = AED charged per absence beyond those. */
+export interface DeductionSettings {
+  absent_free_days: number;
+  absent_deduction_amount: number;
+  updated_at: string | null;
+  updated_by_name: string | null;
+}
+
+/** Payload for updating the absent-deduction rule. */
+export interface DeductionSettingsInput {
+  absent_free_days: number;
+  absent_deduction_amount: number;
+}
+
+/** Fallback when no settings row exists yet (fresh DB / RPC failure). */
+export const DEFAULT_DEDUCTION_SETTINGS: DeductionSettings = {
+  absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
+  absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+  updated_at: null,
+  updated_by_name: null,
+};
 
 export interface Trade {
   id: string;
@@ -597,9 +624,10 @@ export interface PayrollEmployeeVM {
   gross_salary: number;
   advance: number;
   deduction: number;
-  /** automatic absent deduction — absences beyond the first 2 days of the
- *  month × AED 25 (0 when the employee was absent at most twice); counted
- *  from attendance records with status 'absent', stored at generation time */
+  /** automatic absent deduction — absences beyond the configured free days
+ *  of the month × the configured amount (Trade Management → Deductions);
+ *  counted from attendance records with status 'absent', stored at
+ *  generation time */
   absent_deduction: number;
   net_salary: number;
   payment_status: PaymentStatus;
@@ -719,6 +747,7 @@ export type RealtimeTable =
   | 'employee_salary_assignment'
   | 'payroll_period'
   | 'payroll_employee'
+  | 'deduction_settings'
   | 'attendance_share_link';
 
 export interface MonthlySummaryRow {

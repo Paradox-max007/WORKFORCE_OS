@@ -42,7 +42,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   payroll: 'Payroll',
   payroll_export: 'Payroll Excel Preview',
   attendance_calendar: 'Attendance Record',
-  trade_management: 'Trade Management',
+  trade_management: 'Trade / Deduction Management',
   uniform_registry: 'Uniform Registry',
   leave_requests: 'Leave Requests',
   cancellation_requests: 'Cancellation Requests',

@@ -9,9 +9,10 @@
 //   • header — employee NAME + CODE on top, photo, the payroll month and the
 //     TOTAL HOURS, plus the full settlement breakdown (gross / advance /
 //     manual deduction / ABSENT deduction / net)
-//   • ABSENT DEDUCTION — the first 2 absences of the month are free; every
-//     absence from the 3rd onwards costs AED 25 (ABSENT_DEDUCTION_RATE).
-//     The calendar marks each chargeable absent day with a −25 chip
+//   • ABSENT DEDUCTION — the first N absences of the month are free, every
+//     absence after those costs AED X (N and X CONFIGURABLE in Trade/Ded
+//     Management → Deductions — fetched live via getDeductionSettings).
+//     The calendar marks each chargeable absent day with a −X chip
 //   • ONE CALENDAR PER SITE — an employee who worked at 2 sites in the month
 //     gets 2 calendars. Days worked at THAT site are green; days worked at
 //     another site are muted (the tooltip names the site); absences are red
@@ -29,7 +30,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { dataApi } from '@/lib/data';
 import {
-  ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE, type Attendance,
+  DEFAULT_DEDUCTION_SETTINGS, type Attendance, type DeductionSettings,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
@@ -51,13 +52,24 @@ interface DayCell {
   day: number | null;           // null → leading blank cell
   record?: Attendance;          // attendance row of that date
   siteName?: string | null;     // site the day's priced line belongs to
-  chargeable?: boolean;         // absent AND beyond the 2 free days
+  chargeable?: boolean;         // absent AND beyond the free allowance
 }
 
 export function AttendanceCalendarPage() {
   const payload = useAppStore((s) => s.attendanceCalendar);
   const navigateTo = useAppStore((s) => s.navigateTo);
   const [records, setRecords] = useState<Attendance[] | null>(null);
+  // effective absent-deduction rule (Trade Management → Deductions); the
+  // fallback keeps the page working when the RPC is unavailable
+  const [rule, setRule] = useState<DeductionSettings>(DEFAULT_DEDUCTION_SETTINGS);
+
+  useEffect(() => {
+    let alive = true;
+    dataApi.getDeductionSettings()
+      .then((s) => { if (alive) setRule(s); })
+      .catch(() => { /* keep the default rule */ });
+    return () => { alive = false; };
+  }, []);
 
   const { employee, year, month } = payload ?? {};
   const monthKey = `${year}-${String(month).padStart(2, '0')}`;
@@ -96,13 +108,14 @@ export function AttendanceCalendarPage() {
       : [],
     [records],
   );
-  // the first 2 absences are free; every absence from the 3rd onwards costs 25
+  // the first `absent_free_days` absences are free; every absence after
+  // those costs `absent_deduction_amount` (Deduction Management)
   const chargeableDates = useMemo(
-    () => new Set(absentDates.slice(ABSENT_DEDUCTION_FREE_DAYS)),
-    [absentDates],
+    () => new Set(absentDates.slice(rule.absent_free_days)),
+    [absentDates, rule.absent_free_days],
   );
   const computedAbsentDeduction = round2(
-    Math.max(absentDates.length - ABSENT_DEDUCTION_FREE_DAYS, 0) * ABSENT_DEDUCTION_RATE,
+    Math.max(absentDates.length - rule.absent_free_days, 0) * rule.absent_deduction_amount,
   );
 
   // ---- the month grid (Sunday-first weeks) ----------------------------------
@@ -208,9 +221,9 @@ export function AttendanceCalendarPage() {
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Chargeable absences</p>
             <p className="text-lg font-bold tabular-nums">
-              {Math.max(absentDates.length - ABSENT_DEDUCTION_FREE_DAYS, 0)}
+              {Math.max(absentDates.length - rule.absent_free_days, 0)}
               <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                (first {ABSENT_DEDUCTION_FREE_DAYS} free · AED {ABSENT_DEDUCTION_RATE} each from the {ordinal(ABSENT_DEDUCTION_FREE_DAYS + 1)})
+                (first {rule.absent_free_days} free · AED {rule.absent_deduction_amount} each from the {ordinal(rule.absent_free_days + 1)})
               </span>
             </p>
           </div>
@@ -239,6 +252,7 @@ export function AttendanceCalendarPage() {
             siteName={site.name}
             siteHours={site.hours}
             weeks={weeks}
+            dedAmount={rule.absent_deduction_amount}
           />
         ))}
       </div>
@@ -248,7 +262,7 @@ export function AttendanceCalendarPage() {
         <Legend swatch="bg-emerald-500/15 border-emerald-500/40" label="Worked at this site (hours)" />
         <Legend swatch="bg-muted/50 border-border border-dashed" label="Worked at another site" />
         <Legend swatch="bg-red-500/15 border-red-500/40" label="Absent ('A')" />
-        <Legend swatch="bg-red-500/25 border-red-500/50" label={`Chargeable (−AED ${ABSENT_DEDUCTION_RATE})`} />
+        <Legend swatch="bg-red-500/25 border-red-500/50" label={`Chargeable (−AED ${rule.absent_deduction_amount})`} />
         <Legend swatch="bg-amber-500/15 border-amber-500/40" label="Marker (present, no tracked hours)" />
         <Legend swatch="bg-transparent border-border/40" label="Not marked" />
       </p>
@@ -290,10 +304,11 @@ function Legend({ swatch, label }: { swatch: string; label: string }) {
 }
 
 /** One site's calendar card — a full month grid for the employee */
-function SiteCalendar({ siteName, siteHours, weeks }: {
+function SiteCalendar({ siteName, siteHours, weeks, dedAmount }: {
   siteName: string;
   siteHours: number;
   weeks: DayCell[][];
+  dedAmount: number;
 }) {
   return (
     <section className="card-glow overflow-hidden rounded-xl border bg-card">
@@ -322,7 +337,7 @@ function SiteCalendar({ siteName, siteHours, weeks }: {
 
         {weeks.map((week, wi) => (
           <div key={wi} className="mb-1.5 grid grid-cols-7 gap-1.5 last:mb-0">
-            {week.map((cell, ci) => <DayCellView key={ci} cell={cell} siteName={siteName} />)}
+            {week.map((cell, ci) => <DayCellView key={ci} cell={cell} siteName={siteName} dedAmount={dedAmount} />)}
           </div>
         ))}
       </div>
@@ -331,7 +346,7 @@ function SiteCalendar({ siteName, siteHours, weeks }: {
 }
 
 /** a single day cell — colour + content follow the day's attendance */
-function DayCellView({ cell, siteName }: { cell: DayCell; siteName: string }) {
+function DayCellView({ cell, siteName, dedAmount }: { cell: DayCell; siteName: string; dedAmount: number }) {
   if (cell.day == null) return <div aria-hidden />;
 
   const date = cell.day;
@@ -345,7 +360,7 @@ function DayCellView({ cell, siteName }: { cell: DayCell; siteName: string }) {
 
   return (
     <div
-      title={cellTitle({ date, rec, absent, hours, otherSite, cell, siteName, marker })}
+      title={cellTitle({ date, rec, absent, hours, otherSite, cell, siteName, marker, dedAmount })}
       className={cn(
         'flex min-h-14 flex-col items-center justify-center gap-0.5 rounded-lg border p-1 text-center transition-colors',
         absent && 'border-red-500/40 bg-red-500/10',
@@ -368,7 +383,7 @@ function DayCellView({ cell, siteName }: { cell: DayCell; siteName: string }) {
           <span className="text-sm font-bold text-red-500">A</span>
           {cell.chargeable && (
             <span className="rounded bg-red-500 px-1 text-[9px] font-bold text-white">
-              −{ABSENT_DEDUCTION_RATE}
+              −{dedAmount}
             </span>
           )}
         </p>
@@ -391,13 +406,14 @@ function DayCellView({ cell, siteName }: { cell: DayCell; siteName: string }) {
 }
 
 /** tooltip text of a day cell */
-function cellTitle({ date, rec, absent, hours, otherSite, cell, siteName, marker }: {
+function cellTitle({ date, rec, absent, hours, otherSite, cell, siteName, marker, dedAmount }: {
   date: number; rec?: Attendance; absent: boolean; hours: number | null;
   otherSite: boolean; cell: DayCell; siteName: string; marker: string | null;
+  dedAmount: number;
 }): string {
   const d = String(date).padStart(2, '0');
   if (absent) {
-    return `${d} — Absent${cell.chargeable ? ` (chargeable −AED ${ABSENT_DEDUCTION_RATE})` : ' (first absences are free)'}`;
+    return `${d} — Absent${cell.chargeable ? ` (chargeable −AED ${dedAmount})` : ' (free allowance — first absences cost nothing)'}`;
   }
   if (hours != null) {
     if (otherSite) return `${d} — ${fmtHrs(hours)} h worked at ${cell.siteName} (shown muted in the ${siteName} calendar)`;

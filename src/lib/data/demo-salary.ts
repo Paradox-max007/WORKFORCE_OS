@@ -221,7 +221,8 @@ export interface PayrollCalc {
   unrated_sites: Map<string, number>;
   /** absent days of the month (attendance status 'absent', not hidden) */
   absent_count: number;
-  /** absences beyond the first 2 days × AED 25 (0 when ≤ 2 absences) */
+  /** absences beyond the configured free days × the configured amount
+   *  (0 when absent at most `absent_free_days` times) */
   absent_deduction: number;
   gross_salary: number;
   lines: PayrollSalaryLineVM[];
@@ -340,14 +341,21 @@ export const calcEmployeePayroll = (
   if (closingLifetime === 0) closingLifetime = openingLifetime;
 
   // ABSENT DEDUCTION — attendance records marked 'A' (status 'absent') within
-  // the payroll month. The first 2 absences are free; every absence from the
-  // 3rd onwards costs AED 25 (mirrors the 20261111b SQL migration).
+  // the payroll month. The first `absent_free_days` absences are free; every
+  // absence after those costs `absent_deduction_amount` (both CONFIGURABLE in
+  // Trade Management → Deductions; defaults 2 / AED 25 — mirrors the
+  // 20261111c SQL migration reading the deduction_settings table).
+  const deductionSettings = database.deductionSettings ?? {
+    absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
+    absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+  };
   const absentCount = database.attendance.filter(
     (a) => a.employee_id === employeeId && !a.is_hidden && a.status === 'absent'
       && a.date >= start && a.date <= end,
   ).length;
   const absentDeduction = round2(
-    Math.max(absentCount - ABSENT_DEDUCTION_FREE_DAYS, 0) * ABSENT_DEDUCTION_RATE,
+    Math.max(absentCount - deductionSettings.absent_free_days, 0)
+      * deductionSettings.absent_deduction_amount,
   );
 
   return {
@@ -391,7 +399,8 @@ export interface DemoPayrollEmployeeRow {
   gross_salary: number;
   advance: number;
   deduction: number;
-  /** automatic absent deduction (absences beyond the first 2 × AED 25) */
+  /** automatic absent deduction (absences beyond the configured free days
+   *  × the configured amount — see deductionSettings) */
   absent_deduction: number;
   net_salary: number;
   payment_status: 'unpaid' | 'paid';

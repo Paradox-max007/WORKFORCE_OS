@@ -1886,6 +1886,25 @@ create table if not exists public.trade_rate_audit_log (
 alter table public.payroll_audit_log   alter column created_at set default clock_timestamp();
 alter table public.trade_rate_audit_log alter column created_at set default clock_timestamp();
 
+-- 20261111c — CONFIGURABLE ABSENT DEDUCTION (Deduction Management singleton)
+-- Rule: absent_deduction = greatest(absent_count - absent_free_days, 0)
+--                             * absent_deduction_amount
+create table if not exists public.deduction_settings (
+  id                      int primary key default 1 check (id = 1),
+  -- how many absences per payroll month are free of charge
+  absent_free_days        int not null default 2 check (absent_free_days between 0 and 31),
+  -- AED charged per absence beyond the free days
+  absent_deduction_amount numeric(12,2) not null default 25 check (absent_deduction_amount >= 0),
+  updated_at              timestamptz,
+  updated_by              uuid
+);
+
+insert into public.deduction_settings (id, absent_free_days, absent_deduction_amount)
+values (1, 2, 25)
+on conflict (id) do nothing;
+
+alter table public.deduction_settings enable row level security;
+
 -- ---------------------------------------------------------------------------
 -- 2. NON-OVERLAP GUARDS (triggers — no extension required)
 -- ---------------------------------------------------------------------------
@@ -7548,7 +7567,10 @@ end; $$;
 -- Rule (mirrored exactly by the demo engine — src/lib/data/demo-salary.ts):
 --   absent_count   = # attendance rows of the month with status 'absent'
 --                    (not hidden) — 'A' is the ONLY absent marker
---   absent_deduct. = greatest(absent_count - 2, 0) * 25
+--   absent_deduct. = greatest(absent_count - absent_free_days, 0)
+--                    * absent_deduction_amount
+--                    (CONFIGURABLE — deduction_settings table, 20261111c;
+--                     defaults 2 free days / AED 25 per absence after those)
 --   net_salary     = gross_salary - advance - deduction - absent_deduction
 --
 -- What changes:
@@ -7598,6 +7620,8 @@ declare
   v_month_end date;
   v_absent_count int := 0;
   v_absent_deduction numeric := 0;
+  v_free_days int := 2;
+  v_ded_amount numeric := 25;
 begin
   if not public.has_menu_permission('salary_sheet')
      and not public.has_menu_permission('payroll') then
@@ -7619,7 +7643,15 @@ begin
   if emp.id is null then return; end if;
 
   -- ABSENT DEDUCTION — 'A' attendance rows of this payroll month; the first
-  -- 2 absences are free, every absence from the 3rd onwards costs AED 25.
+  -- absent_free_days absences are free (Deduction Management — 20261111c),
+  -- every absence after those costs absent_deduction_amount. No settings
+  -- row → the defaults 2 / AED 25.
+  select s.absent_free_days, s.absent_deduction_amount
+  into v_free_days, v_ded_amount
+  from public.deduction_settings s where s.id = 1;
+  if v_free_days is null then
+    v_free_days := 2; v_ded_amount := 25;
+  end if;
   v_month_start := make_date(p_period.year, p_period.month, 1);
   v_month_end   := (v_month_start + interval '1 month' - interval '1 day')::date;
   select count(*) into v_absent_count
@@ -7628,7 +7660,7 @@ begin
     and not a.is_hidden
     and a.status = 'absent'
     and a.date >= v_month_start and a.date <= v_month_end;
-  v_absent_deduction := greatest(v_absent_count - 2, 0) * 25;
+  v_absent_deduction := greatest(v_absent_count - v_free_days, 0) * v_ded_amount;
 
   calc := public.calculate_employee_payroll(p_employee_id, p_period.year, p_period.month);
 
@@ -7754,6 +7786,85 @@ begin
       (v_line->>'gross_amount')::numeric
     );
   end loop;
+end; $$;
+
+-- ---------------------------------------------------------------------------
+-- 20261111c — Deduction Management RPCs (Trade Management → Deductions tab)
+-- ---------------------------------------------------------------------------
+create or replace function public.get_deduction_settings()
+returns jsonb language plpgsql stable
+security definer set search_path = public
+as $$
+declare
+  s public.deduction_settings;
+  v_actor text;
+begin
+  if not public.is_staff() then raise exception 'Access denied'; end if;
+
+  select * into s from public.deduction_settings where id = 1;
+  if s.id is null then
+    -- no row yet (should not happen — seeded by the migration): ship defaults
+    return jsonb_build_object(
+      'absent_free_days', 2,
+      'absent_deduction_amount', 25,
+      'updated_at', null,
+      'updated_by_name', null);
+  end if;
+
+  select coalesce(name, email) into v_actor from public.profiles where id = s.updated_by;
+  return jsonb_build_object(
+    'absent_free_days', s.absent_free_days,
+    'absent_deduction_amount', s.absent_deduction_amount,
+    'updated_at', s.updated_at,
+    'updated_by_name', v_actor);
+end; $$;
+
+create or replace function public.update_deduction_settings(
+  p_free_days int, p_amount numeric
+) returns jsonb language plpgsql volatile
+security definer set search_path = public
+as $$
+declare
+  v_before public.deduction_settings;
+  v_actor text;
+begin
+  if not public.has_menu_permission('trade_management') then
+    raise exception 'Access denied';
+  end if;
+  if p_free_days is null or p_free_days < 0 or p_free_days > 31 then
+    raise exception 'Free absent days must be a whole number between 0 and 31';
+  end if;
+  if p_amount is null or p_amount < 0 then
+    raise exception 'Deduction per absent day must be 0 or more';
+  end if;
+
+  select * into v_before from public.deduction_settings where id = 1;
+  -- the on-conflict insert below guarantees the row exists even on a DB
+  -- where the default insert was skipped
+
+  insert into public.deduction_settings (id, absent_free_days, absent_deduction_amount,
+                                         updated_at, updated_by)
+  values (1, p_free_days, round(p_amount, 2), now(), auth.uid())
+  on conflict (id) do update set
+    absent_free_days        = excluded.absent_free_days,
+    absent_deduction_amount = excluded.absent_deduction_amount,
+    updated_at              = excluded.updated_at,
+    updated_by              = excluded.updated_by;
+
+  select coalesce(name, email) into v_actor from public.profiles where id = auth.uid();
+  insert into public.payroll_audit_log (period_id, action, actor_id, actor_name, details)
+  values (null, 'deduction_settings', auth.uid(), v_actor,
+          'Absent deduction rule: first ' || p_free_days
+          || ' absence' || case when p_free_days = 1 then '' else 's' end
+          || ' free, AED ' || round(p_amount, 2) || ' per absence after that (was '
+          || coalesce(v_before.absent_free_days, 2) || ' free / AED '
+          || coalesce(v_before.absent_deduction_amount, 25) || ')');
+
+  return jsonb_build_object(
+    'absent_free_days', p_free_days,
+    'absent_deduction_amount', round(p_amount, 2),
+    'updated_at', now(),
+    'updated_by_name', v_actor);
 end; $$;
 
 -- ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   type Camp,
   type CardType,
   type Company,
+  type DeductionSettings,
   type Employee,
   type ExperienceTier,
   type Fine,
@@ -28,6 +29,7 @@ import {
   type UniformEntry,
   type Warning,
 } from '@/lib/types';
+import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE } from '@/lib/types';
 
 export interface DemoProfile extends Profile {
   password: string;
@@ -81,7 +83,8 @@ export interface DemoPayrollEmployee {
   gross_salary: number;
   advance: number;
   deduction: number;
-  /** automatic absent deduction (absences beyond the first 2 × AED 25) */
+  /** automatic absent deduction (absences beyond the configured free days
+   *  × the configured amount — db.deductionSettings) */
   absent_deduction: number;
   net_salary: number;
   payment_status: 'unpaid' | 'paid';
@@ -171,6 +174,9 @@ export interface DemoDB {
   employeeNotes: DemoEmployeeNote[];
   // one-time shareable digital attendance sheets (per-site links)
   shareLinks: DemoAttendanceShareLink[];
+  // effective absent-deduction rule (Trade Management → Deductions tab —
+  // mirrors the deduction_settings Postgres singleton, see 20261111c)
+  deductionSettings: DeductionSettings;
 }
 
 /** Raw employee-note row (author name resolved at read time from profiles) */
@@ -274,6 +280,12 @@ function seedDB(): DemoDB {
     cardTypes: [],
     employeeNotes: [],
     shareLinks: [],
+    deductionSettings: {
+      absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
+      absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+      updated_at: null,
+      updated_by_name: null,
+    },
   };
 
   // ---- profiles -----------------------------------------------------------
@@ -721,7 +733,19 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 14) return parsed;
+      if (parsed.version === 14) {
+        // heal fields added after this DB was seeded (no version bump → no
+        // reseed, existing demo data stays)
+        if (!parsed.deductionSettings) {
+          parsed.deductionSettings = {
+            absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
+            absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+            updated_at: null,
+            updated_by_name: null,
+          };
+        }
+        return parsed;
+      }
     }
   } catch {
     // corrupted → reseed

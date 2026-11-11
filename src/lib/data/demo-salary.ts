@@ -34,7 +34,10 @@ import type {
   Trade,
   TradeRate,
 } from '@/lib/types';
-import { SALARY_THRESHOLD_HOURS, SALARY_THRESHOLD_MONTHS } from '@/lib/types';
+import {
+  ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE,
+  SALARY_THRESHOLD_HOURS, SALARY_THRESHOLD_MONTHS,
+} from '@/lib/types';
 import type { DemoDB } from './demo-store';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
@@ -216,6 +219,10 @@ export interface PayrollCalc {
   unassigned_sites: Map<string, number>;
   /** site key → unrated hours (trade but no effective rate) at that site */
   unrated_sites: Map<string, number>;
+  /** absent days of the month (attendance status 'absent', not hidden) */
+  absent_count: number;
+  /** absences beyond the first 2 days × AED 25 (0 when ≤ 2 absences) */
+  absent_deduction: number;
   gross_salary: number;
   lines: PayrollSalaryLineVM[];
 }
@@ -332,6 +339,17 @@ export const calcEmployeePayroll = (
   if (openingLifetime === 0) openingLifetime = opening;
   if (closingLifetime === 0) closingLifetime = openingLifetime;
 
+  // ABSENT DEDUCTION — attendance records marked 'A' (status 'absent') within
+  // the payroll month. The first 2 absences are free; every absence from the
+  // 3rd onwards costs AED 25 (mirrors the 20261111b SQL migration).
+  const absentCount = database.attendance.filter(
+    (a) => a.employee_id === employeeId && !a.is_hidden && a.status === 'absent'
+      && a.date >= start && a.date <= end,
+  ).length;
+  const absentDeduction = round2(
+    Math.max(absentCount - ABSENT_DEDUCTION_FREE_DAYS, 0) * ABSENT_DEDUCTION_RATE,
+  );
+
   return {
     total_hours: round2(totalHours),
     opening_lifetime_hours: round2(openingLifetime),
@@ -340,6 +358,8 @@ export const calcEmployeePayroll = (
     unassigned_hours: round2(unassigned),
     unassigned_sites: unassignedSites,
     unrated_sites: unratedSites,
+    absent_count: absentCount,
+    absent_deduction: absentDeduction,
     gross_salary: gross,
     lines,
   };
@@ -371,6 +391,8 @@ export interface DemoPayrollEmployeeRow {
   gross_salary: number;
   advance: number;
   deduction: number;
+  /** automatic absent deduction (absences beyond the first 2 × AED 25) */
+  absent_deduction: number;
   net_salary: number;
   payment_status: 'unpaid' | 'paid';
   paid_at: string | null;
@@ -497,7 +519,8 @@ export const refreshPayrollEmployee = (
       gross_salary: calc.gross_salary,
       advance: 0,
       deduction: 0,
-      net_salary: calc.gross_salary,
+      absent_deduction: calc.absent_deduction,
+      net_salary: round2(calc.gross_salary - calc.absent_deduction),
       payment_status: 'unpaid',
       paid_at: null,
       paid_by: null,
@@ -514,7 +537,8 @@ export const refreshPayrollEmployee = (
     pe.unrated_hours = calc.unrated_hours;
     pe.unassigned_hours = calc.unassigned_hours;
     pe.gross_salary = calc.gross_salary;
-    pe.net_salary = round2(calc.gross_salary - pe.advance - pe.deduction);
+    pe.absent_deduction = calc.absent_deduction;
+    pe.net_salary = round2(calc.gross_salary - pe.advance - pe.deduction - pe.absent_deduction);
     pe.trade_id_snapshot = emp.trade_id ?? null;
     pe.salary_role_snapshot = emp.salary_role ?? 'standard';
   }
@@ -643,12 +667,16 @@ export const buildSalarySheet = (
 
   const pes = database.payrollEmployees.filter((pe) => pe.payroll_period_id === period!.id);
 
+  // heal rows persisted before the absent-deduction feature existed (drafts
+  // recompute above; finalized/manual rows just coalesce to 0)
+  pes.forEach((pe) => { if (pe.absent_deduction == null) pe.absent_deduction = 0; });
+
   const totals: SalarySheetTotals = {
     employees: pes.length,
     total_hours: round2(pes.reduce((n, pe) => n + pe.total_hours, 0)),
     gross_salary: round2(pes.reduce((n, pe) => n + pe.gross_salary, 0)),
     advances: round2(pes.reduce((n, pe) => n + pe.advance, 0)),
-    deductions: round2(pes.reduce((n, pe) => n + pe.deduction, 0)),
+    deductions: round2(pes.reduce((n, pe) => n + pe.deduction + pe.absent_deduction, 0)),
     net_payable: round2(pes.reduce((n, pe) => n + pe.net_salary, 0)),
     paid_count: pes.filter((pe) => pe.payment_status === 'paid').length,
     unpaid_count: pes.filter((pe) => pe.payment_status !== 'paid').length,
@@ -873,6 +901,7 @@ export const buildSalarySheet = (
       gross_salary: pe.gross_salary,
       advance: pe.advance,
       deduction: pe.deduction,
+      absent_deduction: pe.absent_deduction,
       net_salary: pe.net_salary,
       payment_status: pe.payment_status,
       paid_at: pe.paid_at,
@@ -1177,7 +1206,9 @@ export const applySalarySheetRow = (
     details.push('settlement');
   }
 
-  pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction);
+  // net is always gross − advance − deduction − absent deduction (the absent
+  // deduction is automatic and never touched by hand edits)
+  pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction - pe.absent_deduction);
 
   database.payrollAudit.push({
     id: uidFn(),

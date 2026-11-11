@@ -431,6 +431,14 @@ export const SALARY_THRESHOLD_HOURS = 1000;
 /** Calendar months of employment after which the experienced rate applies */
 export const SALARY_THRESHOLD_MONTHS = 6;
 
+/** ABSENT DEDUCTION RULE — the first N absent days of a payroll month are
+ *  free; every absent day from the (N+1)th onwards costs ABSENT_DEDUCTION_RATE
+ *  (AED). The deduction is computed when the payroll is generated and stored
+ *  on the settlement as `absent_deduction` (separate from the manually edited
+ *  `deduction`). Mirrors the 20261111b SQL migration exactly. */
+export const ABSENT_DEDUCTION_FREE_DAYS = 2;
+export const ABSENT_DEDUCTION_RATE = 25;
+
 export interface Trade {
   id: string;
   name: string;
@@ -589,6 +597,10 @@ export interface PayrollEmployeeVM {
   gross_salary: number;
   advance: number;
   deduction: number;
+  /** automatic absent deduction — absences beyond the first 2 days of the
+ *  month × AED 25 (0 when the employee was absent at most twice); counted
+ *  from attendance records with status 'absent', stored at generation time */
+  absent_deduction: number;
   net_salary: number;
   payment_status: PaymentStatus;
   paid_at: string | null;

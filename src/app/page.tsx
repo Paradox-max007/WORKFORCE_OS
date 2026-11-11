@@ -20,6 +20,7 @@ import { EmployeeFormPage } from '@/components/employees/employee-form-page';
 import { EmployeePage } from '@/components/employees/employee-page';
 import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
+import { AttendanceCalendarPage } from '@/components/payroll/attendance-calendar-page';
 import { LeaveRequestPage } from '@/components/leave-requests/leave-request-page';
 import { NotificationPage } from '@/components/notifications/notification-page';
 import { PayrollExportPreviewPage } from '@/components/payroll/payroll-export-preview-page';
@@ -79,6 +80,7 @@ function MainLayout() {
     salary_sheet: <SalarySheetPage />,
     payroll: <PayrollPage />,
     payroll_export: <PayrollExportPreviewPage />,
+    attendance_calendar: <AttendanceCalendarPage />,
     trade_management: <TradePage />,
     uniform_registry: <UniformRegistryPage />,
     leave_requests: <LeaveRequestPage />,

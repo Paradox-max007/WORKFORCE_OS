@@ -73,8 +73,11 @@ export const PAYROLL_EXPORT_COLUMNS: PayrollExportColumn[] = [
   },
   {
     key: 'deduction', header: 'Deduction', width: 12, numeric: true, money: true,
-    value: (e) => round2(e.deduction),
-    total: (rows) => round2(rows.reduce((n, e) => n + e.deduction, 0)),
+    // manual deduction + the AUTOMATIC absent deduction (absences beyond
+    // the first 2 × AED 25) — exactly what the Payroll table shows, so
+    // gross − advance − deduction − … reconciles with Net Payable
+    value: (e) => round2(e.deduction + (e.absent_deduction ?? 0)),
+    total: (rows) => round2(rows.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0)),
   },
   {
     key: 'net', header: 'Net Payable', width: 14, numeric: true, money: true,

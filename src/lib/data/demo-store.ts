@@ -81,6 +81,8 @@ export interface DemoPayrollEmployee {
   gross_salary: number;
   advance: number;
   deduction: number;
+  /** automatic absent deduction (absences beyond the first 2 × AED 25) */
+  absent_deduction: number;
   net_salary: number;
   payment_status: 'unpaid' | 'paid';
   paid_at: string | null;

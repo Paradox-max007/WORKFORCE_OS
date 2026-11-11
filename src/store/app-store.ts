@@ -20,6 +20,7 @@ export type AppView =
   | 'salary_sheet'
   | 'payroll'
   | 'payroll_export'
+  | 'attendance_calendar'
   | 'trade_management'
   | 'uniform_registry'
   | 'leave_requests'
@@ -40,6 +41,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   salary_sheet: 'Salary Sheet',
   payroll: 'Payroll',
   payroll_export: 'Payroll Excel Preview',
+  attendance_calendar: 'Attendance Record',
   trade_management: 'Trade Management',
   uniform_registry: 'Uniform Registry',
   leave_requests: 'Leave Requests',
@@ -72,6 +74,14 @@ interface AppStore {
     filters: string[];
     totalCount: number;
   } | null;
+  /** Payload of the dedicated ATTENDANCE CALENDAR page — opened by clicking
+   *  the deduction amount of an employee on the Payroll page. Shows the
+   *  employee's month as one calendar per site (absent deduction breakdown). */
+  attendanceCalendar: {
+    employee: PayrollEmployeeVM;
+    year: number;
+    month: number;
+  } | null;
   /** Shared payroll month selection — Salary Sheet and Payroll use the SAME
    *  period; switching pages keeps the month. */
   salaryPeriodYear: number;
@@ -100,6 +110,13 @@ interface AppStore {
     filters: string[],
     totalCount: number,
   ) => void;
+  /** Attendance calendar flow — opens the dedicated per-site calendar page
+   *  for one employee's payroll month (click on the deduction amount). */
+  navigateToAttendanceCalendar: (
+    employee: PayrollEmployeeVM,
+    year: number,
+    month: number,
+  ) => void;
   setSidebarOpen: (open: boolean) => void;
   consumeEmployeeFilter: () => string;
 }
@@ -114,6 +131,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   employeeFormReturnTo: 'employees' as const,
   exportPreview: null,
   payrollExportPreview: null,
+  attendanceCalendar: null,
   salaryPeriodYear: new Date().getFullYear(),
   salaryPeriodMonth: new Date().getMonth() + 1,
   setSalaryPeriod: (year, month) => set({ salaryPeriodYear: year, salaryPeriodMonth: month }),
@@ -139,6 +157,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       currentView: 'payroll_export',
       payrollExportPreview: { rows, year, month, fileName, filters, totalCount },
     }),
+  navigateToAttendanceCalendar: (employee, year, month) =>
+    set({ currentView: 'attendance_calendar', attendanceCalendar: { employee, year, month } }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   consumeEmployeeFilter: () => {
     const f = get().employeeFilter;

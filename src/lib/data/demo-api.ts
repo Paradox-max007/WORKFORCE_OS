@@ -1735,7 +1735,11 @@ export const demoApi = {
     pe.advance = round2(input.advance);
     pe.deduction = round2(input.deduction);
     pe.notes = input.notes?.trim() || null;
-    pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction);
+    // net = gross − advance − manual deduction − AUTOMATIC absent deduction
+    // (rows persisted before the absent-deduction feature heal to 0)
+    pe.net_salary = round2(
+      pe.gross_salary - pe.advance - pe.deduction - (pe.absent_deduction ?? 0),
+    );
     saveAndEmit(['payroll_period', 'payroll_employee']);
   },
 
@@ -1768,7 +1772,7 @@ export const demoApi = {
     const pes = db.payrollEmployees.filter((pe) => pe.payroll_period_id === period.id);
     const totals = `employees=${pes.length}, gross=${round2(pes.reduce((n, p) => n + p.gross_salary, 0))}` +
       `, advances=${round2(pes.reduce((n, p) => n + p.advance, 0))}` +
-      `, deductions=${round2(pes.reduce((n, p) => n + p.deduction, 0))}` +
+      `, deductions=${round2(pes.reduce((n, p) => n + p.deduction + (p.absent_deduction ?? 0), 0))}` +
       `, net=${round2(pes.reduce((n, p) => n + p.net_salary, 0))}` +
       `, paid=${pes.filter((p) => p.payment_status === 'paid').length}`;
 

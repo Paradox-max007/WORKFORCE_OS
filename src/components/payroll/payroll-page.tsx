@@ -42,12 +42,18 @@
 //     FILTERED rows — there the columns can be toggled (all on by default)
 //     before downloading the .xlsx (lib/export-payroll-xlsx.ts)
 //   • column order: AMOUNT comes BEFORE ADVANCE (page table AND the Excel)
+//   • ABSENT DEDUCTION — more than 2 absences in the month cost AED 25 each
+//     from the 3rd absence onwards; it is computed when the payroll is
+//     generated (separate from the manual deduction) and shows inside the
+//     Deduction column (red “A” chip). Clicking a deduction value opens the
+//     dedicated ATTENDANCE CALENDAR page — one calendar per site, with the
+//     employee name, code and total hours on top
 //   • shares the selected month with the Salary Sheet (app store)
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
+  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
   FileSpreadsheet, History, ListFilter, Loader2, Lock, LockOpen, PencilLine,
   Scale, Search, StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
@@ -665,6 +671,12 @@ function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
             <div className="flex justify-between"><span className="text-muted-foreground">Gross salary</span><span className="font-mono">AED {fmtMoney(employee.gross_salary)}</span></div>
             <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Advance</span><span className="font-mono">AED {fmtMoney(employee.advance)}</span></div>
             <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Deduction</span><span className="font-mono">AED {fmtMoney(employee.deduction)}</span></div>
+            {(employee.absent_deduction ?? 0) > 0 && (
+              <div className="mt-0.5 flex justify-between" title="Automatic — AED 25 per absence from the 3rd onwards">
+                <span className="text-red-500">− Absent deduction</span>
+                <span className="font-mono text-red-500">AED {fmtMoney(employee.absent_deduction)}</span>
+              </div>
+            )}
             <div className="mt-1 flex justify-between border-t pt-1 font-semibold">
               <span>Net salary payable</span><span className="font-mono text-emerald-500">AED {fmtMoney(employee.net_salary)}</span>
             </div>
@@ -795,6 +807,7 @@ export function PayrollPage() {
   const [exporting, setExporting] = useState(false);
 
   const navigateToPayrollExport = useAppStore((s) => s.navigateToPayrollExport);
+  const navigateToAttendanceCalendar = useAppStore((s) => s.navigateToAttendanceCalendar);
 
   // ---- payment-method data (card types list + employee sticky notes) -------
   const [cardTypes, setCardTypes] = useState<CardType[]>([]);
@@ -980,7 +993,8 @@ export function PayrollPage() {
   const filteredTotals = useMemo(() => ({
     hours: round2(filteredEmployees.reduce((n, e) => n + e.total_hours, 0)),
     advances: round2(filteredEmployees.reduce((n, e) => n + e.advance, 0)),
-    deductions: round2(filteredEmployees.reduce((n, e) => n + e.deduction, 0)),
+    // manual deduction + the automatic absent deduction (what the column shows)
+    deductions: round2(filteredEmployees.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0)),
     gross: round2(filteredEmployees.reduce((n, e) => n + e.gross_salary, 0)),
     net: round2(filteredEmployees.reduce((n, e) => n + e.net_salary, 0)),
   }), [filteredEmployees]);
@@ -1442,7 +1456,7 @@ export function PayrollPage() {
                     <TableHead className="min-w-32">Payment Method</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
-                    <TableHead className="text-right">Deduction</TableHead>
+                    <TableHead className="text-right" title="Manual deduction + automatic absent deduction (AED 25 per absence from the 3rd onwards) — click a value to open the attendance calendar">Deduction</TableHead>
                     <TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead>
                   </TableRow>
@@ -1557,16 +1571,45 @@ export function PayrollPage() {
                         </TableCell>
                         <TableCell className="text-right">
                           {editable ? (
-                            <div className="flex justify-end">
-                              <AdjustInput
-                                value={e.deduction} busy={settleBusy} label="Deduction"
-                                onCommit={(next) => { void onAdjust(e, e.advance, next); }}
-                              />
+                            <div className="flex flex-col items-end gap-1">
+                              <div className="flex justify-end">
+                                <AdjustInput
+                                  value={e.deduction} busy={settleBusy} label="Deduction"
+                                  onCommit={(next) => { void onAdjust(e, e.advance, next); }}
+                                />
+                              </div>
+                              {(e.absent_deduction ?? 0) > 0 && (
+                                <span className="text-[10px] font-medium text-red-500" title="Automatic absent deduction — not editable here">
+                                  + AED {fmtMoney(e.absent_deduction)} absent
+                                </span>
+                              )}
                             </div>
                           ) : (
-                            <span className={cn('font-mono text-xs', e.deduction > 0 ? '' : 'text-muted-foreground')}>
-                              {e.deduction > 0 ? fmtMoney(e.deduction) : '—'}
-                            </span>
+                            <button
+                              type="button"
+                              onClick={() => navigateToAttendanceCalendar(e, year, month)}
+                              title={`Open ${e.full_name}'s attendance calendar for ${MONTH_NAMES[month - 1]} ${year}${
+                                (e.deduction + (e.absent_deduction ?? 0)) > 0
+                                  ? ` — manual ${fmtMoney(e.deduction)}${(e.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(e.absent_deduction)}` : ''}`
+                                  : ' (no deduction this month)'}`}
+                              className={cn(
+                                'group inline-flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 font-mono text-xs transition-colors hover:bg-muted/70',
+                                (e.deduction + (e.absent_deduction ?? 0)) > 0 ? '' : 'text-muted-foreground',
+                              )}
+                            >
+                              {(e.deduction + (e.absent_deduction ?? 0)) > 0
+                                ? fmtMoney(e.deduction + (e.absent_deduction ?? 0))
+                                : '—'}
+                              {(e.absent_deduction ?? 0) > 0 && (
+                                <span
+                                  className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
+                                  title={`Automatic absent deduction — AED ${fmtMoney(e.absent_deduction)} (AED 25 × chargeable absences, from the 3rd onwards)`}
+                                >
+                                  A
+                                </span>
+                              )}
+                              <CalendarDays size={11} className="text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
+                            </button>
                           )}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
@@ -1646,7 +1689,7 @@ export function PayrollPage() {
             </div>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: AED 25 per absence from the 3rd onwards). Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 

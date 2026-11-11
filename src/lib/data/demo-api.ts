@@ -69,6 +69,7 @@ import {
   type DemoAttendanceShareLink,
 } from './demo-store';
 import {
+  absentDeductionOf,
   applyAssignment,
   applySalarySheetRow,
   applyTradeRates,
@@ -1774,7 +1775,24 @@ export const demoApi = {
     pe.advance = round2(input.advance);
     pe.deduction = round2(input.deduction);
     pe.notes = input.notes?.trim() || null;
-    // net = gross − advance − manual deduction − AUTOMATIC absent deduction
+    // THE PAYROLL PAGE VALUE HAS PRIORITY: a hand-entered absent deduction is
+    // stored as the ACTUAL amount (flagged) and survives every recalculation;
+    // absent_auto returns it to the configured rule. Omitted → untouched.
+    if (input.absent_deduction != null) {
+      if (!Number.isFinite(input.absent_deduction) || input.absent_deduction < 0) {
+        throw new Error('Absent deduction must be 0 or more');
+      }
+      pe.absent_deduction = round2(input.absent_deduction);
+      pe.absent_deduction_edited = true;
+    } else if (input.absent_auto) {
+      const period = db.payrollPeriods.find((p) => p.id === pe.payroll_period_id);
+      pe.absent_deduction = period
+        ? absentDeductionOf(db, pe.employee_id, period.year, period.month)
+        : pe.absent_deduction;
+      pe.absent_deduction_edited = false;
+    }
+    // net = gross − advance − manual deduction − the EFFECTIVE absent
+    // deduction (rule-computed, or the value edited here — which wins)
     // (rows persisted before the absent-deduction feature heal to 0)
     pe.net_salary = round2(
       pe.gross_salary - pe.advance - pe.deduction - (pe.absent_deduction ?? 0),

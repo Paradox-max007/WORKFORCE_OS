@@ -6,7 +6,8 @@
 // Run: bunx tsx tests/salary-engine.test.ts
 import { db, type DemoTradeRate } from '../src/lib/data/demo-store';
 import {
-  addMonthsClamped, calcEligibility, calcEmployeePayroll,
+  addMonthsClamped, absentDeductionOf, calcEligibility, calcEmployeePayroll,
+  refreshPayrollPeriod,
 } from '../src/lib/data/demo-salary';
 import type {
   Attendance, Employee, ExperienceTier, SalaryRole, Site, Trade, TradeRate,
@@ -291,6 +292,59 @@ async function main(): Promise<void> {
   db.deductionSettings = {
     absent_free_days: 2, absent_deduction_amount: 25, updated_at: null, updated_by_name: null,
   };
+
+  // -------------------------------------------------------------------------
+  console.log('\u2014 Absent deduction: Payroll page edit has PRIORITY over the rule');
+  reset();
+  db.sites = [site('s1', 'Site A')];
+  db.trades = [TR];
+  db.tradeRates = ELECTRICIAN_RATES(TR.id);
+  db.employees = [emp('e11', 'AbsenteeEdit', 's1', 5000, '2020-01-01', TR.id)];
+  // 5 absences + 1 worked day in October 2026 (8 h at the qualified rate 10 → gross 80)
+  db.attendance = [
+    att('e11', '2026-10-01', null), att('e11', '2026-10-02', null),
+    att('e11', '2026-10-05', null), att('e11', '2026-10-06', null),
+    att('e11', '2026-10-07', null), att('e11', '2026-10-08', 8),
+  ];
+  db.deductionSettings = {
+    absent_free_days: 2, absent_deduction_amount: 25, updated_at: null, updated_by_name: null,
+  };
+
+  let uidSeq = 0;
+  const uidFn = (): string => `t-${++uidSeq}`;
+  refreshPayrollPeriod(db, 2026, 10, null, uidFn);
+  let pe = db.payrollEmployees.find((x) => x.employee_id === 'e11')!;
+  check('generated: 5 absences → (5−2)×25 = 75, not edited',
+    eq(pe.absent_deduction, 75) && pe.absent_deduction_edited === false);
+  check('net = gross − absent (80 − 75)', eq(pe.net_salary, 5));
+
+  // the Payroll page edit stores the ACTUAL amount (as update_payroll_adjustment does)
+  pe.absent_deduction = 40;
+  pe.absent_deduction_edited = true;
+  pe.net_salary = Math.round((pe.gross_salary - pe.advance - pe.deduction - 40) * 100) / 100;
+  check('after edit: actual amount 40, net = 80 − 40',
+    eq(pe.absent_deduction, 40) && eq(pe.net_salary, 40));
+
+  // regeneration keeps the edited value — the Payroll page data has priority
+  refreshPayrollPeriod(db, 2026, 10, null, uidFn);
+  pe = db.payrollEmployees.find((x) => x.employee_id === 'e11')!;
+  check('regenerated: edited 40 survives (priority over the rule 75)',
+    eq(pe.absent_deduction, 40) && pe.absent_deduction_edited === true && eq(pe.net_salary, 40));
+
+  // even new absences do not overwrite the stored actual amount
+  db.attendance.push(att('e11', '2026-10-12', null), att('e11', '2026-10-13', null));
+  refreshPayrollPeriod(db, 2026, 10, null, uidFn);
+  pe = db.payrollEmployees.find((x) => x.employee_id === 'e11')!;
+  check('7 absences now, edited 40 still wins (rule would be 125)',
+    eq(pe.absent_deduction, 40) && eq(absentDeductionOf(db, 'e11', 2026, 10), 125));
+
+  // reset (reset_payroll_employee_auto semantics) → back to the configured rule
+  pe.absent_deduction_edited = false;
+  refreshPayrollPeriod(db, 2026, 10, null, uidFn);
+  pe = db.payrollEmployees.find((x) => x.employee_id === 'e11')!;
+  check('after reset: rule value 125 restored, unedited',
+    eq(pe.absent_deduction, 125) && pe.absent_deduction_edited === false);
+  check('net after reset = 80 − 125', eq(pe.net_salary, -45));
 
   // Employee Gross = Σ Salary Lines (spec \u00a711 core invariant) across scenarios
   const inv1 = calc1.lines.reduce((n, l) => n + l.gross_amount, 0);

@@ -84,8 +84,12 @@ export interface DemoPayrollEmployee {
   advance: number;
   deduction: number;
   /** automatic absent deduction (absences beyond the configured free days
-   *  × the configured amount — db.deductionSettings) */
+   *  × the configured amount — db.deductionSettings); when EDITED on the
+   *  Payroll page this holds the ACTUAL amount and the flag below is true */
   absent_deduction: number;
+  /** true → absent_deduction was hand-edited on the Payroll page — the
+   *  stored amount has priority and survives every recalculation */
+  absent_deduction_edited: boolean;
   net_salary: number;
   payment_status: 'unpaid' | 'paid';
   paid_at: string | null;
@@ -744,6 +748,11 @@ function loadDB(): DemoDB {
             updated_by_name: null,
           };
         }
+        // settlements persisted before the editable-absent-deduction feature
+        // were never hand-edited → flag heals to false
+        parsed.payrollEmployees?.forEach((pe) => {
+          if (pe.absent_deduction_edited == null) pe.absent_deduction_edited = false;
+        });
         return parsed;
       }
     }

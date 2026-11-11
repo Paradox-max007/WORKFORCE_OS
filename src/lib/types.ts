@@ -626,9 +626,14 @@ export interface PayrollEmployeeVM {
   deduction: number;
   /** automatic absent deduction — absences beyond the configured free days
  *  of the month × the configured amount (Trade Management → Deductions);
- *  counted from attendance records with status 'absent', stored at
- *  generation time */
+ *  counted from attendance records with status 'absent'. When edited on the
+ *  Payroll page this holds the ACTUAL (hand-entered) amount and
+ *  absent_deduction_edited is true — the Payroll page value has priority
+ *  over the rule and survives every recalculation */
   absent_deduction: number;
+  /** true → absent_deduction was hand-edited on the Payroll page (the stored
+ *   amount is the actual deduction; reset returns it to the rule) */
+  absent_deduction_edited?: boolean;
   net_salary: number;
   payment_status: PaymentStatus;
   paid_at: string | null;
@@ -695,6 +700,13 @@ export interface PayrollAdjustmentInput {
   advance: number;
   deduction: number;
   notes: string | null;
+  /** PRESENT → store this as the ACTUAL absent deduction (flagged — the
+   *  Payroll page value has priority and survives every recalculation).
+ *  Omit it to leave the absent deduction untouched. */
+  absent_deduction?: number;
+  /** true → recompute the absent deduction from the configured rule and
+   *  clear the edited flag (ignored when absent_deduction is present). */
+  absent_auto?: boolean;
 }
 
 /** One manually overridden employee × site row of the Salary Sheet */
@@ -708,7 +720,10 @@ export interface SalarySheetSiteUpdate {
 
 /** Salary Sheet edit-mode save. THE SHEET RECORD HAS PRIORITY: manual site
  *  values overwrite the calculated data and are preserved on recalculation;
- *  a trade picked here overwrites the employee's stored trade. */
+ *  a trade picked here overwrites the employee's stored trade. The absent
+ *  deduction follows the SAME rule as the Payroll page: a value present in
+ *  the payload is stored as the actual amount (flagged); absent_auto returns
+ *  it to the configured rule. */
 export interface SalarySheetRowUpdate {
   payroll_employee_id: string;
   /** present → overwrite the stored trade (null = no trade) */
@@ -716,6 +731,10 @@ export interface SalarySheetRowUpdate {
   advance?: number;
   deduction?: number;
   notes?: string | null;
+  /** present → store as the ACTUAL absent deduction (flagged, priority) */
+  absent_deduction?: number;
+  /** true → absent deduction back to the configured rule */
+  absent_auto?: boolean;
   /** manual site-row overrides; any entry freezes the settlement */
   sites?: SalarySheetSiteUpdate[];
 }

@@ -345,18 +345,11 @@ export const calcEmployeePayroll = (
   // absence after those costs `absent_deduction_amount` (both CONFIGURABLE in
   // Trade Management → Deductions; defaults 2 / AED 25 — mirrors the
   // 20261111c SQL migration reading the deduction_settings table).
-  const deductionSettings = database.deductionSettings ?? {
-    absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
-    absent_deduction_amount: ABSENT_DEDUCTION_RATE,
-  };
+  const absentDeduction = absentDeductionOf(database, employeeId, year, month);
   const absentCount = database.attendance.filter(
     (a) => a.employee_id === employeeId && !a.is_hidden && a.status === 'absent'
       && a.date >= start && a.date <= end,
   ).length;
-  const absentDeduction = round2(
-    Math.max(absentCount - deductionSettings.absent_free_days, 0)
-      * deductionSettings.absent_deduction_amount,
-  );
 
   return {
     total_hours: round2(totalHours),
@@ -371,6 +364,28 @@ export const calcEmployeePayroll = (
     gross_salary: gross,
     lines,
   };
+};
+
+/** The configured-rule absent deduction for one employee × month — the first
+ *  `absent_free_days` absences of the month are free, every absence after
+ *  those costs `absent_deduction_amount` (Deduction Management; defaults
+ *  2 / AED 25). Mirrors the SQL helper absent_deduction_for(). */
+export const absentDeductionOf = (
+  database: DemoDB, employeeId: string, year: number, month: number,
+): number => {
+  const settings = database.deductionSettings ?? {
+    absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
+    absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+  };
+  const start = monthStart(year, month);
+  const end = monthEnd(year, month);
+  const count = database.attendance.filter(
+    (a) => a.employee_id === employeeId && !a.is_hidden && a.status === 'absent'
+      && a.date >= start && a.date <= end,
+  ).length;
+  return round2(
+    Math.max(count - settings.absent_free_days, 0) * settings.absent_deduction_amount,
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -399,9 +414,13 @@ export interface DemoPayrollEmployeeRow {
   gross_salary: number;
   advance: number;
   deduction: number;
-  /** automatic absent deduction (absences beyond the configured free days
-   *  × the configured amount — see deductionSettings) */
+  /** automatic absent deduction — the configured rule value at generation
+   *  time; when EDITED on the Payroll page it holds the ACTUAL amount and
+   *  absent_deduction_edited is true (the stored value has priority) */
   absent_deduction: number;
+  /** true → absent_deduction was hand-edited (Payroll page / sheet payload)
+   *  and survives every recalculation until reset */
+  absent_deduction_edited: boolean;
   net_salary: number;
   payment_status: 'unpaid' | 'paid';
   paid_at: string | null;
@@ -513,7 +532,9 @@ export const refreshPayrollEmployee = (
     agg.has_missing_rate = true;
   });
 
-  // upsert the settlement row (manually entered adjustments preserved)
+  // upsert the settlement row (manually entered adjustments preserved; an
+  // EDITED absent deduction is preserved too — the Payroll page value has
+  // priority over the rule, exactly like the SQL conflict update)
   let pe = existing;
   if (!pe) {
     pe = {
@@ -529,6 +550,7 @@ export const refreshPayrollEmployee = (
       advance: 0,
       deduction: 0,
       absent_deduction: calc.absent_deduction,
+      absent_deduction_edited: false,
       net_salary: round2(calc.gross_salary - calc.absent_deduction),
       payment_status: 'unpaid',
       paid_at: null,
@@ -546,7 +568,8 @@ export const refreshPayrollEmployee = (
     pe.unrated_hours = calc.unrated_hours;
     pe.unassigned_hours = calc.unassigned_hours;
     pe.gross_salary = calc.gross_salary;
-    pe.absent_deduction = calc.absent_deduction;
+    // hand-edited absent deduction survives; unedited rows follow the rule
+    if (!pe.absent_deduction_edited) pe.absent_deduction = calc.absent_deduction;
     pe.net_salary = round2(calc.gross_salary - pe.advance - pe.deduction - pe.absent_deduction);
     pe.trade_id_snapshot = emp.trade_id ?? null;
     pe.salary_role_snapshot = emp.salary_role ?? 'standard';
@@ -678,7 +701,10 @@ export const buildSalarySheet = (
 
   // heal rows persisted before the absent-deduction feature existed (drafts
   // recompute above; finalized/manual rows just coalesce to 0)
-  pes.forEach((pe) => { if (pe.absent_deduction == null) pe.absent_deduction = 0; });
+  pes.forEach((pe) => {
+    if (pe.absent_deduction == null) pe.absent_deduction = 0;
+    if (pe.absent_deduction_edited == null) pe.absent_deduction_edited = false;
+  });
 
   const totals: SalarySheetTotals = {
     employees: pes.length,
@@ -911,6 +937,7 @@ export const buildSalarySheet = (
       advance: pe.advance,
       deduction: pe.deduction,
       absent_deduction: pe.absent_deduction,
+      absent_deduction_edited: pe.absent_deduction_edited,
       net_salary: pe.net_salary,
       payment_status: pe.payment_status,
       paid_at: pe.paid_at,
@@ -1201,8 +1228,9 @@ export const applySalarySheetRow = (
     }
   }
 
-  // 4. settlement adjustments (advance / deduction / notes)
-  if (payload.advance != null || payload.deduction != null || payload.notes !== undefined) {
+  // 4. settlement adjustments (advance / deduction / ABSENT deduction / notes)
+  if (payload.advance != null || payload.deduction != null || payload.notes !== undefined
+    || payload.absent_deduction != null || payload.absent_auto) {
     if (payload.advance != null) {
       if (!Number.isFinite(payload.advance) || payload.advance < 0) throw new Error('Advance must be 0 or more');
       pe.advance = round2(payload.advance);
@@ -1212,11 +1240,27 @@ export const applySalarySheetRow = (
       pe.deduction = round2(payload.deduction);
     }
     if (payload.notes !== undefined) pe.notes = payload.notes?.trim() || null;
+    // the SAME absent-deduction rule as the Payroll page: a value present in
+    // the payload is stored as the ACTUAL deduction (flagged — it survives
+    // every recalculation); absent_auto returns it to the configured rule
+    if (payload.absent_auto) {
+      pe.absent_deduction = absentDeductionOf(database, pe.employee_id, period.year, period.month);
+      pe.absent_deduction_edited = false;
+      details.push(`absent deduction → rule (AED ${pe.absent_deduction})`);
+    } else if (payload.absent_deduction != null) {
+      if (!Number.isFinite(payload.absent_deduction) || payload.absent_deduction < 0) {
+        throw new Error('Absent deduction must be 0 or more');
+      }
+      pe.absent_deduction = round2(payload.absent_deduction);
+      pe.absent_deduction_edited = true;
+      details.push(`absent deduction → AED ${pe.absent_deduction} (manual)`);
+    }
     details.push('settlement');
   }
 
-  // net is always gross − advance − deduction − absent deduction (the absent
-  // deduction is automatic and never touched by hand edits)
+  // net is always gross − advance − deduction − the EFFECTIVE absent
+  // deduction (rule-computed, or the value edited on the Payroll page —
+  // which has priority)
   pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction - pe.absent_deduction);
 
   database.payrollAudit.push({
@@ -1247,6 +1291,9 @@ export const resetPayrollEmployeeAuto = (
     throw new Error('Reopen the finalized payroll before resetting to automatic calculation');
   }
   pe.manually_edited = false;
+  // the FULL settlement returns to automatic calculation — the hand-edited
+  // absent deduction goes back to the configured rule as well
+  pe.absent_deduction_edited = false;
   refreshPayrollEmployee(database, period, pe.employee_id, uidFn);
   const emp = database.employees.find((e) => e.id === pe.employee_id);
   database.payrollAudit.push({

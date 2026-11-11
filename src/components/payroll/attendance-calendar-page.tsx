@@ -12,7 +12,10 @@
 //   • ABSENT DEDUCTION — the first N absences of the month are free, every
 //     absence after those costs AED X (N and X CONFIGURABLE in Trade/Ded
 //     Management → Deductions — fetched live via getDeductionSettings).
-//     The calendar marks each chargeable absent day with a −X chip
+//     The calendar marks each chargeable absent day with a −X chip.
+//     When the amount was EDITED on the Payroll page, the stored (actual)
+//     amount is shown instead — the Payroll page value has priority over
+//     the rule and survives attendance changes until it is reset there
 //   • ONE CALENDAR PER SITE — an employee who worked at 2 sites in the month
 //     gets 2 calendars. Days worked at THAT site are green; days worked at
 //     another site are muted (the tooltip names the site); absences are red
@@ -200,6 +203,11 @@ export function AttendanceCalendarPage() {
             <RecapRow label="Advance" value={employee.advance > 0 ? `AED ${fmtMoney(employee.advance)}` : '—'} />
             <RecapRow label="Deduction (manual)" value={employee.deduction > 0 ? `AED ${fmtMoney(employee.deduction)}` : '—'} />
             <RecapRow label="Absent deduction" value={employee.absent_deduction > 0 ? `AED ${fmtMoney(employee.absent_deduction)}` : '—'} />
+            {employee.absent_deduction_edited && (
+              <p className="text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                manually set — has priority over the rule
+              </p>
+            )}
             <RecapRow label="Net payable" value={`AED ${fmtMoney(employee.net_salary)}`} strong />
           </div>
         </div>
@@ -230,11 +238,26 @@ export function AttendanceCalendarPage() {
           <div className="hidden h-9 w-px bg-border/60 sm:block" aria-hidden />
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Absent deduction</p>
-            <p className="text-lg font-bold tabular-nums text-red-500">
+            <p className="flex items-center gap-1.5 text-lg font-bold tabular-nums text-red-500">
               AED {fmtMoney(employee.absent_deduction)}
+              {employee.absent_deduction_edited && (
+                <span
+                  className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold text-amber-600 dark:text-amber-400"
+                  title="The Payroll page value has priority — it is stored on this attendance record and kept until reset there"
+                >
+                  manually set
+                </span>
+              )}
             </p>
           </div>
-          {computedAbsentDeduction !== employee.absent_deduction && records !== null && (
+          {employee.absent_deduction_edited ? (
+            <p className="w-full rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+              The absent deduction was edited on the Payroll page — the stored amount is the
+              actual deduction and has priority over the configured rule (which would charge
+              AED {fmtMoney(computedAbsentDeduction)} for the current attendance). It stays
+              even when attendance changes, until it is reset on the Payroll page.
+            </p>
+          ) : computedAbsentDeduction !== employee.absent_deduction && records !== null && (
             <p className="w-full rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
               Attendance changed after this payroll was generated
               (now {computedAbsentDeduction > employee.absent_deduction ? 'more' : 'fewer'} chargeable absences).

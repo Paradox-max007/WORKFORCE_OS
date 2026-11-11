@@ -20,13 +20,17 @@
 //     — overwrites the stored trade and re-prices the month) and override
 //     hours / rate / gross. THE SHEET RECORD HAS PRIORITY — saved values are
 //     protected from the automatic recalculation (↺ returns to auto pricing)
-//   • payment/advance/deduction administration: see the Payroll page
+//   • payment/advance/deduction administration: see the Payroll page. The
+//     Deduction column shows manual + ABSENT deduction (red “A” chip) — the
+//     SAME rule as the Payroll page: the absent amount edited there has
+//     PRIORITY over the configured rule and flows into this sheet, its
+//     totals and the net payable automatically
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, ChevronUp, Clock, Eye,
-  FileSpreadsheet, History, Loader2, Lock, LockOpen, PencilLine, RotateCcw, Search,
+  FileSpreadsheet, History, Loader2, Lock, LockOpen, Pencil, PencilLine, RotateCcw, Search,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -222,8 +226,13 @@ function SiteGroup({
   tradeStateOf: (employeeId: string) => TradeState;
   onTradeChange: (employeeId: string, tradeId: string | null) => void;
   paidOf: (employeeId: string) => boolean;
-  /** employee-level settlement (advance / deduction) — set per employee in Payroll */
-  settlementOf: (employeeId: string) => { advance: number; deduction: number } | undefined;
+  /** employee-level settlement (advance / deduction / absent deduction) —
+   *  set per employee in Payroll; the absent part follows the Payroll page
+   *  rule (an edited amount there has priority) */
+  settlementOf: (employeeId: string) => {
+    advance: number; deduction: number;
+    absent_deduction: number; absent_deduction_edited: boolean;
+  } | undefined;
 }) {
   const [open, setOpen] = useState(true);
   const idle = group.idle === true;
@@ -428,12 +437,35 @@ function SiteGroup({
                                 {settlement && settlement.advance > 0 ? fmtMoney(settlement.advance) : '—'}
                               </span>
                             </TableCell>
+                            {/* advance / deduction — employee-level settlement
+                                values (same on every site row of the employee);
+                                administered on the Payroll page. The deduction
+                                shows manual + absent (same rule as Payroll — an
+                                absent amount edited there has priority) */}
                             <TableCell className="text-right font-mono text-xs">
                               <span
-                                className={settlement && settlement.deduction > 0 ? '' : 'text-muted-foreground'}
-                                title="Deduction is set per employee on the Payroll page"
+                                className={settlement && (settlement.deduction + settlement.absent_deduction) > 0 ? '' : 'text-muted-foreground'}
+                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent AED ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
                               >
-                                {settlement && settlement.deduction > 0 ? fmtMoney(settlement.deduction) : '—'}
+                                {settlement && (settlement.deduction + settlement.absent_deduction) > 0
+                                  ? fmtMoney(settlement.deduction + settlement.absent_deduction)
+                                  : '—'}
+                                {(settlement?.absent_deduction ?? 0) > 0 && (
+                                  <span
+                                    className="ml-1 rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
+                                    title="Absent deduction — included (editable on the Payroll page; an edited amount has priority over the rule)"
+                                  >
+                                    A
+                                  </span>
+                                )}
+                                {settlement?.absent_deduction_edited && (
+                                  <span
+                                    className="ml-1 inline-flex items-center rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-bold text-amber-600 dark:text-amber-400"
+                                    title="The absent deduction was edited on the Payroll page — this value has priority over the rule"
+                                  >
+                                    <Pencil size={9} />
+                                  </span>
+                                )}
                               </span>
                             </TableCell>
                             <TableCell className="text-right">
@@ -486,12 +518,35 @@ function SiteGroup({
                                 {settlement && settlement.advance > 0 ? fmtMoney(settlement.advance) : '—'}
                               </span>
                             </TableCell>
+                            {/* advance / deduction — employee-level settlement
+                                values (same on every site row of the employee);
+                                administered on the Payroll page. The deduction
+                                shows manual + absent (same rule as Payroll — an
+                                absent amount edited there has priority) */}
                             <TableCell className="text-right font-mono text-xs">
                               <span
-                                className={settlement && settlement.deduction > 0 ? '' : 'text-muted-foreground'}
-                                title="Deduction is set per employee on the Payroll page"
+                                className={settlement && (settlement.deduction + settlement.absent_deduction) > 0 ? '' : 'text-muted-foreground'}
+                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent AED ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
                               >
-                                {settlement && settlement.deduction > 0 ? fmtMoney(settlement.deduction) : '—'}
+                                {settlement && (settlement.deduction + settlement.absent_deduction) > 0
+                                  ? fmtMoney(settlement.deduction + settlement.absent_deduction)
+                                  : '—'}
+                                {(settlement?.absent_deduction ?? 0) > 0 && (
+                                  <span
+                                    className="ml-1 rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
+                                    title="Absent deduction — included (editable on the Payroll page; an edited amount has priority over the rule)"
+                                  >
+                                    A
+                                  </span>
+                                )}
+                                {settlement?.absent_deduction_edited && (
+                                  <span
+                                    className="ml-1 inline-flex items-center rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-bold text-amber-600 dark:text-amber-400"
+                                    title="The absent deduction was edited on the Payroll page — this value has priority over the rule"
+                                  >
+                                    <Pencil size={9} />
+                                  </span>
+                                )}
                               </span>
                             </TableCell>
                             {editMode && <TableCell />}
@@ -606,12 +661,21 @@ export function SalarySheetPage() {
     [employeeById],
   );
 
-  /** employee-level settlement (advance / deduction) for the new columns —
-   *  same value on every site row of the employee; edited on the Payroll page */
+  /** employee-level settlement (advance / deduction / absent deduction) for
+   *  the new columns — same value on every site row of the employee; edited
+   *  on the Payroll page (an edited absent deduction has priority) */
   const settlementOf = useCallback(
-    (employeeId: string): { advance: number; deduction: number } | undefined => {
+    (employeeId: string): {
+      advance: number; deduction: number;
+      absent_deduction: number; absent_deduction_edited: boolean;
+    } | undefined => {
       const e = employeeById.get(employeeId);
-      return e ? { advance: e.advance, deduction: e.deduction } : undefined;
+      return e ? {
+        advance: e.advance,
+        deduction: e.deduction,
+        absent_deduction: e.absent_deduction ?? 0,
+        absent_deduction_edited: !!e.absent_deduction_edited,
+      } : undefined;
     },
     [employeeById],
   );
@@ -729,7 +793,8 @@ export function SalarySheetPage() {
         r.trade_name ?? '', r.nationality ?? '', fmtHrs(r.total_hours),
         r.has_missing_rate ? '' : fmtMoney(effRateOf(r)), fmtMoney(r.gross_salary),
         emp && emp.advance > 0 ? fmtMoney(emp.advance) : '',
-        emp && emp.deduction > 0 ? fmtMoney(emp.deduction) : '',
+        emp && (emp.deduction + (emp.absent_deduction ?? 0)) > 0
+          ? fmtMoney(emp.deduction + (emp.absent_deduction ?? 0)) : '',
       ]);
     }));
     const summary: string[][] = [['', ''], ['EMPLOYEES', ''], ['Employee', 'Employee ID', 'Trade', 'Total Hours', 'Gross', 'Advance', 'Deduction', 'Status']];
@@ -737,7 +802,8 @@ export function SalarySheetPage() {
       e.full_name, e.employee_code, e.trade_name ?? '',
       fmtHrs(e.total_hours), fmtMoney(e.gross_salary),
       e.advance > 0 ? fmtMoney(e.advance) : '',
-      e.deduction > 0 ? fmtMoney(e.deduction) : '',
+      (e.deduction + (e.absent_deduction ?? 0)) > 0
+        ? fmtMoney(e.deduction + (e.absent_deduction ?? 0)) : '',
       e.payment_status,
     ]));
     const csv = [...rows, ...summary]

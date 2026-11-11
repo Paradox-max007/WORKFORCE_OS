@@ -1070,6 +1070,10 @@ export const prodApi = {
       p_advance: input.advance,
       p_deduction: input.deduction,
       p_notes: input.notes,
+      // PRESENT → store as the ACTUAL absent deduction (flagged — the Payroll
+      // page value has priority); absent_auto → back to the configured rule
+      p_absent_deduction: input.absent_deduction ?? null,
+      p_absent_auto: input.absent_auto ?? false,
     });
     assertOk(error);
   },

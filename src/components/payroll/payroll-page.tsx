@@ -46,8 +46,13 @@
 //     absence after those costs AED X (N and X CONFIGURABLE in Trade/Ded
 //     Management → Deductions); it is computed when the payroll is
 //     generated (separate from the manual deduction) and shows inside the
-//     Deduction column (red “A” chip). Clicking a deduction value opens the
-//     dedicated ATTENDANCE CALENDAR page — one calendar per site, with the
+//     Deduction column (red “A” chip). In EDIT MODE it is EDITABLE like a
+//     normal deduction value: the amount typed here is stored as the ACTUAL
+//     deduction (flagged) and has PRIORITY — regeneration keeps it instead
+//     of recomputing the rule; the ↺ button returns it to the rule. The same
+//     value flows into the Salary Sheet, the attendance record and the
+//     Excel export. Clicking a deduction value opens the dedicated
+//     ATTENDANCE CALENDAR page — one calendar per site, with the
 //     employee name, code and total hours on top
 //   • shares the selected month with the Salary Sheet (app store)
 // ============================================================================
@@ -55,8 +60,8 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
-  FileSpreadsheet, History, ListFilter, Loader2, Lock, LockOpen, PencilLine,
-  Scale, Search, StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
+  FileSpreadsheet, History, ListFilter, Loader2, Lock, LockOpen, Pencil, PencilLine,
+  RotateCcw, Scale, Search, StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -674,8 +679,8 @@ function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
             <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Advance</span><span className="font-mono">AED {fmtMoney(employee.advance)}</span></div>
             <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Deduction</span><span className="font-mono">AED {fmtMoney(employee.deduction)}</span></div>
             {(employee.absent_deduction ?? 0) > 0 && (
-              <div className="mt-0.5 flex justify-between" title="Automatic — AED 25 per absence from the 3rd onwards">
-                <span className="text-red-500">− Absent deduction</span>
+              <div className="mt-0.5 flex justify-between" title={`Absent deduction${employee.absent_deduction_edited ? ' — manually set in Edit mode (this value has priority over the rule)' : ' — from the attendance rule (editable in Edit mode)'}`}>
+                <span className="text-red-500">− Absent deduction{employee.absent_deduction_edited ? ' (manual)' : ''}</span>
                 <span className="font-mono text-red-500">AED {fmtMoney(employee.absent_deduction)}</span>
               </div>
             )}
@@ -687,7 +692,7 @@ function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
             <Label>Remarks</Label>
             <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional remarks" className="h-11" />
             <p className="text-[11px] text-muted-foreground">
-              Change the advance / deduction in the table (Edit mode) before confirming if needed.
+              Change the advance / deduction / absent deduction in the table (Edit mode) before confirming if needed.
             </p>
           </div>
         </div>
@@ -1086,17 +1091,44 @@ export function PayrollPage() {
     [employees],
   );
 
-  // ---- inline settlement save (advance / deduction) ------------------------
-  const onAdjust = async (e: PayrollEmployeeVM, advance: number, deduction: number): Promise<void> => {
+  // ---- inline settlement save (advance / deduction / absent deduction) -----
+  // absentDeduction is sent ONLY when the absent input was touched — the
+  // stored value then has priority over the rule (flagged on the settlement)
+  const onAdjust = async (
+    e: PayrollEmployeeVM, advance: number, deduction: number, absentDeduction?: number,
+  ): Promise<void> => {
     setBusyKey(`settle:${e.id}`);
     try {
-      await dataApi.updatePayrollAdjustment(e.id, { advance, deduction, notes: e.notes });
+      await dataApi.updatePayrollAdjustment(e.id, {
+        advance, deduction, notes: e.notes,
+        ...(absentDeduction != null ? { absent_deduction: absentDeduction } : {}),
+      });
       toast.success('Settlement saved', {
-        description: `${e.full_name} — advance AED ${fmtMoney(advance)} · deduction AED ${fmtMoney(deduction)}`,
+        description: `${e.full_name} — advance AED ${fmtMoney(advance)} · deduction AED ${fmtMoney(deduction)}`
+          + (absentDeduction != null ? ` · absent deduction AED ${fmtMoney(absentDeduction)}` : ''),
       });
       load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  // ---- absent deduction → back to the configured rule (recomputed from
+  //      this month's attendance; clears the edited flag) ---------------------
+  const onAbsentAuto = async (e: PayrollEmployeeVM): Promise<void> => {
+    setBusyKey(`settle:${e.id}`);
+    try {
+      await dataApi.updatePayrollAdjustment(e.id, {
+        advance: e.advance, deduction: e.deduction, notes: e.notes, absent_auto: true,
+      });
+      toast.success('Absent deduction reset to the rule', {
+        description: `${e.full_name} — recomputed from the ${MONTH_NAMES[month - 1]} ${year} attendance.`,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to reset');
     } finally {
       setBusyKey(null);
     }
@@ -1415,7 +1447,7 @@ export function PayrollPage() {
               <span>
                 <b>Edit mode</b> — pick the <b>trade</b> from the dropdown (overwrites the stored trade
                 and re-prices the month — updates the Salary Sheet, Employee Details, Attendance and
-                every linked page) and edit <b>advance / deduction</b> inline (saves on blur or Enter).
+                every linked page) and edit <b>advance / deduction / absent deduction</b> inline (saves on blur or Enter).
                 Paid employees are protected. Salary calculation edits stay in the <b>Salary Sheet</b>.
               </span>
             </p>
@@ -1473,7 +1505,7 @@ export function PayrollPage() {
                     <TableHead className="min-w-32">Payment Method</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
-                    <TableHead className="text-right" title={`Manual deduction + automatic absent deduction (AED ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — click a value to open the attendance calendar`}>Deduction</TableHead>
+                    <TableHead className="text-right" title={`Manual deduction + absent deduction (AED ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
                     <TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead>
                   </TableRow>
@@ -1595,10 +1627,45 @@ export function PayrollPage() {
                                   onCommit={(next) => { void onAdjust(e, e.advance, next); }}
                                 />
                               </div>
-                              {(e.absent_deduction ?? 0) > 0 && (
-                                <span className="text-[10px] font-medium text-red-500" title="Automatic absent deduction — not editable here">
-                                  + AED {fmtMoney(e.absent_deduction)} absent
-                                </span>
+                              {/* ABSENT deduction — EDITABLE like a normal deduction
+                                  value. The amount typed here is stored as the
+                                  ACTUAL deduction (flagged) and has priority over
+                                  the rule until the ↺ reset. */}
+                              {((e.absent_deduction ?? 0) > 0 || e.absent_deduction_edited) && (
+                                <div className="flex items-center gap-1.5">
+                                  {e.absent_deduction_edited && (
+                                    <span
+                                      className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-bold text-amber-600 dark:text-amber-400"
+                                      title="Manually set — this amount has priority over the configured rule until reset"
+                                    >
+                                      <Pencil size={9} /> edited
+                                    </span>
+                                  )}
+                                  <span
+                                    className="inline-flex items-center gap-1"
+                                    title={`Absent deduction — editable, same as the manual deduction${e.absent_deduction_edited
+                                      ? ' (currently manually set — priority)'
+                                      : ` (rule: AED ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days})`}`}
+                                  >
+                                    <span className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500">A</span>
+                                    <AdjustInput
+                                      value={e.absent_deduction ?? 0} busy={settleBusy} label="Absent deduction"
+                                      onCommit={(next) => { void onAdjust(e, e.advance, e.deduction, next); }}
+                                    />
+                                  </span>
+                                  {e.absent_deduction_edited && (
+                                    <button
+                                      type="button"
+                                      disabled={settleBusy}
+                                      title="Back to the configured rule — recomputed from this month's attendance"
+                                      aria-label={`Reset the absent deduction of ${e.full_name} to the rule`}
+                                      onClick={() => { void onAbsentAuto(e); }}
+                                      className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border border-border/60 text-muted-foreground transition-colors hover:text-brand disabled:opacity-50"
+                                    >
+                                      {settleBusy ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
+                                    </button>
+                                  )}
+                                </div>
                               )}
                             </div>
                           ) : (
@@ -1620,9 +1687,19 @@ export function PayrollPage() {
                               {(e.absent_deduction ?? 0) > 0 && (
                                 <span
                                   className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
-                                  title={`Automatic absent deduction — AED ${fmtMoney(e.absent_deduction)} (AED ${dedSettings.absent_deduction_amount} × chargeable absences, beyond the first ${dedSettings.absent_free_days})`}
+                                  title={`Absent deduction — AED ${fmtMoney(e.absent_deduction)}${e.absent_deduction_edited
+                                    ? ' · manually set in Edit mode (this value has priority over the rule)'
+                                    : ` (AED ${dedSettings.absent_deduction_amount} × chargeable absences, beyond the first ${dedSettings.absent_free_days}) — editable in Edit mode`}`}
                                 >
                                   A
+                                </span>
+                              )}
+                              {e.absent_deduction_edited && (
+                                <span
+                                  className="inline-flex items-center rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-bold text-amber-600 dark:text-amber-400"
+                                  title="The absent deduction was edited on the Payroll page — the stored amount is the actual deduction"
+                                >
+                                  <Pencil size={9} />
                                 </span>
                               )}
                               <CalendarDays size={11} className="text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
@@ -1706,7 +1783,7 @@ export function PayrollPage() {
             </div>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: AED {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management). Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: AED {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 

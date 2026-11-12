@@ -69,6 +69,20 @@ const assertOk = (error: { message: string } | null): void => {
   if (error) throw new Error(error.message);
 };
 
+/**
+ * Headers for the service-role API routes (/api/admin-users): attaches the
+ * signed-in admin's Supabase access token so the route can verify the caller
+ * is a super admin (its Authorization header is mandatory — without it the
+ * route responds 401 "Missing authorization").
+ */
+async function authJsonHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await sb().auth.getSession();
+  return {
+    'Content-Type': 'application/json',
+    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+  };
+}
+
 /** Local-time today as YYYY-MM-DD — the effective date of a recorded site move. */
 const localTodayYMD = (): string => {
   const d = new Date();
@@ -207,7 +221,7 @@ export const prodApi = {
   async createProfile(email: string, name: string, password: string, role: 'admin' | 'super_admin'): Promise<Profile> {
     const res = await fetch('/api/admin-users', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authJsonHeaders(),
       body: JSON.stringify({ action: 'create', email, name, password, role }),
     });
     const json = (await res.json()) as { error?: string; profile?: Profile };
@@ -219,14 +233,20 @@ export const prodApi = {
     id: string,
     input: { name?: string; email?: string; password?: string; role?: 'admin' | 'super_admin' },
   ): Promise<Profile> {
-    if (input.email || input.password) {
+    // Fetch current profile first: GoTrue rejects updateUserById when the email
+    // is identical to the current one, so only send it when it really changed.
+    const { data: existing } = await sb().from('profiles').select('*').eq('id', id).maybeSingle();
+    const emailChanged = Boolean(
+      input.email && existing && input.email.toLowerCase() !== existing.email.toLowerCase(),
+    );
+    if (emailChanged || input.password) {
       const res = await fetch('/api/admin-users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await authJsonHeaders(),
         body: JSON.stringify({
           action: 'update',
           id,
-          email: input.email ?? undefined,
+          email: emailChanged ? input.email : undefined,
           password: input.password || undefined,
         }),
       });
@@ -234,7 +254,6 @@ export const prodApi = {
       if (!res.ok || json.error) throw new Error(json.error ?? 'Failed to update user');
     }
     if (input.name !== undefined || input.role !== undefined) {
-      const { data: existing } = await sb().from('profiles').select('*').eq('id', id).maybeSingle();
       const { data, error } = await sb().rpc('update_profile_admin', {
         p_id: id,
         p_name: input.name ?? existing?.name ?? 'User',
@@ -251,7 +270,7 @@ export const prodApi = {
   async deleteProfile(id: string): Promise<void> {
     const res = await fetch('/api/admin-users', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authJsonHeaders(),
       body: JSON.stringify({ action: 'delete', id }),
     });
     const json = (await res.json()) as { error?: string };

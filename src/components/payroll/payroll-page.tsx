@@ -55,12 +55,18 @@
 //     ATTENDANCE CALENDAR page — one calendar per site, with the
 //     employee name, code and total hours on top
 //   • shares the selected month with the Salary Sheet (app store)
+//   • BRANCH-WISE SEPARATION — a Branch dropdown in the top row (shared with
+//     the Salary Sheet): picking a branch loads only THAT branch's payroll —
+//     the rows, the top cards and the Excel export all follow the selection.
+//     "No branch" = sites without an owner branch. Normal admins only ever
+//     see their granted branches (+ directly assigned sites) — for them
+//     "All branches" means their own allowance.
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
-  FileSpreadsheet, History, ListFilter, Loader2, Lock, LockOpen, Pencil, PencilLine,
+  FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock, LockOpen, Pencil, PencilLine,
   RotateCcw, Scale, Search, StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
@@ -98,7 +104,8 @@ import { cn } from '@/lib/utils';
 import {
   type CardType, DEFAULT_DEDUCTION_SETTINGS, type DeductionSettings,
   type EmployeeNote, type PayrollEmployeeVM,
-  type SalarySheetReport, type Trade,
+  type SalarySheetReport, type SiteWithCount, type Trade,
+  type BranchWithCount,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -772,6 +779,9 @@ function UnpayDialog({ employee, open, onOpenChange, onSaved }: {
 // ---------------------------------------------------------------------------
 export function PayrollPage() {
   const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'attendance', 'employee', 'trade_rate_history']);
+  // branch/site scoping data — powers the BRANCH dropdown in the top row
+  // (branch grants change → the dropdown and the scoped rows follow)
+  const branchVersion = useRealtimeVersion(['site', 'branch', 'admin_branch', 'admin_site', 'profiles']);
   // separate counters — notes / card types must not reload the whole sheet
   const notesVersion = useRealtimeVersion(['employee_note']);
   const cardVersion = useRealtimeVersion(['card_type', 'employee']);
@@ -781,6 +791,9 @@ export function PayrollPage() {
   const year = useAppStore((s) => s.salaryPeriodYear);
   const month = useAppStore((s) => s.salaryPeriodMonth);
   const setSalaryPeriod = useAppStore((s) => s.setSalaryPeriod);
+  // SHARED branch scope — the Salary Sheet uses the same selection
+  const branchFilter = useAppStore((s) => s.salaryPeriodBranchId);
+  const setBranchFilter = useAppStore((s) => s.setSalaryPeriodBranch);
 
   const [report, setReport] = useState<SalarySheetReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -824,6 +837,38 @@ export function PayrollPage() {
   // ---- payment-method data (card types list + employee sticky notes) -------
   const [cardTypes, setCardTypes] = useState<CardType[]>([]);
   const [notes, setNotes] = useState<EmployeeNote[]>([]);
+
+  // ---- branch-wise separation ----------------------------------------------
+  // branches the viewer may access (super admin → all; normal admin → only
+  // granted ones) + every site (for the site → owner-branch mapping)
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  // normal admins: sites directly assigned to them (Admin Mgmt → Site Access)
+  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(
+    isSuperAdmin ? null : new Set(),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      dataApi.listBranches().catch(() => [] as BranchWithCount[]),
+      dataApi.listSites().catch(() => [] as SiteWithCount[]),
+    ]).then(([brs, sts]) => {
+      if (!cancelled) { setBranches(brs); setSites(sts); }
+    });
+    return () => { cancelled = true; };
+  }, [branchVersion]);
+
+  useEffect(() => {
+    if (isSuperAdmin) { setAssignedSiteIds(null); return; }
+    const me = useAuthStore.getState().user;
+    if (!me) return;
+    let cancelled = false;
+    dataApi.getSiteAssignments(me.id)
+      .then((ids) => { if (!cancelled) setAssignedSiteIds(new Set(ids)); })
+      .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
+    return () => { cancelled = true; };
+  }, [isSuperAdmin, branchVersion]);
 
   const loadNotes = (): void => {
     dataApi.listEmployeeNotes()
@@ -905,6 +950,58 @@ export function PayrollPage() {
   const finalized = period?.status === 'finalized';
   const employees = useMemo(() => report?.employees ?? [], [report]);
 
+  // ---- BRANCH-WISE scoping (the top-row Branch dropdown) --------------------
+  // An employee belongs to a branch when they worked at ANY of its sites this
+  // period (their row stays consolidated — that is how Payroll works). Normal
+  // admins are additionally limited to the sites of their GRANTED branches
+  // plus directly assigned sites, so "All branches" is already their own.
+  const branchIdOfSite = useMemo(
+    () => new Map((sites ?? []).map((s) => [s.id, s.branch_id ?? null] as const)),
+    [sites],
+  );
+  const grantedBranchSiteIds = useMemo(() => {
+    const ids = new Set<string>();
+    const granted = new Set((branches ?? []).map((b) => b.id));
+    (sites ?? []).forEach((s) => { if (s.branch_id && granted.has(s.branch_id)) ids.add(s.id); });
+    return ids;
+  }, [branches, sites]);
+  // sites a normal admin may see (granted branches + direct assignments);
+  // null = unrestricted super admin
+  const allowedSiteIds = useMemo<Set<string> | null>(() => {
+    if (isSuperAdmin) return null;
+    const ids = new Set([...grantedBranchSiteIds, ...(assignedSiteIds ?? [])]);
+    return ids;
+  }, [isSuperAdmin, grantedBranchSiteIds, assignedSiteIds]);
+
+  const scopedEmployees = useMemo(() => {
+    if (!isSuperAdmin) {
+      const allow = allowedSiteIds ?? new Set<string>();
+      const base = employees.filter((e) => e.sites.some((s) => s.site_id != null && allow.has(s.site_id)));
+      if (branchFilter === 'all') return base;
+      if (branchFilter === FILTER_NONE) {
+        return base.filter((e) => !e.sites.some((s) => s.site_id != null
+          && (branchIdOfSite.get(s.site_id) ?? null) !== null));
+      }
+      return base.filter((e) => e.sites.some((s) => s.site_id != null
+        && branchIdOfSite.get(s.site_id) === branchFilter));
+    }
+    if (branchFilter === 'all') return employees;
+    if (branchFilter === FILTER_NONE) {
+      return employees.filter((e) => !e.sites.some((s) => s.site_id != null
+        && (branchIdOfSite.get(s.site_id) ?? null) !== null));
+    }
+    return employees.filter((e) => e.sites.some((s) => s.site_id != null
+      && branchIdOfSite.get(s.site_id) === branchFilter));
+  }, [employees, isSuperAdmin, allowedSiteIds, branchFilter, branchIdOfSite]);
+
+  // true when a specific branch (or the viewer's own allowance) narrows the data
+  const branchScopeActive = branchFilter !== 'all' || !isSuperAdmin;
+  const selectedBranchName = branchFilter === 'all'
+    ? null
+    : branchFilter === FILTER_NONE
+      ? 'No branch'
+      : (branches ?? []).find((b) => b.id === branchFilter)?.name ?? null;
+
   // notes grouped per employee (for the sticky-note icons)
   const notesByEmployee = useMemo(() => {
     const map = new Map<string, EmployeeNote[]>();
@@ -916,32 +1013,32 @@ export function PayrollPage() {
     return map;
   }, [notes]);
 
-  // ---- search / filter option lists (built from this period's rows) --------
+  // ---- search / filter option lists (built from the BRANCH-SCOPED rows) ----
   const tradeFilterOptions = useMemo(() => {
     const map = new Map<string, string>();
-    employees.forEach((e) => {
+    scopedEmployees.forEach((e) => {
       if (e.trade_id) map.set(e.trade_id, e.trade_name ?? 'Unknown trade');
     });
     return [...map.entries()].map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [employees]);
+  }, [scopedEmployees]);
 
   const campFilterOptions = useMemo(() => {
     const map = new Map<string, string>();
-    employees.forEach((e) => {
+    scopedEmployees.forEach((e) => {
       if (e.camp_id) map.set(e.camp_id, e.camp_name ?? 'Unknown camp');
     });
     return [...map.entries()].map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [employees]);
+  }, [scopedEmployees]);
 
   // countries present in this period, grouped by region (Africans, Asians, …)
   const regionCountries = useMemo(
-    () => countriesByRegion(employees.map((e) => e.nationality)),
-    [employees],
+    () => countriesByRegion(scopedEmployees.map((e) => e.nationality)),
+    [scopedEmployees],
   );
   const countryFilterOptions = useMemo(() => {
-    const present = new Set(employees.map((e) => e.nationality).filter(Boolean) as string[]);
+    const present = new Set(scopedEmployees.map((e) => e.nationality).filter(Boolean) as string[]);
     if (regionFilter === FILTER_ALL) {
       return Object.values(regionCountries).flat().sort((a, b) => a.localeCompare(b));
     }
@@ -953,7 +1050,7 @@ export function PayrollPage() {
     const region = NATIONALITY_REGIONS.find((r) => r.key === regionFilter);
     if (!region) return [];
     return region.countries.filter((c) => present.has(c));
-  }, [regionFilter, regionCountries, employees]);
+  }, [regionFilter, regionCountries, scopedEmployees]);
 
   const filtersActive = search.trim() !== ''
     || tradeFilter !== FILTER_ALL
@@ -973,7 +1070,7 @@ export function PayrollPage() {
     const region = regionFilter === FILTER_ALL
       ? null
       : NATIONALITY_REGIONS.find((r) => r.key === regionFilter) ?? null;
-    return employees.filter((e) => {
+    return scopedEmployees.filter((e) => {
       if (tradeFilter !== FILTER_ALL && (e.trade_id ?? FILTER_NONE) !== tradeFilter) return false;
       // nationality region + country filters (same behaviour as Employees)
       if (region) {
@@ -1009,7 +1106,7 @@ export function PayrollPage() {
         || e.employee_code.toLowerCase().includes(q)
         || (e.trade_name ?? '').toLowerCase().includes(q);
     });
-  }, [employees, search, tradeFilter, regionFilter, countryFilter, campFilter, statusFilter, payFilter]);
+  }, [scopedEmployees, search, tradeFilter, regionFilter, countryFilter, campFilter, statusFilter, payFilter]);
 
   // footer totals follow the FILTERED rows (consistent with the visible table)
   const filteredTotals = useMemo(() => ({
@@ -1038,6 +1135,9 @@ export function PayrollPage() {
   // download filename (Pulse_Payroll_<Month>-<Year>_<chips>_<date>.xlsx).
   const exportChips = (): string[] => {
     const chips: string[] = [];
+    if (branchFilter !== 'all') {
+      chips.push(`Branch: ${branchFilter === FILTER_NONE ? 'No branch' : selectedBranchName ?? 'Branch'}`);
+    }
     const q = search.trim();
     if (q) chips.push(`Search: ${q}`);
     if (regionFilter !== FILTER_ALL) {
@@ -1076,20 +1176,27 @@ export function PayrollPage() {
     const fileName = payrollExportFileName(year, month, filters);
     // give the button its spinner frame, then switch to the preview page
     setTimeout(() => {
-      navigateToPayrollExport(filteredEmployees, year, month, fileName, filters, employees.length);
+      navigateToPayrollExport(filteredEmployees, year, month, fileName, filters, scopedEmployees.length);
       setExporting(false);
     }, 120);
   };
 
-  // payment cards — read from the stored settlement rows (never recalculated)
+  // payment cards — read from the stored settlement rows (never recalculated).
+  // When a BRANCH is selected (or a normal admin's allowance applies) the
+  // cards describe that scope — the selected branch's payroll is what loads.
   const paidNet = useMemo(
-    () => round2(employees.filter((e) => e.payment_status === 'paid').reduce((n, e) => n + e.net_salary, 0)),
-    [employees],
+    () => round2(scopedEmployees.filter((e) => e.payment_status === 'paid').reduce((n, e) => n + e.net_salary, 0)),
+    [scopedEmployees],
   );
   const balanceToPay = useMemo(
-    () => round2(employees.filter((e) => e.payment_status !== 'paid').reduce((n, e) => n + e.net_salary, 0)),
-    [employees],
+    () => round2(scopedEmployees.filter((e) => e.payment_status !== 'paid').reduce((n, e) => n + e.net_salary, 0)),
+    [scopedEmployees],
   );
+  const scopedPaidCount = scopedEmployees.filter((e) => e.payment_status === 'paid').length;
+  const scopedUnpaidCount = scopedEmployees.length - scopedPaidCount;
+  const scopedGross = round2(scopedEmployees.reduce((n, e) => n + e.gross_salary, 0));
+  const scopedAdvances = round2(scopedEmployees.reduce((n, e) => n + e.advance, 0));
+  const scopedDeductions = round2(scopedEmployees.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0));
 
   // ---- inline settlement save (advance / deduction / absent deduction) -----
   // absentDeduction is sent ONLY when the absent input was touched — the
@@ -1257,7 +1364,13 @@ export function PayrollPage() {
             <div className="shrink-0 rounded-lg bg-brand/10 p-1.5 text-brand"><Banknote size={16} /></div>
             <div className="min-w-0">
               <h1 className="truncate text-sm font-semibold">Payroll — {MONTH_NAMES[month - 1]} {year}</h1>
-              <p className="truncate text-xs text-muted-foreground">One row per employee — consolidated across all sites</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {branchFilter === 'all'
+                  ? (isSuperAdmin
+                      ? 'One row per employee — consolidated across all sites'
+                      : 'One row per employee — your granted branches')
+                  : `One row per employee — ${selectedBranchName ?? 'the selected branch'}`}
+              </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1272,6 +1385,29 @@ export function PayrollPage() {
                 {finalized ? 'Finalized' : 'Draft'}
               </span>
             )}
+            {/* BRANCH dropdown — branch-wise separation: picking a branch
+                loads only that branch's payroll (rows, cards and the export) */}
+            <Select value={branchFilter} onValueChange={setBranchFilter}>
+              <SelectTrigger
+                className="h-10 w-[170px] shrink-0 bg-card sm:w-48"
+                aria-label="Filter payroll by branch"
+                title="Show only the selected branch's payroll"
+              >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <GitBranch size={14} className="shrink-0 text-brand" />
+                  <SelectValue />
+                </div>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All branches</SelectItem>
+                {(branches ?? []).map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name}{!b.is_active ? ' (inactive)' : ''}
+                  </SelectItem>
+                ))}
+                {isSuperAdmin && <SelectItem value={FILTER_NONE}>No branch</SelectItem>}
+              </SelectContent>
+            </Select>
             <Select value={MONTH_NAMES[month - 1]} onValueChange={(m) => setSalaryPeriod(year, MONTH_NAMES.indexOf(m) + 1)}>
               <SelectTrigger className="h-10 w-36 bg-card" aria-label="Payroll month"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -1370,8 +1506,8 @@ export function PayrollPage() {
             )}
           </Button>
           {filtersActive && (
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground lg:hidden" title="Employees shown / total">
-              {filteredEmployees.length}/{employees.length}
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground lg:hidden" title="Employees shown / branch scope">
+              {filteredEmployees.length}/{scopedEmployees.length}
             </span>
           )}
 
@@ -1380,8 +1516,8 @@ export function PayrollPage() {
             {renderFilterSelects()}
             {filtersActive && (
               <>
-                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title="Employees shown / total">
-                  {filteredEmployees.length}/{employees.length}
+                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title="Employees shown / branch scope">
+                  {filteredEmployees.length}/{scopedEmployees.length}
                 </span>
                 <Button variant="ghost" size="sm" className="h-9 shrink-0 px-2.5 text-xs" onClick={clearFilters}>
                   <X size={13} /> Clear
@@ -1400,7 +1536,7 @@ export function PayrollPage() {
           <SheetHeader className="border-b border-border/60 px-4 py-3">
             <SheetTitle className="text-sm">Filters</SheetTitle>
             <SheetDescription className="text-xs">
-              {filteredEmployees.length} of {employees.length} employees shown — changes apply live
+              {filteredEmployees.length} of {scopedEmployees.length} employees shown — changes apply live
             </SheetDescription>
           </SheetHeader>
           <div className="grid gap-2.5 px-4 py-4 [&_[data-slot=select-trigger]]:w-full">
@@ -1453,13 +1589,14 @@ export function PayrollPage() {
             </p>
           )}
 
-          {/* totals — incl. the new Paid salary & Balance to pay cards */}
+          {/* totals — branch-scoped when a branch is picked (the selected
+              branch's payroll is what loads); period totals otherwise */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[
-              { icon: <Users size={12} />, label: 'Total employees', value: String(report.totals.employees), hint: `${report.totals.paid_count} paid · ${report.totals.unpaid_count} unpaid`, tone: 'default' as const },
-              { icon: <Banknote size={12} />, label: 'Total gross salary', value: `AED ${fmtMoney(report.totals.gross_salary)}`, hint: `Adv. ${fmtMoney(report.totals.advances)} · Ded. ${fmtMoney(report.totals.deductions)}`, tone: 'brand' as const },
-              { icon: <BadgeCheck size={12} />, label: 'Paid salary', value: `AED ${fmtMoney(paidNet)}`, hint: `${report.totals.paid_count} employee${report.totals.paid_count === 1 ? '' : 's'} paid (net)`, tone: 'emerald' as const },
-              { icon: <Scale size={12} />, label: 'Balance to pay', value: `AED ${fmtMoney(balanceToPay)}`, hint: `${report.totals.unpaid_count} employee${report.totals.unpaid_count === 1 ? '' : 's'} unpaid (net)`, tone: 'amber' as const },
+              { icon: <Users size={12} />, label: 'Total employees', value: String(branchScopeActive ? scopedEmployees.length : report.totals.employees), hint: branchScopeActive ? `${scopedPaidCount} paid · ${scopedUnpaidCount} unpaid` : `${report.totals.paid_count} paid · ${report.totals.unpaid_count} unpaid`, tone: 'default' as const },
+              { icon: <Banknote size={12} />, label: 'Total gross salary', value: `AED ${fmtMoney(branchScopeActive ? scopedGross : report.totals.gross_salary)}`, hint: `Adv. ${fmtMoney(branchScopeActive ? scopedAdvances : report.totals.advances)} · Ded. ${fmtMoney(branchScopeActive ? scopedDeductions : report.totals.deductions)}`, tone: 'brand' as const },
+              { icon: <BadgeCheck size={12} />, label: 'Paid salary', value: `AED ${fmtMoney(paidNet)}`, hint: `${branchScopeActive ? scopedPaidCount : report.totals.paid_count} employee${(branchScopeActive ? scopedPaidCount : report.totals.paid_count) === 1 ? '' : 's'} paid (net)`, tone: 'emerald' as const },
+              { icon: <Scale size={12} />, label: 'Balance to pay', value: `AED ${fmtMoney(balanceToPay)}`, hint: `${branchScopeActive ? scopedUnpaidCount : report.totals.unpaid_count} employee${(branchScopeActive ? scopedUnpaidCount : report.totals.unpaid_count) === 1 ? '' : 's'} unpaid (net)`, tone: 'amber' as const },
             ].map((c, i) => (
               <motion.div
                 key={c.label}
@@ -1752,9 +1889,11 @@ export function PayrollPage() {
                   {filteredEmployees.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">
-                        {employees.length === 0
-                          ? 'No employees in this payroll period.'
-                          : 'No employees match the search / filters.'}
+                        {scopedEmployees.length === 0 && branchScopeActive
+                          ? `No employees worked in ${selectedBranchName ?? 'your branches'} this month.`
+                          : employees.length === 0
+                            ? 'No employees in this payroll period.'
+                            : 'No employees match the search / filters.'}
                       </TableCell>
                     </TableRow>
                   )}
@@ -1764,7 +1903,7 @@ export function PayrollPage() {
                     <TableRow className="font-semibold hover:bg-transparent">
                       <TableCell colSpan={3} className="text-right text-xs uppercase tracking-wide text-muted-foreground">
                         Total — {filteredEmployees.length} employee{filteredEmployees.length === 1 ? '' : 's'}
-                        {filtersActive && ` (of ${employees.length})`}
+                        {filtersActive && ` (of ${scopedEmployees.length})`}
                       </TableCell>
                       <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.hours)} h</TableCell>
                       <TableCell />

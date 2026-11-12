@@ -25,12 +25,18 @@
 //     SAME rule as the Payroll page: the absent amount edited there has
 //     PRIORITY over the configured rule and flows into this sheet, its
 //     totals and the net payable automatically
+//   • BRANCH-WISE SEPARATION — a Branch dropdown in the top row (shared with
+//     the Payroll page): picking a branch loads only THAT branch's site
+//     sections, summary cards and CSV export. "No branch" = sites without
+//     an owner branch (plus the idle employees — they belong to no branch).
+//     Normal admins only ever see their granted branches (+ directly
+//     assigned sites); the idle section is super-admin only.
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, ChevronUp, Clock, Eye,
-  FileSpreadsheet, History, Loader2, Lock, LockOpen, Pencil, PencilLine, RotateCcw, Search,
+  FileSpreadsheet, GitBranch, History, Loader2, Lock, LockOpen, Pencil, PencilLine, RotateCcw, Search,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -54,7 +60,7 @@ import { fmtDateTime, initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
   type PayrollEmployeeVM, type PayrollSalaryLineVM, type SalarySheetReport,
-  type SalarySheetSiteGroup, type Trade,
+  type SalarySheetSiteGroup, type SiteWithCount, type Trade, type BranchWithCount,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -78,6 +84,10 @@ const ROLE_LABEL: Record<string, string> = {
 const TIER_LABEL: Record<string, string> = {
   below_threshold: 'Below eligibility', qualified: 'Qualified', manual: 'Manual',
 };
+
+/** sentinel filter values */
+const FILTER_ALL = 'all';
+const FILTER_NONE = '__none__';
 
 /** sentinel for "no trade" in the edit-mode dropdown (Radix needs non-empty values) */
 const NO_TRADE = '__none__';
@@ -570,12 +580,17 @@ function SiteGroup({
 // ---------------------------------------------------------------------------
 export function SalarySheetPage() {
   const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'attendance', 'employee', 'trade_rate_history']);
+  // branch/site scoping data — powers the BRANCH dropdown in the top row
+  const branchVersion = useRealtimeVersion(['site', 'branch', 'admin_branch', 'admin_site', 'profiles']);
   const isSuperAdmin = useAuthStore((s) => s.user?.role) === 'super_admin';
 
   // SHARED payroll period — the Payroll page uses the same selection
   const year = useAppStore((s) => s.salaryPeriodYear);
   const month = useAppStore((s) => s.salaryPeriodMonth);
   const setSalaryPeriod = useAppStore((s) => s.setSalaryPeriod);
+  // SHARED branch scope — the Payroll page uses the same selection
+  const branchFilter = useAppStore((s) => s.salaryPeriodBranchId);
+  const setBranchFilter = useAppStore((s) => s.setSalaryPeriodBranch);
 
   const [report, setReport] = useState<SalarySheetReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -596,6 +611,38 @@ export function SalarySheetPage() {
   const [search, setSearch] = useState('');
   // ---- audit trail — collapsed behind a pill button (same as Payroll) -------
   const [auditOpen, setAuditOpen] = useState(false);
+
+  // ---- branch-wise separation ----------------------------------------------
+  // branches the viewer may access (super admin → all; normal admin → only
+  // granted ones) + every site (for the site → owner-branch mapping)
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  // normal admins: sites directly assigned to them (Admin Mgmt → Site Access)
+  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(
+    isSuperAdmin ? null : new Set(),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      dataApi.listBranches().catch(() => [] as BranchWithCount[]),
+      dataApi.listSites().catch(() => [] as SiteWithCount[]),
+    ]).then(([brs, sts]) => {
+      if (!cancelled) { setBranches(brs); setSites(sts); }
+    });
+    return () => { cancelled = true; };
+  }, [branchVersion]);
+
+  useEffect(() => {
+    if (isSuperAdmin) { setAssignedSiteIds(null); return; }
+    const me = useAuthStore.getState().user;
+    if (!me) return;
+    let cancelled = false;
+    dataApi.getSiteAssignments(me.id)
+      .then((ids) => { if (!cancelled) setAssignedSiteIds(new Set(ids)); })
+      .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
+    return () => { cancelled = true; };
+  }, [isSuperAdmin, branchVersion]);
 
   // SILENT REFRESH — skeleton only on the FIRST load of a period (same
   // pattern as the Payroll page): later reloads (row edited, trade picked,
@@ -783,10 +830,86 @@ export function SalarySheetPage() {
 
   const period = report?.period ?? null;
   const finalized = period?.status === 'finalized';
+
+  // ---- BRANCH-WISE scoping (the top-row Branch dropdown) --------------------
+  // A site section belongs to the owner branch of its site; the idle group
+  // (no site) belongs to no branch. Normal admins are limited to their granted
+  // branches' sites (+ directly assigned sites) and never see the idle group.
+  const branchIdOfSite = useMemo(
+    () => new Map((sites ?? []).map((s) => [s.id, s.branch_id ?? null] as const)),
+    [sites],
+  );
+  const allowedSiteIds = useMemo<Set<string> | null>(() => {
+    if (isSuperAdmin) return null;
+    const granted = new Set((branches ?? []).map((b) => b.id));
+    const ids = new Set<string>();
+    (sites ?? []).forEach((s) => {
+      if ((s.branch_id && granted.has(s.branch_id)) || (assignedSiteIds ?? new Set()).has(s.id)) ids.add(s.id);
+    });
+    return ids;
+  }, [isSuperAdmin, branches, sites, assignedSiteIds]);
+
+  const allIdleGroups = useMemo(() => report?.sites.filter((g) => g.idle) ?? [], [report]);
+  const allSiteGroups = useMemo(() => report?.sites.filter((g) => g.idle !== true) ?? [], [report]);
+
+  const scopedSiteGroups = useMemo(() => {
+    const base = !isSuperAdmin
+      ? allSiteGroups.filter((g) => g.site_id != null && (allowedSiteIds ?? new Set()).has(g.site_id))
+      : allSiteGroups;
+    if (branchFilter === 'all') return base;
+    if (branchFilter === FILTER_NONE) {
+      return base.filter((g) => g.site_id == null || (branchIdOfSite.get(g.site_id) ?? null) === null);
+    }
+    return base.filter((g) => g.site_id != null && branchIdOfSite.get(g.site_id) === branchFilter);
+  }, [isSuperAdmin, allSiteGroups, allowedSiteIds, branchFilter, branchIdOfSite]);
+
+  const scopedIdleGroups = useMemo(() => {
+    // idle employees belong to no branch → super admins see them under
+    // "All branches" and "No branch"; normal admins never do
+    if (!isSuperAdmin) return [];
+    return branchFilter === 'all' || branchFilter === FILTER_NONE ? allIdleGroups : [];
+  }, [isSuperAdmin, branchFilter, allIdleGroups]);
+
+  // employees that appear in the SCOPE (distinct — a moved employee can sit
+  // in several site sections) — drives the branch-scoped summary cards + CSV
+  const scopedEmployeeIds = useMemo(() => {
+    const ids = new Set<string>();
+    scopedSiteGroups.forEach((g) => g.rows.forEach((r) => ids.add(r.employee_id)));
+    scopedIdleGroups.forEach((g) => g.rows.forEach((r) => ids.add(r.employee_id)));
+    return ids;
+  }, [scopedSiteGroups, scopedIdleGroups]);
+  const scopedEmployees = useMemo(
+    () => (report?.employees ?? []).filter((e) => scopedEmployeeIds.has(e.employee_id)),
+    [report, scopedEmployeeIds],
+  );
+
+  const branchScopeActive = branchFilter !== 'all' || !isSuperAdmin;
+  const selectedBranchName = branchFilter === 'all'
+    ? null
+    : branchFilter === FILTER_NONE
+      ? 'No branch'
+      : (branches ?? []).find((b) => b.id === branchFilter)?.name ?? null;
+
+  // branch-scoped summary values (used by the cards + CSV when a scope is
+  // active; otherwise the period totals from the report stay authoritative)
+  const scopedSummary = useMemo(() => {
+    const employees = scopedEmployees.length;
+    const totalHours = Math.round(scopedSiteGroups.concat(scopedIdleGroups)
+      .reduce((n, g) => n + g.rows.reduce((m, r) => m + r.total_hours, 0), 0) * 100) / 100;
+    const gross = Math.round(scopedEmployees.reduce((n, e) => n + e.gross_salary, 0) * 100) / 100;
+    const advances = Math.round(scopedEmployees.reduce((n, e) => n + e.advance, 0) * 100) / 100;
+    const deductions = Math.round(scopedEmployees.reduce(
+      (n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0) * 100) / 100;
+    const paid = scopedEmployees.filter((e) => e.payment_status === 'paid').length;
+    return { employees, totalHours, gross, advances, deductions, paid, unpaid: employees - paid };
+  }, [scopedEmployees, scopedSiteGroups, scopedIdleGroups]);
+
   const exportCsv = (): void => {
     if (!report) return;
+    // follows the BRANCH scope — only the selected branch's sections and
+    // employees are exported (all sites when "All branches" is picked)
     const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Rate (AED/h)', 'Gross (AED)', 'Advance (AED)', 'Deduction (AED)']];
-    report.sites.forEach((g) => g.rows.forEach((r, i) => {
+    scopedSiteGroups.concat(scopedIdleGroups).forEach((g) => g.rows.forEach((r, i) => {
       const emp = employeeById.get(r.employee_id);
       rows.push([
         g.site_name, String(i + 1), r.full_name, r.employee_code,
@@ -798,7 +921,7 @@ export function SalarySheetPage() {
       ]);
     }));
     const summary: string[][] = [['', ''], ['EMPLOYEES', ''], ['Employee', 'Employee ID', 'Trade', 'Total Hours', 'Gross', 'Advance', 'Deduction', 'Status']];
-    report.employees.forEach((e) => summary.push([
+    scopedEmployees.forEach((e) => summary.push([
       e.full_name, e.employee_code, e.trade_name ?? '',
       fmtHrs(e.total_hours), fmtMoney(e.gross_salary),
       e.advance > 0 ? fmtMoney(e.advance) : '',
@@ -813,13 +936,13 @@ export function SalarySheetPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `salary-sheet-${year}-${String(month).padStart(2, '0')}.csv`;
+    const branchSlug = branchFilter === 'all'
+      ? ''
+      : `-${(selectedBranchName ?? 'branch').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    a.download = `salary-sheet${branchSlug}-${year}-${String(month).padStart(2, '0')}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
-
-  const idleGroups = report?.sites.filter((g) => g.idle) ?? [];
-  const siteGroups = report?.sites.filter((g) => g.idle !== true) ?? [];
 
   // search narrows the rows inside every group; the group counters are
   // recomputed from the visible rows and empty groups are hidden entirely
@@ -846,12 +969,12 @@ export function SalarySheetPage() {
       })
       .filter((g) => g.rows.length > 0), [matchesRow]);
 
-  const visibleSiteGroups = useMemo(() => filterGroups(siteGroups), [filterGroups, siteGroups]);
-  const visibleIdleGroups = useMemo(() => filterGroups(idleGroups), [filterGroups, idleGroups]);
+  const visibleSiteGroups = useMemo(() => filterGroups(scopedSiteGroups), [filterGroups, scopedSiteGroups]);
+  const visibleIdleGroups = useMemo(() => filterGroups(scopedIdleGroups), [filterGroups, scopedIdleGroups]);
   const visibleRowCount = visibleSiteGroups.reduce((n, g) => n + g.rows.length, 0)
     + visibleIdleGroups.reduce((n, g) => n + g.rows.length, 0);
-  const totalRowCount = siteGroups.reduce((n, g) => n + g.rows.length, 0)
-    + idleGroups.reduce((n, g) => n + g.rows.length, 0);
+  const totalRowCount = scopedSiteGroups.reduce((n, g) => n + g.rows.length, 0)
+    + scopedIdleGroups.reduce((n, g) => n + g.rows.length, 0);
 
   return (
     <div className="mx-auto max-w-[1600px] space-y-4">
@@ -861,7 +984,9 @@ export function SalarySheetPage() {
           <div className="flex min-w-0 items-center gap-2.5">
             <div className="shrink-0 rounded-lg bg-brand/10 p-1.5 text-brand"><Wallet size={16} /></div>
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold">Salary Sheet</h1>
+              <h1 className="truncate text-sm font-semibold">
+                Salary Sheet{selectedBranchName ? ` — ${selectedBranchName}` : ''}
+              </h1>
               <p className="truncate text-xs text-muted-foreground">Site-wise hours, rates &amp; gross — the salary calculation source of truth</p>
             </div>
           </div>
@@ -877,6 +1002,29 @@ export function SalarySheetPage() {
               {finalized ? 'Finalized' : 'Draft'}
             </span>
           )}
+          {/* BRANCH dropdown — branch-wise separation: picking a branch loads
+              only that branch's site sections, cards and CSV export */}
+          <Select value={branchFilter} onValueChange={setBranchFilter}>
+            <SelectTrigger
+              className="h-10 w-[170px] shrink-0 bg-card sm:w-48"
+              aria-label="Filter salary sheet by branch"
+              title="Show only the selected branch's salary sheet"
+            >
+              <div className="flex min-w-0 items-center gap-1.5">
+                <GitBranch size={14} className="shrink-0 text-brand" />
+                <SelectValue />
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All branches</SelectItem>
+              {(branches ?? []).map((b) => (
+                <SelectItem key={b.id} value={b.id}>
+                  {b.name}{!b.is_active ? ' (inactive)' : ''}
+                </SelectItem>
+              ))}
+              {isSuperAdmin && <SelectItem value={FILTER_NONE}>No branch</SelectItem>}
+            </SelectContent>
+          </Select>
           <Select value={MONTH_NAMES[month - 1]} onValueChange={(m) => setSalaryPeriod(year, MONTH_NAMES.indexOf(m) + 1)}>
             <SelectTrigger className="h-10 w-36 bg-card" aria-label="Payroll month"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -983,26 +1131,32 @@ export function SalarySheetPage() {
             </p>
           )}
 
-          {/* summary cards */}
+          {/* summary cards — branch-scoped when a branch is picked (the
+              selected branch's sheet is what loads); period totals otherwise */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <StatCard index={0} icon={<Users size={12} />} label="Employees"
-              value={String(report.totals.employees)} />
+              value={String(branchScopeActive ? scopedSummary.employees : report.totals.employees)} />
             <StatCard index={1} icon={<Clock size={12} />} label="Total hours"
-              value={fmtHrs(report.totals.total_hours)} />
+              value={fmtHrs(branchScopeActive ? scopedSummary.totalHours : report.totals.total_hours)} />
             <StatCard index={2} icon={<Banknote size={12} />} label="Gross salary"
-              value={`AED ${fmtMoney(report.totals.gross_salary)}`} tone="brand"
-              hint={`Adv. ${fmtMoney(report.totals.advances)} · Ded. ${fmtMoney(report.totals.deductions)}`} />
+              value={`AED ${fmtMoney(branchScopeActive ? scopedSummary.gross : report.totals.gross_salary)}`} tone="brand"
+              hint={`Adv. ${fmtMoney(branchScopeActive ? scopedSummary.advances : report.totals.advances)} · Ded. ${fmtMoney(branchScopeActive ? scopedSummary.deductions : report.totals.deductions)}`} />
             <StatCard index={3} icon={<BadgeCheck size={12} />} label="Paid"
-              value={`${report.totals.paid_count} / ${report.totals.employees}`} tone="emerald"
-              hint={`${report.totals.unpaid_count} unpaid`} />
+              value={`${branchScopeActive ? scopedSummary.paid : report.totals.paid_count} / ${branchScopeActive ? scopedSummary.employees : report.totals.employees}`} tone="emerald"
+              hint={`${branchScopeActive ? scopedSummary.unpaid : report.totals.unpaid_count} unpaid`} />
           </div>
 
-          {/* site groups (historical site attribution) */}
-          {siteGroups.length === 0 && idleGroups.length === 0 ? (
+          {/* site groups (historical site attribution) — scoped to the
+              selected branch */}
+          {scopedSiteGroups.length === 0 && scopedIdleGroups.length === 0 ? (
             <EmptyState
-              icon={<Users size={22} />}
-              title="No employee hours this month"
-              description="Mark attendance first — the salary sheet prices every hour at the site where it was worked."
+              icon={<GitBranch size={22} />}
+              title={branchScopeActive
+                ? `No employee hours in ${selectedBranchName ?? 'your branches'} this month`
+                : 'No employee hours this month'}
+              description={branchScopeActive
+                ? 'Either no attendance was marked at this branch\u2019s sites yet, or no sites are assigned to it. Pick another branch or check All branches.'
+                : 'Mark attendance first — the salary sheet prices every hour at the site where it was worked.'}
             />
           ) : visibleRowCount === 0 ? (
             <EmptyState
@@ -1037,7 +1191,7 @@ export function SalarySheetPage() {
                 <SiteGroup
                   key="idle-employees"
                   group={g}
-                  index={siteGroups.length + i}
+                  index={scopedSiteGroups.length + i}
                   editMode={editMode}
                   peIdOf={peIdOf}
                   siteDraftOf={siteDraftOf}

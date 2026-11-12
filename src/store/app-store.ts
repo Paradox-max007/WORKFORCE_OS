@@ -89,6 +89,11 @@ interface AppStore {
   salaryPeriodYear: number;
   salaryPeriodMonth: number;
   setSalaryPeriod: (year: number, month: number) => void;
+  /** Shared payroll BRANCH scope — Salary Sheet and Payroll are separated
+   *  branch-wise: 'all' (every branch the viewer may access), a branch id,
+   * or '__none__' (sites without an owner branch). Switching pages keeps it. */
+  salaryPeriodBranchId: string;
+  setSalaryPeriodBranch: (branchId: string) => void;
   /** Which tab the Notifications Hub opens on (deep links from other pages) */
   notificationsTab: 'requests' | 'warnings' | 'fines';
   navigateTo: (view: AppView) => void;
@@ -137,6 +142,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   salaryPeriodYear: new Date().getFullYear(),
   salaryPeriodMonth: new Date().getMonth() + 1,
   setSalaryPeriod: (year, month) => set({ salaryPeriodYear: year, salaryPeriodMonth: month }),
+  salaryPeriodBranchId: 'all',
+  setSalaryPeriodBranch: (branchId) => set({ salaryPeriodBranchId: branchId }),
   notificationsTab: 'requests' as const,
   navigateTo: (view) => set(
     // plain sidebar navigation to the hub always opens the default Requests

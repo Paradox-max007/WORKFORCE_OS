@@ -50,7 +50,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeftRight, Building2, CalendarCheck, CalendarDays, Check, CheckCheck, ChevronLeft, ChevronRight, Copy, ExternalLink, Link2, Loader2, Lock, MessageCircle, Search, Send, Shield,
+  ArrowLeftRight, Building2, CalendarCheck, CalendarDays, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, Copy, ExternalLink, GitBranch, Link2, Loader2, Lock, MapPin, MessageCircle, Search, Send, Shield,
   Tent, Unlock, UserCheck, UserX, Users, X, Zap,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
@@ -79,7 +79,10 @@ import {
   type SiteTimelineInput,
 } from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
-import type { AdminSiteAssignment, Attendance, AttendanceShareLink, BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount } from '@/lib/types';
+import type {
+  AdminSiteAssignment, Attendance, AttendanceShareLink, BranchWithCount,
+  BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount,
+} from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -190,11 +193,24 @@ interface SiteSection {
   isIdle?: boolean;
 }
 
+/** A collapsible BRANCH row in the super-admin sheet view: the branch's site
+ *  sections render inside when expanded ("No branch" groups unassigned sites). */
+interface BranchSectionGroup {
+  id: string;
+  name: string;
+  location: string | null;
+  isActive: boolean;
+  /** every site of this branch (for the header chip) */
+  siteCount: number;
+  sections: SiteSection[];
+  isNone?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export function AttendancePage() {
-  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer', 'profiles', 'attendance_share_link']);
+  const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'camp', 'admin_site', 'site_transfer', 'profiles', 'attendance_share_link', 'branch', 'admin_branch']);
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
 
@@ -206,6 +222,10 @@ export function AttendancePage() {
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [transfers, setTransfers] = useState<SiteTransfer[] | null>(null);
   const [records, setRecords] = useState<Attendance[] | null>(null);
+  // branches: for SUPER ADMONS this is every branch (the collapsible sheet
+  // grouping); for normal admins listBranches returns only their GRANTED
+  // branches — their sites join the effective scoping below
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
   // admin accounts assigned to mark specific sites (Admins → Site Access) —
   // merged with each site's named marker for "View by Supervisors"
   const [adminAssignments, setAdminAssignments] = useState<AdminSiteAssignment[] | null>(null);
@@ -215,6 +235,9 @@ export function AttendancePage() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [siteFilter, setSiteFilter] = useState<string>('all');
+
+  // super admin: which branch groups are expanded in the branch-wise sheet
+  const [expandedAttBranches, setExpandedAttBranches] = useState<Set<string>>(new Set());
 
   // editing state: cellKey "empId|YYYY-MM-DD" → raw input text
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -258,17 +281,23 @@ export function AttendancePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, trs, asg] = await Promise.all([
+        const [emps, sts, trs, asg, brs] = await Promise.all([
           dataApi.listEmployees(), dataApi.listSites(), dataApi.listSiteTransfers(),
           // marker assignments are cosmetic for the drill-down — never block
           // the sheet if this call fails
           dataApi.listAdminSiteAssignments().catch(() => [] as AdminSiteAssignment[]),
+          // branches power the super-admin grouping AND the admin branch grants
+          dataApi.listBranches().catch(() => [] as BranchWithCount[]),
         ]);
         if (!cancelled) {
-          setEmployees(emps); setSites(sts); setTransfers(trs); setAdminAssignments(asg);
+          setEmployees(emps); setSites(sts); setTransfers(trs);
+          setAdminAssignments(asg); setBranches(brs);
         }
       } catch (err) {
-        if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : 'Failed to load');
+          setBranches((b) => b ?? []);
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -284,6 +313,20 @@ export function AttendancePage() {
       .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
     return () => { cancelled = true; };
   }, [user, isSuperAdmin, realtimeVersion]);
+
+  // ---- EFFECTIVE site allowance (normal admins) ------------------------------
+  // "Granted access" = the sites of the branches granted to the admin
+  // (listBranches is already scoped to them) PLUS any directly assigned
+  // sites (Admin Management → Site Access). Super admins see every site.
+  const effectiveSiteIds = useMemo<Set<string> | null>(() => {
+    if (isSuperAdmin) return null;
+    const set = new Set(assignedSiteIds ?? []);
+    const branchIds = new Set((branches ?? []).map((b) => b.id));
+    (sites ?? []).forEach((s) => {
+      if (s.branch_id && branchIds.has(s.branch_id)) set.add(s.id);
+    });
+    return set;
+  }, [isSuperAdmin, assignedSiteIds, branches, sites]);
 
   useEffect(() => {
     let cancelled = false;
@@ -416,22 +459,22 @@ export function AttendancePage() {
   // immediately after the move.
   const scoped = useMemo(() => {
     const list = (employees ?? []).filter((e) => e.status !== 'deleted');
-    if (assignedSiteIds === null) return list;
+    if (effectiveSiteIds === null) return list;
     return list.filter((e) => {
       const tl = timelines.get(e.id);
       if (!tl) {
-        return e.current_site_id !== null && assignedSiteIds.has(e.current_site_id);
+        return e.current_site_id !== null && effectiveSiteIds.has(e.current_site_id);
       }
-      return tl.segments.some((sg) => sg.siteId !== null && assignedSiteIds.has(sg.siteId));
+      return tl.segments.some((sg) => sg.siteId !== null && effectiveSiteIds.has(sg.siteId));
     });
-  }, [employees, assignedSiteIds, timelines]);
+  }, [employees, effectiveSiteIds, timelines]);
 
-  // sites selectable in the filter (admins: only their assigned sites)
+  // sites selectable in the filter (admins: only their granted sites)
   const selectableSites = useMemo(() => {
     const active = (sites ?? []).filter((s) => s.is_active);
-    if (assignedSiteIds === null) return active;
-    return active.filter((s) => assignedSiteIds.has(s.id));
-  }, [sites, assignedSiteIds]);
+    if (effectiveSiteIds === null) return active;
+    return active.filter((s) => effectiveSiteIds.has(s.id));
+  }, [sites, effectiveSiteIds]);
 
   // ---- supervisors (attendance markers) — powers "View by Supervisors" ------
   // TWO sources are merged, deduped by name (case-insensitive):
@@ -469,9 +512,9 @@ export function AttendancePage() {
       !q || `${e.full_name} ${e.employee_code} ${e.trade_name ?? ''} ${e.position ?? ''} ${e.nationality ?? ''}`.toLowerCase().includes(q);
     const byName = (a: EmployeeVM, b: EmployeeVM) => a.full_name.localeCompare(b.full_name);
 
-    // admins only ever see their assigned sites' sections
+    // admins only ever see their granted sites' sections
     const siteList = (sites ?? []).filter(
-      (s) => s.is_active && (assignedSiteIds === null || assignedSiteIds.has(s.id)),
+      (s) => s.is_active && (effectiveSiteIds === null || effectiveSiteIds.has(s.id)),
     );
     const activeSiteIds = new Set(siteList.map((s) => s.id));
 
@@ -537,7 +580,7 @@ export function AttendancePage() {
       }
     }
     return result;
-  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines, assignedSiteIds, siteSupervisors]);
+  }, [sites, scoped, siteFilter, debouncedSearch, isSuperAdmin, timelines, effectiveSiteIds, siteSupervisors]);
 
   // flat crew for the calendar view combobox (a moved employee sits in several
   // sections — the picker lists them once)
@@ -549,6 +592,44 @@ export function AttendancePage() {
     }));
     return out;
   }, [sections]);
+
+  // ---- SUPER ADMIN — branch-wise sheet grouping -----------------------------
+  // Every branch is a collapsible row; expanding it shows that branch's site
+  // sections. Sites without a branch land in a trailing "No branch" group and
+  // the idle employees stay below the groups (they belong to no branch).
+  // Normal admins keep the flat list — their sections are already scoped to
+  // the branches granted to them plus their directly assigned sites.
+  const branchSectionGroups = useMemo<{ groups: BranchSectionGroup[]; idle: SiteSection | null } | null>(() => {
+    if (!isSuperAdmin) return null;
+    const branchIdOfSite = new Map((sites ?? []).map((s) => [s.id, s.branch_id] as const));
+    const siteSections = sections.filter((sec) => !sec.isIdle);
+    const idle = sections.find((sec) => sec.isIdle) ?? null;
+    const groups: BranchSectionGroup[] = (branches ?? [])
+      .filter((b) => b.is_active || siteSections.some((sec) => branchIdOfSite.get(sec.key) === b.id))
+      .map((b) => ({
+        id: b.id,
+        name: b.name,
+        location: b.location,
+        isActive: b.is_active,
+        siteCount: b.site_count,
+        sections: siteSections.filter((sec) => branchIdOfSite.get(sec.key) === b.id),
+      }));
+    const noBranch: SiteSection[] = siteSections.filter(
+      (sec) => (branchIdOfSite.get(sec.key) ?? null) === null,
+    );
+    if (noBranch.length > 0) {
+      groups.push({
+        id: '__none__',
+        name: 'No branch',
+        location: null,
+        isActive: true,
+        siteCount: noBranch.length,
+        sections: noBranch,
+        isNone: true,
+      });
+    }
+    return { groups, idle };
+  }, [isSuperAdmin, sections, branches, sites]);
 
   // groups the visible sites by marker so a super admin can see at a glance
   // who is tracking which site (admins only ever see their own assigned sites
@@ -706,15 +787,15 @@ export function AttendancePage() {
       });
     const arr = scoped.filter((e) => {
       if (bulkSite === 'all') {
-        if (assignedSiteIds === null) return true; // super admin → everyone
+        if (effectiveSiteIds === null) return true; // super admin → everyone
         const s = siteOnDay(e);
-        return s !== null && assignedSiteIds.has(s);
+        return s !== null && effectiveSiteIds.has(s);
       }
       const want = bulkSite === 'idle' ? null : bulkSite;
       return siteOnDay(e) === want;
     });
     return [...arr].sort((a, b) => a.full_name.localeCompare(b.full_name));
-  }, [scoped, bulkSite, bulkDate, transfers, recordsByEmployee, assignedSiteIds]);
+  }, [scoped, bulkSite, bulkDate, transfers, recordsByEmployee, effectiveSiteIds]);
 
   // prefill whenever the dialog opens, the date changes or fresh records arrive
   useEffect(() => {
@@ -851,7 +932,7 @@ export function AttendancePage() {
     }
   };
 
-  const loading = !employees || !records || !sites || !transfers || (!isSuperAdmin && assignedSiteIds === null);
+  const loading = !employees || !records || !sites || !transfers || !branches || (!isSuperAdmin && assignedSiteIds === null);
   const calendarEmployee = crew.find((e) => e.id === calendarEmployeeId) ?? null;
 
   // share links grouped DATE-WISE (newest date first, newest link first
@@ -1231,6 +1312,115 @@ export function AttendancePage() {
     );
   };
 
+  // ---- SUPER ADMIN: one collapsible BRANCH row wrapping its site sections ----
+  // Mirrors the branch-wise Sites page: chevron row with the branch name +
+  // location + live counts; expanding reveals that branch's site sections.
+  // Auto-expands while searching or when a specific site is filtered so the
+  // hits stay visible.
+  const renderBranchGroup = (group: BranchSectionGroup, index: number) => {
+    const searching = debouncedSearch.length > 0 || siteFilter !== 'all';
+    const expanded = searching || expandedAttBranches.has(group.id);
+    const toggle = () => {
+      setExpandedAttBranches((prev) => {
+        const next = new Set(prev);
+        if (next.has(group.id)) next.delete(group.id);
+        else next.add(group.id);
+        return next;
+      });
+    };
+    const crewCount = group.sections.reduce((n, sec) => n + sec.emps.length, 0);
+    return (
+      <motion.div
+        key={group.id}
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3, delay: Math.min(index * 0.05, 0.25), ease: EASE }}
+        className={cn(
+          'overflow-hidden rounded-xl border bg-background/40',
+          expanded ? 'border-brand/30' : 'border-border/60',
+        )}
+      >
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} branch ${group.name}`}
+          className="flex w-full items-center gap-3 p-3.5 text-left transition-colors hover:bg-muted/30"
+        >
+          <span
+            className={cn(
+              'flex size-9 shrink-0 items-center justify-center rounded-lg',
+              group.isNone ? 'bg-muted text-muted-foreground' : 'bg-brand/10 text-brand',
+            )}
+          >
+            {group.isNone ? <Building2 size={17} /> : <GitBranch size={17} />}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+              <span className={cn(!group.isNone && group.isActive === false && 'text-muted-foreground')}>{group.name}</span>
+              <span
+                className={cn(
+                  'rounded-full px-2 py-0.5 text-[11px] font-semibold tabular-nums',
+                  group.isNone ? 'bg-muted text-muted-foreground' : 'bg-brand/10 text-brand',
+                )}
+              >
+                {group.sections.length} {group.sections.length === 1 ? 'site' : 'sites'}
+              </span>
+              <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500">
+                {crewCount} employee{crewCount !== 1 ? 's' : ''}
+              </span>
+              {!group.isActive && (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  inactive
+                </span>
+              )}
+            </span>
+            {group.location && (
+              <span className="mt-0.5 flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+                <MapPin size={11} className="shrink-0" aria-hidden /> {group.location}
+              </span>
+            )}
+            {group.isNone && (
+              <span className="mt-0.5 block text-[11px] text-muted-foreground/70">
+                Sites not yet assigned to a branch.
+              </span>
+            )}
+          </span>
+          <motion.span
+            animate={{ rotate: expanded ? 0 : -90 }}
+            transition={{ duration: 0.2 }}
+            className="shrink-0 text-muted-foreground"
+          >
+            <ChevronDown size={16} />
+          </motion.span>
+        </button>
+        <AnimatePresence initial={false}>
+          {expanded && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.25, ease: EASE }}
+              className="overflow-hidden"
+            >
+              <div className="space-y-5 border-t bg-muted/20 p-3">
+                {group.sections.length === 0 ? (
+                  <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                    {searching
+                      ? 'No sites in this branch match your filters.'
+                      : 'No employees to mark in this branch yet.'}
+                  </p>
+                ) : (
+                  group.sections.map((sec, i) => renderSheetSection(sec, i))
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    );
+  };
+
   return (
     <div className="mx-auto max-w-[1600px]">
       {/* header */}
@@ -1284,12 +1474,14 @@ export function AttendancePage() {
       </div>
 
       {/* admin scope hint */}
-      {!isSuperAdmin && assignedSiteIds !== null && (
+      {!isSuperAdmin && effectiveSiteIds !== null && (
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-brand/25 bg-brand/[0.06] px-3.5 py-2.5 text-xs text-muted-foreground">
           <Shield size={14} className="shrink-0 text-brand" />
           <span>
-            You can only view and mark <span className="font-medium text-foreground">{assignedSiteIds.size} assigned site{assignedSiteIds.size !== 1 ? 's' : ''}</span> —
-            ask a super admin to assign more via Admin Management → Site Access.
+            You can only view and mark the sites you were granted —{' '}
+            <span className="font-medium text-foreground">{effectiveSiteIds.size} site{effectiveSiteIds.size !== 1 ? 's' : ''}</span>{' '}
+            from your branches and direct site assignments. Ask a super admin for more via
+            Admin Management → Manage Permissions (branches) or Site Access.
           </span>
         </div>
       )}
@@ -1513,11 +1705,11 @@ export function AttendancePage() {
       {view === 'sheet' && (
         loading ? (
           <SkeletonRows rows={8} />
-        ) : !isSuperAdmin && assignedSiteIds !== null && assignedSiteIds.size === 0 ? (
+        ) : !isSuperAdmin && effectiveSiteIds !== null && effectiveSiteIds.size === 0 ? (
           <EmptyState
             icon={<Shield size={22} />}
-            title="No sites assigned to you yet"
-            description="A super admin needs to assign you at least one site (Admin Management → Site Access) before you can mark attendance."
+            title="No sites granted to you yet"
+            description="A super admin needs to grant you a branch (Admin Management → Manage Permissions → Branches) or assign you a site (Site Access) before you can mark attendance."
           />
         ) : sections.length === 0 ? (
           <EmptyState
@@ -1528,13 +1720,29 @@ export function AttendancePage() {
               : 'Employees are grouped by their work site — assign employees to a site to start marking their attendance.'}
           />
         ) : (
-          <div className="space-y-6">
-            {sections.map((section, i) => (
-              <Fragment key={section.key}>
-                {renderSheetSection(section, i)}
-              </Fragment>
-            ))}
-          </div>
+          isSuperAdmin && branchSectionGroups ? (
+            /* SUPER ADMIN — branch-wise: every branch is a collapsible row;
+               expanding it reveals that branch's site sections (idle employees
+               stay below the groups — they belong to no branch) */
+            <div className="space-y-4">
+              {branchSectionGroups.groups.map((g, i) => renderBranchGroup(g, i))}
+              {branchSectionGroups.idle && (
+                <div className="pt-2">
+                  {renderSheetSection(branchSectionGroups.idle, sections.length - 1)}
+                </div>
+              )}
+            </div>
+          ) : (
+            /* NORMAL ADMIN — flat list of their granted branches' sites (+
+               directly assigned sites) */
+            <div className="space-y-6">
+              {sections.map((section, i) => (
+                <Fragment key={section.key}>
+                  {renderSheetSection(section, i)}
+                </Fragment>
+              ))}
+            </div>
+          )
         )
       )}
 

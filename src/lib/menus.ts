@@ -66,7 +66,7 @@ export const MENUS = [
   { id: 'branches', label: 'Branches', hint: 'Branches & their sites — admins see only allowed branches', icon: GitBranch, managed: true, defaultOn: false },
   { id: 'sites', label: 'Sites', hint: 'Work sites & client projects', icon: Building2, managed: true, defaultOn: false },
   { id: 'camps', label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent, managed: true, defaultOn: false },
-  { id: 'attendance', label: 'Attendance', hint: 'Sitewise hours marking — assigned sites only', icon: CalendarCheck, managed: true, defaultOn: false },
+  { id: 'attendance', label: 'Attendance', hint: 'Sitewise hours marking — granted branches / assigned sites', icon: CalendarCheck, managed: true, defaultOn: false },
   { id: 'working_hours', label: 'Working Hours', hint: 'Total hours & monthly history per employee', icon: Clock, managed: true, defaultOn: false },
   { id: 'salary_sheet', label: 'Salary Sheet', hint: 'Monthly payroll — sitewise salary, advances & payments', icon: Wallet, managed: true, defaultOn: false, group: 'salary_details' },
   { id: 'payroll', label: 'Payroll', hint: 'One row per employee — consolidated hours & salary', icon: Banknote, managed: true, defaultOn: false, group: 'salary_details' },

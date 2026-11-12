@@ -2,6 +2,34 @@
 
 ## Database migrations (run in Supabase SQL Editor)
 
+**`20261112b_branch_scoped_site_access.sql`** — REQUIRED for the Branch
+Access update (run after `20261112_branches.sql`).
+
+Run the whole file in Supabase → SQL Editor → New query → Run. It is
+idempotent (`create or replace function`) and safe to re-run.
+
+### `20261112b_branch_scoped_site_access.sql` — branch grants unlock sites & attendance
+
+"Granted access" for a normal admin now means the sites of the **branches
+granted to them** PLUS any **directly assigned site** (Site Access). Sites
+without a branch are super-admin / direct-assignment only.
+
+1. New shared guard **`site_access_allowed(p_site_id)`** — one place decides
+   if the caller may view / mark / share a site (super admin, direct
+   `admin_site` assignment, or the site belongs to a granted `admin_branch`).
+2. **`get_month_attendance`** — an admin only sees records of employees who
+   were at one of their granted sites on that date.
+3. **`mark_attendance`** — same grant set for marking (idle days stay
+   super-admin only).
+4. **Share links** — `create_attendance_share_link`,
+   `list_attendance_share_links`, `grant_attendance_share_edit` and the
+   `share_link_select` RLS policy all follow the same grants.
+
+UI changes that come with it: branch **grant/revoke toggles inside
+Admin Management → Manage Permissions** (under the Branches menu), the
+super-admin **Attendance page is branch-wise** (each branch a collapsible
+row), and normal admins only see the sites + attendance granted to them.
+
 **`20261112_branches.sql`** — REQUIRED for the Branches update (run after all
 earlier migrations if you haven't already).
 

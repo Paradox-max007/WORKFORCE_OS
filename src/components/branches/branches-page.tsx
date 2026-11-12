@@ -15,9 +15,9 @@
 //     • see ONLY the branches assigned to them (Admin Management → Branches)
 //     • read-only — branch management is a super-admin action
 //
-// Sites without a branch ("no branch") stay visible to every admin until a
-// super admin assigns them — that keeps existing installations working before
-// branches are set up.
+// Sites without a branch ("no branch") are only visible to super admins and
+// admins with a direct site assignment — a site becomes visible to an admin
+// by assigning it to a branch they can access, or via Site Access.
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
@@ -332,7 +332,8 @@ export function BranchesPage() {
             <AlertDialogDescription>
               Permanently delete{' '}
               <span className="font-medium text-foreground">{deleteTarget?.name}</span>? Its{' '}
-              {deleteTarget?.site_count ?? 0} site(s) will move to “no branch” and stay visible —
+              {deleteTarget?.site_count ?? 0} site(s) will move to “no branch” — they stay
+              visible to super admins (and admins with a direct site assignment) —
               no employees are affected. Admins assigned to this branch lose their assignment.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -582,8 +583,8 @@ function UnassignedSitesRow({
           </span>
           <span className="text-[11px] text-muted-foreground/70">
             {canManage
-              ? 'Sites without a branch — visible to every admin until you assign them.'
-              : 'Visible to every admin.'}
+              ? 'Sites without a branch — visible to super admins (and admins with a direct site assignment) until you assign them.'
+              : 'Sites without a branch are super-admin only unless directly assigned.'}
           </span>
         </span>
         <motion.span animate={{ rotate: expanded ? 90 : 0 }} transition={{ duration: 0.2 }} className="text-muted-foreground">

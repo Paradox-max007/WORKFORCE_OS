@@ -383,12 +383,21 @@ const nextEmployeeCode = (): string => {
 // API implementation
 // ---------------------------------------------------------------------------
 
-/** Sites the current profile is allowed to mark (super admins → null = every site). */
+/** Sites the current profile is allowed to work with (super admins → null =
+ *  every site). "Granted access" for a normal admin = the sites of the branches
+ *  assigned to them (admin_branch) PLUS any directly assigned site (admin_site). */
 const mySiteAllowance = (): Set<string> | null => {
   const me = currentProfile();
   if (!me) return new Set();
   if (me.role === 'super_admin') return null;
-  return new Set(db.siteAssignments.filter((x) => x.profile_id === me.id).map((x) => x.site_id));
+  const allowed = new Set(db.siteAssignments.filter((x) => x.profile_id === me.id).map((x) => x.site_id));
+  const branchIds = new Set(db.branchAssignments.filter((x) => x.profile_id === me.id).map((x) => x.branch_id));
+  if (branchIds.size > 0) {
+    db.sites.forEach((s) => {
+      if (s.branch_id && branchIds.has(s.branch_id)) allowed.add(s.id);
+    });
+  }
+  return allowed;
 };
 
 /** Branches the current profile may access (super admins → null = every
@@ -1093,8 +1102,9 @@ export const demoApi = {
     // in the marking sheet (no more auto-created 8h defaults).
 
     // Normal admins only see a record when the employee belonged to one of
-    // their sites ON THAT RECORD'S DATE (date-effective — mirrors the
-    // get_month_attendance RPC; moved employees keep old-site history).
+    // their GRANTED sites (branch sites + direct assignments) on that
+    // record's date (date-effective — mirrors the get_month_attendance RPC;
+    // moved employees keep old-site history).
     const allowedSites = mySiteAllowance();
     return db.attendance.filter((a) => {
       if (!a.date.startsWith(month) || a.is_hidden) return false;
@@ -1121,8 +1131,9 @@ export const demoApi = {
 
     // site-scoped marking is DATE-EFFECTIVE (mirrors the mark_attendance RPC):
     // normal admins only mark days the employee belonged to one of their
-    // assigned sites on — an employee moved mid-month stays markable at the
-    // old site for the days before the move and at the new site afterwards.
+    // GRANTED sites (branch sites + direct assignments) on — an employee moved
+    // mid-month stays markable at the old site for the days before the move
+    // and at the new site afterwards.
     const me = currentProfile();
     if (me && me.role !== 'super_admin') {
       const siteOnDate = getEmployeeSiteForDate(employeeId, date, {
@@ -1133,11 +1144,9 @@ export const demoApi = {
       if (!siteOnDate) {
         throw new Error('This employee has no site on this date — only super admins can mark idle employees');
       }
-      const assigned = db.siteAssignments.some(
-        (x) => x.profile_id === me.id && x.site_id === siteOnDate,
-      );
-      if (!assigned) {
-        throw new Error('Access denied — you can only mark attendance for your assigned sites');
+      const allowedSites = mySiteAllowance();
+      if (!allowedSites || !allowedSites.has(siteOnDate)) {
+        throw new Error('Access denied — you can only mark attendance for your granted branches and assigned sites');
       }
     }
 
@@ -1162,9 +1171,8 @@ export const demoApi = {
     const me = currentProfile();
     if (!me) throw new Error('Not signed in');
     if (me.role !== 'super_admin') {
-      const mine = new Set(
-        db.siteAssignments.filter((x) => x.profile_id === me.id).map((x) => x.site_id),
-      );
+      // branch sites + direct assignments — the same grant set as marking
+      const mine = mySiteAllowance() ?? new Set<string>();
       return db.shareLinks
         .filter((l) => l.site_id !== null && mine.has(l.site_id))
         .sort((a, b) => b.created_at.localeCompare(a.created_at))
@@ -1180,9 +1188,11 @@ export const demoApi = {
     if (!me) throw new Error('Not signed in');
     const site = db.sites.find((s) => s.id === siteId);
     if (!site || !site.is_active) throw new Error('Site not found');
-    if (me.role !== 'super_admin' &&
-        !db.siteAssignments.some((x) => x.profile_id === me.id && x.site_id === siteId)) {
-      throw new Error('Access denied — you can only share links for your assigned sites');
+    if (me.role !== 'super_admin') {
+      const allowed = mySiteAllowance();
+      if (!allowed || !allowed.has(siteId)) {
+        throw new Error('Access denied — you can only share links for your granted branches and assigned sites');
+      }
     }
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthKey)) {
       throw new Error('Invalid month — expected YYYY-MM');
@@ -1226,9 +1236,11 @@ export const demoApi = {
     if (!me) throw new Error('Not signed in');
     const link = db.shareLinks.find((l) => l.token === token);
     if (!link) throw new Error('Link not found');
-    if (me.role !== 'super_admin' &&
-        !db.siteAssignments.some((x) => x.profile_id === me.id && x.site_id === link.site_id)) {
-      throw new Error('Access denied — you can only manage links for your assigned sites');
+    if (me.role !== 'super_admin') {
+      const allowed = mySiteAllowance();
+      if (!link.site_id || !allowed || !allowed.has(link.site_id)) {
+        throw new Error('Access denied — you can only manage links for your granted branches and assigned sites');
+      }
     }
     link.status = 'active';
     link.edit_granted_at = nowISO();

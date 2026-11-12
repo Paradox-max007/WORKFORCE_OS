@@ -243,6 +243,9 @@ export function SitesPage() {
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  /** directly assigned sites for the signed-in normal admin (Admin Management
+   *  → Site Access) — these stay visible even outside granted branches */
+  const [mySiteIds, setMySiteIds] = useState<Set<string> | null>(isSuperAdmin ? null : new Set());
   /** branch ids the signed-in admin may access (null → no restriction) */
   const allowedBranchIds = useMemo(
     () => (isSuperAdmin || !branches ? null : new Set(branches.map((b) => b.id))),
@@ -302,6 +305,17 @@ export function SitesPage() {
     };
   }, [version]);
 
+  // normal admins: their directly assigned sites (visible even without a
+  // granted branch) — super admins skip this (they see everything)
+  useEffect(() => {
+    if (isSuperAdmin || !user) return;
+    let cancelled = false;
+    dataApi.getSiteAssignments(user.id)
+      .then((ids) => { if (!cancelled) setMySiteIds(new Set(ids)); })
+      .catch(() => { if (!cancelled) setMySiteIds(new Set()); });
+    return () => { cancelled = true; };
+  }, [user, isSuperAdmin, version]);
+
   // ---- search debounce (300ms) ---------------------------------------------
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 300);
@@ -310,14 +324,16 @@ export function SitesPage() {
 
   // ---- derived values --------------------------------------------------------
   /** Branch-scoped site list. Super admins see everything; normal admins see
-   *  only the sites of their allowed branches (sites without a branch stay
-   *  visible to everyone until a super admin assigns them). */
+   *  ONLY the sites they were granted — the sites of their allowed branches
+   *  plus any directly assigned site (Admins → Site Access). Sites without a
+   *  branch are super-admin / direct-assignment only. */
   const scopedSites = useMemo(
     () => (sites ?? []).filter((s) => {
-      if (allowedBranchIds === null || s.branch_id === null) return true;
-      return allowedBranchIds.has(s.branch_id);
+      if (allowedBranchIds === null) return true; // super admin
+      if (s.branch_id !== null && allowedBranchIds.has(s.branch_id)) return true;
+      return mySiteIds !== null && mySiteIds.has(s.id); // direct assignment
     }),
-    [sites, allowedBranchIds],
+    [sites, allowedBranchIds, mySiteIds],
   );
   const activeSites = useMemo(() => scopedSites.filter((s) => s.is_active), [scopedSites]);
   const inactiveSites = useMemo(() => scopedSites.filter((s) => !s.is_active), [scopedSites]);
@@ -583,7 +599,7 @@ export function SitesPage() {
                   </span>
                 </span>
                 <span className="text-[11px] text-muted-foreground/70">
-                  Sites not yet assigned to a branch — visible to every admin.
+                  Sites not yet assigned to a branch — only super admins and admins with a direct site assignment see them.
                 </span>
               </span>
               <motion.span
@@ -1206,7 +1222,7 @@ function SiteFormDialog({
               </SelectContent>
             </Select>
             <p className="text-[11px] text-muted-foreground">
-              The branch that owns this site. Normal admins only see sites of the branches they are allowed — sites without a branch stay visible to every admin.
+              The branch that owns this site. Normal admins only see the sites of the branches they are granted — plus any site directly assigned to them. Sites without a branch are super-admin only unless directly assigned.
             </p>
           </div>
         </div>

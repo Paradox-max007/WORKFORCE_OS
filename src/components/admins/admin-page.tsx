@@ -16,7 +16,7 @@ import {
   Trash2, User, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { EmptyState, PageHeader, SkeletonRows } from '@/components/shared/primitives';
 import {
@@ -617,8 +617,10 @@ export function AdminPage() {
       {/* ---- Permissions dialog ---- */}
       <PermissionsDialog
         profile={permTarget}
+        branches={branches}
         onClose={() => setPermTarget(null)}
         onChanged={handlePermChanged}
+        onBranchesChanged={handleBranchesChanged}
       />
 
       {/* ---- Branch access dialog ---- */}
@@ -1247,25 +1249,34 @@ function AccountDialog({
 // Permissions dialog (admin role only — Dashboard & Uniform Registry are always on)
 // ---------------------------------------------------------------------------
 function PermissionsDialog({
-  profile, onClose, onChanged,
+  profile, branches, onClose, onChanged, onBranchesChanged,
 }: {
   profile: Profile | null;
+  /** every branch (super admin sees all) — the per-branch grant/revoke list */
+  branches: BranchWithCount[] | null;
   onClose: () => void;
   onChanged: (profileId: string, key: MenuKey, allowed: boolean) => void;
+  onBranchesChanged: (profileId: string, branchIds: string[]) => void;
 }) {
   const open = profile !== null;
   const [perms, setPerms] = useState<MenuPermissionMap | null>(null);
   const [savingKey, setSavingKey] = useState<MenuKey | null>(null);
+  // branch grants embedded under the "Branches" menu row
+  const [branchAssigned, setBranchAssigned] = useState<Set<string> | null>(null);
+  const [savingBranchId, setSavingBranchId] = useState<string | null>(null);
 
   // Load the initial permission state each time the dialog opens
   useEffect(() => {
     if (!profile) {
       setPerms(null);
+      setBranchAssigned(null);
       return;
     }
     let cancelled = false;
     setPerms(null);
     setSavingKey(null);
+    setBranchAssigned(null);
+    setSavingBranchId(null);
     (async () => {
       const map = await dataApi.getMenuPermissions(profile.id);
       if (!cancelled) setPerms(map);
@@ -1275,6 +1286,10 @@ function PermissionsDialog({
         toast.error('Failed to load permissions', { description: 'Please close the dialog and try again.' });
       }
     });
+    // branch grants for the same admin (never block the menu toggles on this)
+    dataApi.getBranchAssignments(profile.id)
+      .then((ids) => { if (!cancelled) setBranchAssigned(new Set(ids)); })
+      .catch(() => { if (!cancelled) setBranchAssigned(new Set()); });
     return () => { cancelled = true; };
   }, [profile]);
 
@@ -1297,6 +1312,35 @@ function PermissionsDialog({
       toast.error(err instanceof Error ? err.message : `Failed to update access for ${meta.label}`);
     } finally {
       setSavingKey(null);
+    }
+  };
+
+  // Grant / revoke ONE branch — optimistic, instantly saved, reverted on failure.
+  // Branch access scopes the Branches, Sites AND Attendance pages for this admin.
+  const toggleBranch = async (branchId: string, branchName: string, allowed: boolean) => {
+    if (!profile || !branchAssigned) return;
+    const previous = new Set(branchAssigned);
+    setSavingBranchId(branchId);
+    const next = new Set(branchAssigned);
+    if (allowed) next.add(branchId);
+    else next.delete(branchId);
+    setBranchAssigned(next);
+    try {
+      await dataApi.setBranchAssignment(profile.id, branchId, allowed);
+      toast.success(
+        allowed ? `${branchName} granted to ${profile.name}` : `${branchName} removed from ${profile.name}`,
+        {
+          description: allowed
+            ? 'They can now see this branch and its sites on the Branches, Sites and Attendance pages.'
+            : 'They no longer see this branch or its sites.',
+        },
+      );
+      onBranchesChanged(profile.id, [...next]);
+    } catch (err) {
+      setBranchAssigned(previous);
+      toast.error(err instanceof Error ? err.message : 'Failed to update the branch assignment');
+    } finally {
+      setSavingBranchId(null);
     }
   };
 
@@ -1372,8 +1416,8 @@ function PermissionsDialog({
               const item = MENU_META[key];
               const allowed = perms[key] === true;
               return (
+                <Fragment key={key}>
                 <motion.div
-                  key={key}
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: 0.15 + i * 0.04, duration: 0.25, ease: EASE }}
@@ -1411,6 +1455,94 @@ function PermissionsDialog({
                     />
                   </div>
                 </motion.div>
+
+                {/* ---- branch grants embedded under the Branches menu row ----
+                    Toggling a branch here instantly grants / revokes this
+                    admin's access to it — the branch's sites unlock on the
+                    Sites & Attendance pages as well (directly assigned sites
+                    from the Site Access dialog always stay visible). */}
+                {key === 'branches' && branches !== null && (
+                  <div className="ml-5 mr-1 mb-1.5 overflow-hidden rounded-lg border border-brand/20 bg-brand/[0.03]">
+                    <div className="border-b border-brand/15 bg-brand/[0.05] px-3 py-2">
+                      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-brand">
+                        <GitBranch size={11} aria-hidden /> Branch access
+                      </p>
+                      <p className="mt-0.5 text-[11px] leading-tight text-muted-foreground">
+                        Available branches — flip a toggle to grant or revoke{' '}
+                        <span className="font-medium text-foreground">{profile?.name}</span>&apos;s access.
+                        A granted branch unlocks its sites on the Branches, Sites and Attendance pages.
+                      </p>
+                    </div>
+                    <div className="space-y-1 p-1.5">
+                      {branches.length === 0 ? (
+                        <p className="rounded-md border border-dashed p-2.5 text-center text-xs text-muted-foreground">
+                          No branches exist yet — create one on the Branches page first.
+                        </p>
+                      ) : branchAssigned === null ? (
+                        <>
+                          <div className="shimmer h-10 rounded-md border" />
+                          <div className="shimmer h-10 rounded-md border" />
+                        </>
+                      ) : (
+                        branches.map((b) => {
+                          const granted = branchAssigned.has(b.id);
+                          return (
+                            <div
+                              key={b.id}
+                              className={cn(
+                                'flex items-center justify-between gap-3 rounded-md border px-2.5 py-2 transition-colors',
+                                granted ? 'border-brand/25 bg-brand/5' : 'bg-card',
+                              )}
+                            >
+                              <div className="flex min-w-0 items-center gap-2.5">
+                                <span
+                                  className={cn(
+                                    'flex size-8 shrink-0 items-center justify-center rounded-md text-[11px] font-bold tabular-nums',
+                                    granted ? 'bg-brand/10 text-brand' : 'bg-muted text-muted-foreground',
+                                  )}
+                                  title="Sites owned by this branch"
+                                >
+                                  {b.site_count}
+                                </span>
+                                <div className="min-w-0">
+                                  <p className={cn('truncate text-[13px] font-medium', !b.is_active && 'text-muted-foreground')}>
+                                    {b.name}
+                                    {!b.is_active && (
+                                      <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                        inactive
+                                      </span>
+                                    )}
+                                  </p>
+                                  <p className="truncate text-[11px] text-muted-foreground">
+                                    {granted
+                                      ? 'Access granted'
+                                      : `${b.site_count} site${b.site_count === 1 ? '' : 's'} · no access`}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-2">
+                                {savingBranchId === b.id && (
+                                  <Loader2 size={13} className="animate-spin text-muted-foreground" aria-hidden />
+                                )}
+                                <Switch
+                                  checked={granted}
+                                  disabled={savingBranchId === b.id}
+                                  onCheckedChange={(v) => { void toggleBranch(b.id, b.name, v === true); }}
+                                  aria-label={`${granted ? 'Revoke' : 'Grant'} ${b.name} branch access`}
+                                  className="data-[state=checked]:bg-brand [&_[data-slot=switch-thumb]]:bg-white!"
+                                />
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                      <p className="px-1 pt-0.5 text-[10px] leading-tight text-muted-foreground">
+                        Sites without a branch are only visible to admins with a direct site assignment (Site Access).
+                      </p>
+                    </div>
+                  </div>
+                )}
+                </Fragment>
               );
             })}
           </motion.div>
@@ -1662,8 +1794,8 @@ function BranchAccessDialog({
           <DialogDescription>
             Choose the branches{' '}
             <span className="font-medium text-foreground">{profile?.name}</span> can access.
-            They will only see these branches (and their sites) on the Branches and Sites pages.
-            Every change saves instantly.
+            They will only see these branches (and their sites) on the Branches, Sites and
+            Attendance pages. Every change saves instantly.
           </DialogDescription>
         </DialogHeader>
 
@@ -1734,8 +1866,8 @@ function BranchAccessDialog({
               );
             })}
             <p className="px-1 pt-1 text-[11px] text-muted-foreground">
-              Sites without a branch stay visible to every admin. Attendance marking is governed
-              separately by the site assignments.
+              Sites without a branch stay visible only to admins with a direct site assignment
+              (Site Access). The same grants apply on the Attendance page.
             </p>
           </motion.div>
         )}

@@ -1253,6 +1253,51 @@ end; $$;
 
 grant execute on function public.emp_site_on_date(uuid, date) to authenticated;
 
+-- 6z2. BRANCH-SCOPED SITE ACCESS GUARD (20261112b_branch_scoped_site_access.sql)
+-- "Granted access" for a normal admin = the sites of the branches granted to
+-- them (admin_branch) PLUS any directly assigned site (admin_site). One
+-- shared guard keeps every attendance data-plane check in sync.
+create or replace function public.site_access_allowed(p_site_id uuid)
+returns boolean language plpgsql
+stable security definer set search_path = public
+as $$
+begin
+  -- not signed in / not staff → nothing is allowed
+  if not public.is_staff() then
+    return false;
+  end if;
+
+  -- super admins see and manage every site
+  if public.is_super_admin() then
+    return true;
+  end if;
+
+  -- directly assigned site (Admin Management → Site Access)
+  if exists (
+    select 1 from public.admin_site a
+    where a.profile_id = auth.uid() and a.site_id = p_site_id
+  ) then
+    return true;
+  end if;
+
+  -- any site owned by a branch granted to this admin
+  -- (Admin Management → Manage Permissions → Branch access)
+  return exists (
+    select 1
+    from public.site s
+    join public.admin_branch ab on ab.branch_id = s.branch_id
+    where s.id = p_site_id
+      and ab.profile_id = auth.uid()
+  );
+end; $$;
+
+comment on function public.site_access_allowed(uuid) is
+  'True when the caller may view / mark / share the site: super admin, direct admin_site assignment, or the site belongs to a branch granted via admin_branch.';
+
+revoke execute on function public.site_access_allowed(uuid) from public;
+revoke execute on function public.site_access_allowed(uuid) from anon;
+grant execute on function public.site_access_allowed(uuid) to authenticated, service_role;
+
 create or replace function public.get_month_attendance(p_month text)
 returns setof public.attendance language plpgsql
 security definer set search_path = public
@@ -1266,8 +1311,9 @@ begin
   -- the marking sheet (no auto-created 8h defaults). Future days render blank
   -- and are locked client-side.
   -- Site authorization is DATE-EFFECTIVE: a normal admin sees a record when
-  -- the employee belonged to one of their sites on that record's date (an
-  -- employee moved mid-month keeps their old site's history visible there).
+  -- the employee belonged to one of their GRANTED sites (branch sites +
+  -- direct assignments) on that record's date (an employee moved mid-month
+  -- keeps their old site's history visible there).
   return query
     select a.* from public.attendance a
     join public.employee e on e.id = a.employee_id
@@ -1276,11 +1322,7 @@ begin
       and e.status <> 'deleted'
       and (
         public.is_super_admin()
-        or exists (
-          select 1 from public.admin_site s
-          where s.profile_id = auth.uid()
-            and s.site_id = public.emp_site_on_date(e.id, a.date)
-        )
+        or public.site_access_allowed(public.emp_site_on_date(e.id, a.date))
       )
     order by a.date;
 end; $$;
@@ -6530,10 +6572,7 @@ create policy share_link_select on public.attendance_share_link
     public.is_staff() and (
       public.is_super_admin()
       or site_id is null
-      or exists (
-        select 1 from public.admin_site a
-        where a.profile_id = auth.uid() and a.site_id = attendance_share_link.site_id
-      )
+      or public.site_access_allowed(site_id)
     )
   );
 
@@ -6673,18 +6712,17 @@ begin
   end if;
 
   -- site-scoped marking is DATE-EFFECTIVE: normal admins may only mark days
-  -- the employee belonged to one of their assigned sites on (an employee
-  -- moved mid-month stays markable at the old site for the days before the
-  -- move and at the new site afterwards). Idle days remain super-admin only.
+  -- the employee belonged to one of their GRANTED sites on (branch sites +
+  -- direct assignments; an employee moved mid-month stays markable at the old
+  -- site for the days before the move and at the new site afterwards).
+  -- Idle days remain super-admin only.
   select public.emp_site_on_date(p_employee_id, p_date) into v_emp_site;
   if not public.is_super_admin() then
     if v_emp_site is null then
       raise exception 'This employee has no site on this date — only super admins can mark idle employees';
     end if;
-    if not exists (
-      select 1 from public.admin_site where profile_id = auth.uid() and site_id = v_emp_site
-    ) then
-      raise exception 'Access denied — you can only mark attendance for your assigned sites';
+    if not public.site_access_allowed(v_emp_site) then
+      raise exception 'Access denied — you can only mark attendance for your granted branches and assigned sites';
     end if;
   end if;
 
@@ -6715,13 +6753,10 @@ begin
     raise exception 'Site not found';
   end if;
 
-  -- normal admins may only share links for their assigned sites
-  if not public.is_super_admin() then
-    if not exists (
-      select 1 from public.admin_site where profile_id = auth.uid() and site_id = p_site_id
-    ) then
-      raise exception 'Access denied — you can only share links for your assigned sites';
-    end if;
+  -- normal admins may only share links for their granted sites
+  -- (branch sites + direct assignments)
+  if not public.site_access_allowed(p_site_id) then
+    raise exception 'Access denied — you can only share links for your granted branches and assigned sites';
   end if;
 
   if p_month !~ '^[0-9]{4}-(0[1-9]|1[0-2])$' then
@@ -6789,10 +6824,7 @@ begin
     from public.attendance_share_link l
     where public.is_super_admin()
        or l.site_id is null
-       or exists (
-         select 1 from public.admin_site a
-         where a.profile_id = auth.uid() and a.site_id = l.site_id
-       )
+       or public.site_access_allowed(l.site_id)
   ) t;
 
   return v_rows;
@@ -6818,10 +6850,8 @@ begin
   end if;
 
   if not public.is_super_admin() then
-    if v_link.site_id is null or not exists (
-      select 1 from public.admin_site where profile_id = auth.uid() and site_id = v_link.site_id
-    ) then
-      raise exception 'Access denied — you can only manage links for your assigned sites';
+    if v_link.site_id is null or not public.site_access_allowed(v_link.site_id) then
+      raise exception 'Access denied — you can only manage links for your granted branches and assigned sites';
     end if;
   end if;
 

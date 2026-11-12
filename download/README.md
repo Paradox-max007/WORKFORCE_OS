@@ -2,13 +2,34 @@
 
 ## Database migrations (run in Supabase SQL Editor)
 
-**`20261105d_payroll_camp_filters.sql`** — REQUIRED for this update (run
-after the earlier `20261105b` / `20261105c` if you haven't already).
+**`20261112_branches.sql`** — REQUIRED for the Branches update (run after all
+earlier migrations if you haven't already).
 
 Run the whole file in Supabase → SQL Editor → New query → Run. It is
 idempotent (`create or replace function`) and safe to re-run.
 
-### `20261105d_payroll_camp_filters.sql` — camp data for the Payroll filters
+### `20261112_branches.sql` — branches, site owner branch & admin branch access
+
+New **Branches** system: a branch owns multiple work sites
+(`site.branch_id`, nullable), and normal admins only see the branches
+assigned to them (`admin_branch`) while super admins see and manage
+everything.
+
+1. New tables `public.branch` and `public.admin_branch` (+ RLS: super admins
+   read all branches, normal admins only their assigned ones).
+2. `site.branch_id` column (FK → branch, `on delete set null` — deleting a
+   branch leaves its sites as "no branch").
+3. RPCs: `list_branches` (scoped, with site/employee counts),
+   `create_branch`, `update_branch`, `delete_branch`, `set_site_branch`,
+   `set_admin_branch`; `create_site` / `update_site` now accept `p_branch_id`.
+4. `branch` + `admin_branch` added to the Realtime publication.
+
+After running it: create branches on the new **Branches** page, assign sites
+to them (Branches page or the site form), and grant branch access to normal
+admins from **Admin Management → Branches** (GitBranch icon). Super admins
+get a branch-wise collapsible Sites page automatically.
+
+### `20261105d_payroll_camp_filters.sql` — earlier update (camp data for the Payroll filters)
 
 `get_salary_sheet` (the shared Salary Sheet / Payroll read model) now also
 returns **`camp_id` + `camp_name`** on every consolidated employee row, read

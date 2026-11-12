@@ -9,6 +9,7 @@
 
 import {
   type Attendance,
+  type Branch,
   type CancellationRequest,
   type Camp,
   type CardType,
@@ -158,6 +159,9 @@ export interface DemoDB {
   uniforms: UniformEntry[];
   menuPermissions: { profile_id: string; menu_key: MenuKey; allowed: boolean }[];
   siteAssignments: { profile_id: string; site_id: string }[];
+  /** branches (regional site groups) + which branches each admin may access */
+  branches: Branch[];
+  branchAssignments: { profile_id: string; branch_id: string }[];
   siteTransfers: SiteTransfer[];
   counters: { uniform_id: number; token_number: number };
   // trade & salary system
@@ -255,7 +259,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 14,
+    version: 15,
     profiles: [],
     sites: [],
     camps: [],
@@ -269,6 +273,8 @@ function seedDB(): DemoDB {
     uniforms: [],
     menuPermissions: [],
     siteAssignments: [],
+    branches: [],
+    branchAssignments: [],
     siteTransfers: [],
     counters: { uniform_id: 0, token_number: 0 },
     trades: [],
@@ -306,16 +312,35 @@ function seedDB(): DemoDB {
     // Working Hours used to piggyback on the Employees grant — keep that
     // access in the demo seed now that it is its own toggleable menu.
     { profile_id: raviP.id, menu_key: 'working_hours' as MenuKey, allowed: true },
+    // Branches + Sites so the demo shows branch-scoped site access for a
+    // normal admin (Ravi → Northern Emirates Branch only)
+    { profile_id: raviP.id, menu_key: 'branches' as MenuKey, allowed: true },
+    { profile_id: raviP.id, menu_key: 'sites' as MenuKey, allowed: true },
   ];
 
+  // ---- branches (regional site groups) --------------------------------------
+  const mkBranch = (name: string, location: string, notes: string | null = null, active = true): Branch =>
+    ({ id: uid(), name, location, notes, is_active: active, created_at: nowISO() });
+  const northEmirates = mkBranch('Northern Emirates Branch', 'Umm Al Quwain · Ras Al Khaimah · Fujairah', 'Covers the northern emirates projects');
+  const dubaiCentral = mkBranch('Dubai Central Branch', 'Dubai · Jebel Ali', null);
+  const sharjahBranch = mkBranch('Sharjah Branch', 'Sharjah Industrial Area', null, false);
+  db.branches = [northEmirates, dubaiCentral, sharjahBranch];
+
   // ---- sites ---------------------------------------------------------------
-  const mkSite = (name: string, client: string, project: string, supervisor: string | null = null, active = true): Site =>
-    ({ id: uid(), name, client_name: client, project_name: project, supervisor, is_active: active, created_at: nowISO() });
-  const npc = mkSite('NPC – Umm Al Quwain', 'NPC', 'Warehouse Expansion', 'Ibrahim Khalil');
-  const redCoast = mkSite('Red Coast Compound', 'Red Coast Dev.', 'Villa Cluster B', 'Deepak Nair');
-  const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works', 'Carlos Reyes');
-  const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', 'Deepak Nair', false);
-  db.sites = [npc, redCoast, marina, depot];
+  const mkSite = (
+    name: string, client: string, project: string, supervisor: string | null = null,
+    active = true, branchId: string | null = null,
+  ): Site =>
+    ({
+      id: uid(), name, client_name: client, project_name: project, supervisor,
+      branch_id: branchId, is_active: active, created_at: nowISO(),
+    });
+  const npc = mkSite('NPC – Umm Al Quwain', 'NPC', 'Warehouse Expansion', 'Ibrahim Khalil', true, northEmirates.id);
+  const redCoast = mkSite('Red Coast Compound', 'Red Coast Dev.', 'Villa Cluster B', 'Deepak Nair', true, dubaiCentral.id);
+  const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works', 'Carlos Reyes', true, dubaiCentral.id);
+  const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', 'Deepak Nair', false, northEmirates.id);
+  const oasis = mkSite('Oasis Mall Fitout', 'Oasis Group', 'Interior Fitout', null, true, null);
+  db.sites = [npc, redCoast, marina, depot, oasis];
 
   // manpower companies (own table — feeds the Add Employee company dropdown)
   db.companies = [
@@ -335,6 +360,13 @@ function seedDB(): DemoDB {
     { profile_id: raviP.id, site_id: npc.id },
     { profile_id: raviP.id, site_id: redCoast.id },
     { profile_id: saraP.id, site_id: marina.id },
+  ];
+
+  // branch access — Ravi manages the Northern Emirates branch only; Sara
+  // manages Dubai Central (super admins always see every branch)
+  db.branchAssignments = [
+    { profile_id: raviP.id, branch_id: northEmirates.id },
+    { profile_id: saraP.id, branch_id: dubaiCentral.id },
   ];
 
   // ---- camps (accommodation) ----------------------------------------------
@@ -737,7 +769,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 14) {
+      if (parsed.version === 15) {
         // heal fields added after this DB was seeded (no version bump → no
         // reseed, existing demo data stays)
         if (!parsed.deductionSettings) {
@@ -748,6 +780,10 @@ function loadDB(): DemoDB {
             updated_by_name: null,
           };
         }
+        // branches shipped in DB v15 — heal older shapes defensively
+        if (!parsed.branches) parsed.branches = [];
+        if (!parsed.branchAssignments) parsed.branchAssignments = [];
+        parsed.sites?.forEach((s) => { if (s.branch_id === undefined) s.branch_id = null; });
         // settlements persisted before the editable-absent-deduction feature
         // were never hand-edited → flag heals to false
         parsed.payrollEmployees?.forEach((pe) => {

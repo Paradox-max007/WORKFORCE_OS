@@ -28,11 +28,31 @@ export interface Site {
   project_name: string | null;
   /** attendance marker who marks this site's sheet (free-text person name) */
   supervisor: string | null;
+  /** owner branch — a branch owns multiple sites; null = not assigned yet */
+  branch_id: string | null;
   is_active: boolean;
   created_at: string;
 }
 
 export interface SiteWithCount extends Site {
+  employee_count: number;
+}
+
+/** A regional branch that owns multiple work sites. Normal admins only see
+ *  the branches assigned to them (admin_branch); super admins see all. */
+export interface Branch {
+  id: string;
+  name: string;
+  location: string | null;
+  notes: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface BranchWithCount extends Branch {
+  /** sites owned by this branch */
+  site_count: number;
+  /** employees currently working at those sites */
   employee_count: number;
 }
 
@@ -747,6 +767,8 @@ export type RealtimeTable =
   | 'profiles'
   | 'menu_permission'
   | 'admin_site'
+  | 'branch'
+  | 'admin_branch'
   | 'site'
   | 'camp'
   | 'employee'

@@ -14,7 +14,7 @@ const eq = (a: number, b: number): boolean => Math.abs(a - b) < 0.005;
 
 const T0 = '2026-10-01T00:00:00.000Z';
 const site = (id: string, name: string): Site =>
-  ({ id, name, client_name: null, project_name: null, supervisor: null, is_active: true, created_at: T0 });
+  ({ id, name, client_name: null, project_name: null, supervisor: null, branch_id: null, is_active: true, created_at: T0 });
 
 const emp = (id: string, name: string, siteId: string | null, opening = 0): Employee => ({
   id, full_name: name, employee_code: `PUL-2026-${id}`, nationality: null, date_of_birth: null,

@@ -6,6 +6,8 @@ import {
   type AdminSiteAssignment,
   type Attendance,
   type AttendanceShareLink,
+  type Branch,
+  type BranchWithCount,
   type BulkAttendanceEntry,
   type Camp,
   type CampWithCount,
@@ -389,6 +391,15 @@ const mySiteAllowance = (): Set<string> | null => {
   return new Set(db.siteAssignments.filter((x) => x.profile_id === me.id).map((x) => x.site_id));
 };
 
+/** Branches the current profile may access (super admins → null = every
+ *  branch; normal admins → only their assigned branches). */
+const myBranchAllowance = (): Set<string> | null => {
+  const me = currentProfile();
+  if (!me) return new Set();
+  if (me.role === 'super_admin') return null;
+  return new Set(db.branchAssignments.filter((x) => x.profile_id === me.id).map((x) => x.branch_id));
+};
+
 export const demoApi = {
   mode: 'demo' as const,
 
@@ -473,7 +484,8 @@ export const demoApi = {
     }
     db.profiles = db.profiles.filter((x) => x.id !== id);
     db.menuPermissions = db.menuPermissions.filter((x) => x.profile_id !== id);
-    saveAndEmit(['profiles', 'menu_permission']);
+    db.branchAssignments = db.branchAssignments.filter((x) => x.profile_id !== id);
+    saveAndEmit(['profiles', 'menu_permission', 'admin_branch']);
   },
 
   async setPreferences(theme: 'dark' | 'light', accent: 'violet' | 'emerald' | 'amber' | 'rose', name?: string): Promise<Profile> {
@@ -538,6 +550,109 @@ export const demoApi = {
     }));
   },
 
+  // ---- branches (regional site groups) ---------------------------------------
+  /** Branches the signed-in admin may access, with site + employee counts.
+   *  Super admins → every branch; normal admins → only assigned branches. */
+  async listBranches(): Promise<BranchWithCount[]> {
+    const allowed = myBranchAllowance();
+    const branches = allowed === null
+      ? db.branches
+      : db.branches.filter((b) => allowed.has(b.id));
+    return branches
+      .map((b) => {
+        const siteIds = new Set(db.sites.filter((s) => s.branch_id === b.id).map((s) => s.id));
+        return {
+          ...b,
+          site_count: siteIds.size,
+          employee_count: db.employees.filter(
+            (e) => e.current_site_id != null && siteIds.has(e.current_site_id) && e.status !== 'deleted',
+          ).length,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  async createBranch(name: string, location: string | null, notes: string | null): Promise<Branch> {
+    const me = currentProfile();
+    if (!me || me.role !== 'super_admin') throw new Error('Only super admins can manage branches');
+    if (db.branches.some((b) => b.name.toLowerCase() === name.toLowerCase())) {
+      throw new Error('A branch with this name already exists');
+    }
+    const branch: Branch = {
+      id: uid(), name, location: location?.trim() || null, notes: notes?.trim() || null,
+      is_active: true, created_at: nowISO(),
+    };
+    db.branches.push(branch);
+    saveAndEmit(['branch']);
+    return branch;
+  },
+
+  async updateBranch(
+    id: string,
+    input: { name: string; location: string | null; notes: string | null; is_active: boolean },
+  ): Promise<Branch> {
+    const me = currentProfile();
+    if (!me || me.role !== 'super_admin') throw new Error('Only super admins can manage branches');
+    if (db.branches.some((b) => b.name.toLowerCase() === input.name.toLowerCase() && b.id !== id)) {
+      throw new Error('A branch with this name already exists');
+    }
+    const branch = db.branches.find((b) => b.id === id);
+    if (!branch) throw new Error('Branch not found');
+    Object.assign(branch, {
+      name: input.name,
+      location: input.location?.trim() || null,
+      notes: input.notes?.trim() || null,
+      is_active: input.is_active,
+    });
+    saveAndEmit(['branch']);
+    return branch;
+  },
+
+  async deleteBranch(id: string): Promise<void> {
+    const me = currentProfile();
+    if (!me || me.role !== 'super_admin') throw new Error('Only super admins can manage branches');
+    // sites fall back to "no branch"; employees are untouched
+    db.sites.filter((s) => s.branch_id === id).forEach((s) => { s.branch_id = null; });
+    db.branches = db.branches.filter((b) => b.id !== id);
+    db.branchAssignments = db.branchAssignments.filter((x) => x.branch_id !== id);
+    saveAndEmit(['branch', 'site', 'admin_branch']);
+  },
+
+  /** Move a site to another branch (null = unassign). Super admin only. */
+  async setSiteBranch(siteId: string, branchId: string | null): Promise<void> {
+    const me = currentProfile();
+    if (!me || me.role !== 'super_admin') throw new Error('Only super admins can assign sites to branches');
+    const site = db.sites.find((s) => s.id === siteId);
+    if (!site) throw new Error('Site not found');
+    if (branchId && !db.branches.some((b) => b.id === branchId)) throw new Error('Branch not found');
+    site.branch_id = branchId;
+    saveAndEmit(['site', 'branch']);
+  },
+
+  /** Branch ids a normal admin may access (Admin Management dialog). */
+  async getBranchAssignments(profileId: string): Promise<string[]> {
+    return db.branchAssignments.filter((x) => x.profile_id === profileId).map((x) => x.branch_id);
+  },
+
+  async setBranchAssignment(profileId: string, branchId: string, allowed: boolean): Promise<void> {
+    const me = currentProfile();
+    if (!me || me.role !== 'super_admin') throw new Error('Only super admins can assign branches');
+    const target = db.profiles.find((p) => p.id === profileId);
+    if (!target) throw new Error('Profile not found');
+    if (target.role === 'super_admin') throw new Error('Super admins can access every branch already');
+    if (allowed) {
+      if (!db.branches.some((b) => b.id === branchId)) throw new Error('Branch not found');
+      if (!db.branchAssignments.some((x) => x.profile_id === profileId && x.branch_id === branchId)) {
+        db.branchAssignments.push({ profile_id: profileId, branch_id: branchId });
+      }
+    } else {
+      db.branchAssignments = db.branchAssignments.filter(
+        (x) => !(x.profile_id === profileId && x.branch_id === branchId),
+      );
+    }
+    saveAndEmit(['admin_branch']);
+  },
+
   // ---- sites -----------------------------------------------------------------
   async listSites(): Promise<SiteWithCount[]> {
     return db.sites.map((s) => ({
@@ -548,20 +663,25 @@ export const demoApi = {
 
   async createSite(
     name: string, clientName: string | null, projectName: string | null, supervisor: string | null,
+    branchId: string | null = null,
   ): Promise<Site> {
     if (db.sites.some((s) => s.name.toLowerCase() === name.toLowerCase())) {
       throw new Error('A site with this name already exists');
     }
+    if (branchId && !db.branches.some((b) => b.id === branchId)) {
+      throw new Error('Branch not found');
+    }
     const site: Site = {
       id: uid(), name, client_name: clientName, project_name: projectName,
-      supervisor: supervisor?.trim() || null, is_active: true, created_at: nowISO(),
+      supervisor: supervisor?.trim() || null, branch_id: branchId,
+      is_active: true, created_at: nowISO(),
     };
     db.sites.push(site);
-    saveAndEmit(['site']);
+    saveAndEmit(['site', 'branch']);
     return site;
   },
 
-  async updateSite(id: string, input: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean }): Promise<{ unassignedCount: number }> {
+  async updateSite(id: string, input: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean; branch_id?: string | null }): Promise<{ unassignedCount: number }> {
     if (db.sites.some((s) => s.name.toLowerCase() === input.name.toLowerCase() && s.id !== id)) {
       throw new Error('A site with this name already exists');
     }
@@ -572,6 +692,12 @@ export const demoApi = {
       name: input.name, client_name: input.client_name, project_name: input.project_name,
       supervisor: input.supervisor?.trim() || null, is_active: input.is_active,
     });
+    if (input.branch_id !== undefined) {
+      if (input.branch_id && !db.branches.some((b) => b.id === input.branch_id)) {
+        throw new Error('Branch not found');
+      }
+      site.branch_id = input.branch_id;
+    }
 
     let unassignedCount = 0;
     if (wasActive && !input.is_active) {

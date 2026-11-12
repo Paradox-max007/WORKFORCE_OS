@@ -20,6 +20,7 @@ import { EmployeeFormPage } from '@/components/employees/employee-form-page';
 import { EmployeePage } from '@/components/employees/employee-page';
 import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
+import { BranchesPage } from '@/components/branches/branches-page';
 import { AttendanceCalendarPage } from '@/components/payroll/attendance-calendar-page';
 import { LeaveRequestPage } from '@/components/leave-requests/leave-request-page';
 import { NotificationPage } from '@/components/notifications/notification-page';
@@ -73,6 +74,7 @@ function MainLayout() {
     employee_details: <EmployeeDetailsPage />,
     employee_form: <EmployeeFormPage />,
     employee_export: <EmployeeExportPreviewPage />,
+    branches: <BranchesPage />,
     sites: <SitesPage />,
     camps: <CampsPage />,
     attendance: <AttendancePage />,

@@ -25,7 +25,7 @@
 // ============================================================================
 
 import {
-  LayoutDashboard, Users, Building2, Tent, CalendarCheck, Clock, Shirt,
+  LayoutDashboard, Users, Building2, GitBranch, Tent, CalendarCheck, Clock, Shirt,
   FileWarning, Ban, Bell, UserSquare2, Wallet, Banknote, Wrench, type LucideIcon,
 } from 'lucide-react';
 import type { AppView } from '@/store/app-store';
@@ -63,6 +63,7 @@ export const MENU_GROUPS: Record<string, MenuGroupDef> = {
 export const MENUS = [
   { id: 'dashboard', label: 'Dashboard', hint: 'Operations overview & stats', icon: LayoutDashboard, managed: false, defaultOn: true },
   { id: 'employees', label: 'Employees', hint: 'Directory, records & ratings', icon: Users, managed: true, defaultOn: false },
+  { id: 'branches', label: 'Branches', hint: 'Branches & their sites — admins see only allowed branches', icon: GitBranch, managed: true, defaultOn: false },
   { id: 'sites', label: 'Sites', hint: 'Work sites & client projects', icon: Building2, managed: true, defaultOn: false },
   { id: 'camps', label: 'Camps', hint: 'Accommodation & room assignments', icon: Tent, managed: true, defaultOn: false },
   { id: 'attendance', label: 'Attendance', hint: 'Sitewise hours marking — assigned sites only', icon: CalendarCheck, managed: true, defaultOn: false },

@@ -16,7 +16,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeft, Building2, Crown, Download, Eye, FileSpreadsheet, Loader2, Pencil,
+  ArrowLeft, Building2, ChevronDown, Crown, Download, Eye, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil,
   Plus, Power, PowerOff, Printer, Search, Trash2, TriangleAlert, UserMinus,
   Users, X,
 } from 'lucide-react';
@@ -38,6 +38,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -48,7 +49,7 @@ import { fmtDate, initials } from '@/lib/format';
 import { gridCellKeyDown, type GridNavConfig } from '@/lib/grid-nav';
 import { exportElementToPdf, printElement } from '@/lib/pdf';
 import { cn } from '@/lib/utils';
-import type { EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { BranchWithCount, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -237,10 +238,21 @@ function AttLogo() {
 export function SitesPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
-  const version = useRealtimeVersion(['site', 'employee', 'site_transfer']);
+  const version = useRealtimeVersion(['site', 'employee', 'site_transfer', 'branch', 'admin_branch']);
 
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  /** branch ids the signed-in admin may access (null → no restriction) */
+  const allowedBranchIds = useMemo(
+    () => (isSuperAdmin || !branches ? null : new Set(branches.map((b) => b.id))),
+    [isSuperAdmin, branches],
+  );
+  const branchNameOf = useMemo(() => {
+    const map = new Map<string, string>();
+    (branches ?? []).forEach((b) => map.set(b.id, b.name));
+    return map;
+  }, [branches]);
 
   const [subView, setSubView] = useState<SubView>('list');
   const [viewSiteId, setViewSiteId] = useState<string | null>(null);
@@ -248,6 +260,8 @@ export function SitesPage() {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  /** which branch groups are expanded (super-admin branch-wise layout) */
+  const [expandedBranches, setExpandedBranches] = useState<Set<string>>(new Set());
 
   // dialogs
   const [formOpen, setFormOpen] = useState(false);
@@ -264,10 +278,17 @@ export function SitesPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [s, e] = await Promise.all([dataApi.listSites(), dataApi.listEmployees()]);
+        // listBranches is scoped: super admins get every branch, normal
+        // admins only the branches assigned to them
+        const [s, e, b] = await Promise.all([
+          dataApi.listSites(),
+          dataApi.listEmployees(),
+          dataApi.listBranches().catch(() => [] as BranchWithCount[]),
+        ]);
         if (!cancelled) {
           setSites(s);
           setEmployees(e);
+          setBranches(b);
         }
       } catch {
         if (!cancelled) {
@@ -288,8 +309,18 @@ export function SitesPage() {
   }, [search]);
 
   // ---- derived values --------------------------------------------------------
-  const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
-  const inactiveSites = useMemo(() => (sites ?? []).filter((s) => !s.is_active), [sites]);
+  /** Branch-scoped site list. Super admins see everything; normal admins see
+   *  only the sites of their allowed branches (sites without a branch stay
+   *  visible to everyone until a super admin assigns them). */
+  const scopedSites = useMemo(
+    () => (sites ?? []).filter((s) => {
+      if (allowedBranchIds === null || s.branch_id === null) return true;
+      return allowedBranchIds.has(s.branch_id);
+    }),
+    [sites, allowedBranchIds],
+  );
+  const activeSites = useMemo(() => scopedSites.filter((s) => s.is_active), [scopedSites]);
+  const inactiveSites = useMemo(() => scopedSites.filter((s) => !s.is_active), [scopedSites]);
   const loading = sites === null;
 
   const viewSite = useMemo(
@@ -304,7 +335,8 @@ export function SitesPage() {
 
   const matchesSearch = (s: SiteWithCount): boolean => {
     if (!debouncedSearch) return true;
-    const hay = `${s.name} ${s.client_name ?? ''} ${s.project_name ?? ''} ${s.supervisor ?? ''}`.toLowerCase();
+    const branchName = s.branch_id ? branchNameOf.get(s.branch_id) ?? '' : '';
+    const hay = `${s.name} ${s.client_name ?? ''} ${s.project_name ?? ''} ${s.supervisor ?? ''} ${branchName}`.toLowerCase();
     return hay.includes(debouncedSearch);
   };
 
@@ -341,6 +373,7 @@ export function SitesPage() {
         client_name: site.client_name,
         project_name: site.project_name,
         supervisor: site.supervisor,
+        branch_id: site.branch_id,
         is_active: true,
       });
       toast.success('Site activated', {
@@ -362,6 +395,7 @@ export function SitesPage() {
         client_name: deactivateTarget.client_name,
         project_name: deactivateTarget.project_name,
         supervisor: deactivateTarget.supervisor,
+        branch_id: deactivateTarget.branch_id,
         is_active: false,
       });
       toast.success('Site deactivated', {
@@ -396,6 +430,197 @@ export function SitesPage() {
   };
 
   // ---- grid renderer (shared by both tabs) ----------------------------------
+  const renderSiteCard = (site: SiteWithCount, i: number) => (
+    <SiteCard
+      key={site.id}
+      site={site}
+      index={i}
+      branchName={site.branch_id ? branchNameOf.get(site.branch_id) ?? null : null}
+      canDelete={isSuperAdmin}
+      busy={togglingId === site.id}
+      onToggle={handleToggleActive}
+      onEdit={openEdit}
+      onDelete={setDeleteTarget}
+      onViewEmployees={openEmployees}
+      onAttendance={(s) => setAttendanceSiteId(s.id)}
+    />
+  );
+
+  const renderGridInner = (filtered: SiteWithCount[]) => (
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      {filtered.map((site, i) => renderSiteCard(site, i))}
+    </div>
+  );
+
+  /** SUPER ADMIN — branch-wise layout: every branch is a collapsible row;
+   *  expanding it reveals that branch's site cards. Sites without a branch
+   *  land in a trailing "No branch" group. */
+  const renderBranchWise = (list: SiteWithCount[], tabValue: SiteTab) => {
+    const filtered = list.filter(matchesSearch);
+    // auto-expand groups while searching so hits are visible
+    const groups: { id: string; name: string; location: string | null; siteCount: number; sites: SiteWithCount[] }[] =
+      (branches ?? []).map((b) => ({
+        id: b.id,
+        name: b.name,
+        location: b.location,
+        siteCount: b.site_count,
+        sites: filtered.filter((s) => s.branch_id === b.id),
+      }));
+    const unassigned = filtered.filter((s) => s.branch_id === null);
+    const searching = debouncedSearch.length > 0;
+
+    const isExpanded = (id: string) => searching || expandedBranches.has(id);
+    const toggleBranch = (id: string) => {
+      setExpandedBranches((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    };
+
+    return (
+      <div className="space-y-3">
+        {groups.map((g) => {
+          const expanded = isExpanded(g.id);
+          const groupMatches = searching && (
+            `${g.name} ${g.location ?? ''}`.toLowerCase().includes(debouncedSearch) || g.sites.length > 0
+          );
+          return (
+            <div
+              key={g.id}
+              className={cn(
+                'overflow-hidden rounded-xl border bg-background/40',
+                expanded ? 'border-brand/30' : 'border-border/60',
+              )}
+            >
+              <button
+                type="button"
+                onClick={() => toggleBranch(g.id)}
+                aria-expanded={expanded}
+                aria-label={`${expanded ? 'Collapse' : 'Expand'} branch ${g.name}`}
+                className="flex w-full items-center gap-3 p-3.5 text-left transition-colors hover:bg-muted/30"
+              >
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
+                  <GitBranch size={17} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                    {g.name}
+                    <span className="rounded-full bg-brand/10 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-brand">
+                      {g.sites.length} {g.sites.length === 1 ? 'site' : 'sites'}
+                    </span>
+                    {groupMatches && (
+                      <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
+                        matches
+                      </span>
+                    )}
+                  </span>
+                  {g.location && (
+                    <span className="mt-0.5 flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+                      <MapPin size={11} className="shrink-0" aria-hidden /> {g.location}
+                    </span>
+                  )}
+                </span>
+                <motion.span
+                  animate={{ rotate: expanded ? 0 : -90 }}
+                  transition={{ duration: 0.2 }}
+                  className="shrink-0 text-muted-foreground"
+                >
+                  <ChevronDown size={16} />
+                </motion.span>
+              </button>
+              <AnimatePresence initial={false}>
+                {expanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.25, ease: EASE }}
+                    className="overflow-hidden"
+                  >
+                    <div className="border-t bg-muted/20 p-3">
+                      {g.sites.length === 0 ? (
+                        <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                          {searching
+                            ? 'No sites in this branch match your search.'
+                            : tabValue === 'active'
+                              ? 'No active sites in this branch yet.'
+                              : 'No inactive sites in this branch.'}
+                        </p>
+                      ) : (
+                        renderGridInner(g.sites)
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          );
+        })}
+
+        {/* No-branch group */}
+        {(unassigned.length > 0 || !searching) && (
+          <div className={cn(
+            'overflow-hidden rounded-xl border border-dashed',
+            isExpanded('__none__') && unassigned.length > 0 ? 'border-brand/30' : 'border-border/60',
+          )}>
+            <button
+              type="button"
+              onClick={() => toggleBranch('__none__')}
+              aria-expanded={isExpanded('__none__')}
+              aria-label={`${isExpanded('__none__') ? 'Collapse' : 'Expand'} sites without a branch`}
+              className="flex w-full items-center gap-3 p-3.5 text-left transition-colors hover:bg-muted/30"
+            >
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                <Building2 size={17} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-muted-foreground">
+                  No branch
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
+                    {unassigned.length} {unassigned.length === 1 ? 'site' : 'sites'}
+                  </span>
+                </span>
+                <span className="text-[11px] text-muted-foreground/70">
+                  Sites not yet assigned to a branch — visible to every admin.
+                </span>
+              </span>
+              <motion.span
+                animate={{ rotate: isExpanded('__none__') ? 0 : -90 }}
+                transition={{ duration: 0.2 }}
+                className="shrink-0 text-muted-foreground"
+              >
+                <ChevronDown size={16} />
+              </motion.span>
+            </button>
+            <AnimatePresence initial={false}>
+              {isExpanded('__none__') && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.25, ease: EASE }}
+                  className="overflow-hidden"
+                >
+                  <div className="border-t bg-muted/20 p-3">
+                    {unassigned.length === 0 ? (
+                      <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                        Every site belongs to a branch — assign the rest from the Branches page.
+                      </p>
+                    ) : (
+                      renderGridInner(unassigned)
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderGrid = (list: SiteWithCount[], tabValue: SiteTab) => {
     if (loading) {
       return (
@@ -407,7 +632,7 @@ export function SitesPage() {
       );
     }
     const filtered = list.filter(matchesSearch);
-    if (filtered.length === 0) {
+    if (filtered.length === 0 && !isSuperAdmin) {
       const searching = debouncedSearch.length > 0;
       return (
         <EmptyState
@@ -421,7 +646,7 @@ export function SitesPage() {
           }
           description={
             searching
-              ? 'Try a different search term — search covers site, client and project names.'
+              ? 'Try a different search term — search covers site, client, project and branch names.'
               : tabValue === 'active'
                 ? 'Create your first work site to start assigning crews and tracking attendance.'
                 : 'Sites you deactivate will be moved here and can be reactivated at any time.'
@@ -436,24 +661,12 @@ export function SitesPage() {
         />
       );
     }
-    return (
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {filtered.map((site, i) => (
-          <SiteCard
-            key={site.id}
-            site={site}
-            index={i}
-            canDelete={isSuperAdmin}
-            busy={togglingId === site.id}
-            onToggle={handleToggleActive}
-            onEdit={openEdit}
-            onDelete={setDeleteTarget}
-            onViewEmployees={openEmployees}
-            onAttendance={(s) => setAttendanceSiteId(s.id)}
-          />
-        ))}
-      </div>
-    );
+    // SUPER ADMIN → branch-wise collapsible rows; normal admin → flat grid of
+    // the sites their branches own
+    if (isSuperAdmin) {
+      return renderBranchWise(filtered, tabValue);
+    }
+    return renderGridInner(filtered);
   };
 
   // ---- render ----------------------------------------------------------------
@@ -481,7 +694,11 @@ export function SitesPage() {
             <div className="space-y-6">
               <PageHeader
                 title="Sites"
-                description="Manage work sites and the crews assigned to each location."
+                description={
+                  isSuperAdmin
+                    ? 'All work sites grouped by their owner branch — expand a branch to manage its sites.'
+                    : 'The work sites of the branches you have access to.'
+                }
                 actions={
                   <Button
                     onClick={openCreate}
@@ -548,7 +765,12 @@ export function SitesPage() {
       </AnimatePresence>
 
       {/* ---- Create / Edit site dialog ---- */}
-      <SiteFormDialog open={formOpen} onOpenChange={setFormOpen} editing={editTarget} />
+      <SiteFormDialog
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        editing={editTarget}
+        branches={branches ?? []}
+      />
 
       {/* ---- Deactivate confirmation ---- */}
       <AlertDialog
@@ -660,10 +882,11 @@ export function SitesPage() {
 // Site card (grid tile)
 // ---------------------------------------------------------------------------
 function SiteCard({
-  site, index, canDelete, busy, onToggle, onEdit, onDelete, onViewEmployees, onAttendance,
+  site, index, branchName, canDelete, busy, onToggle, onEdit, onDelete, onViewEmployees, onAttendance,
 }: {
   site: SiteWithCount;
   index: number;
+  branchName: string | null;
   canDelete: boolean;
   busy: boolean;
   onToggle: (site: SiteWithCount) => void;
@@ -781,6 +1004,16 @@ function SiteCard({
           <Users size={11} />
           {site.employee_count} {site.employee_count === 1 ? 'employee' : 'employees'}
         </Badge>
+        {branchName && (
+          <Badge
+            variant="secondary"
+            className="max-w-full gap-1 border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+            title={`Branch: ${branchName}`}
+          >
+            <GitBranch size={11} className="shrink-0" />
+            <span className="truncate">{branchName}</span>
+          </Badge>
+        )}
         {!site.is_active && (
           <Badge variant="secondary" className="border-zinc-500/25 bg-zinc-500/10 text-zinc-400">
             Inactive
@@ -816,16 +1049,19 @@ function SiteCard({
 // Create / Edit site dialog
 // ---------------------------------------------------------------------------
 function SiteFormDialog({
-  open, onOpenChange, editing,
+  open, onOpenChange, editing, branches,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   editing: SiteWithCount | null;
+  /** branches the signed-in admin may pick from (super admin: all) */
+  branches: BranchWithCount[];
 }) {
   const [name, setName] = useState('');
   const [client, setClient] = useState('');
   const [project, setProject] = useState('');
   const [supervisor, setSupervisor] = useState('');
+  const [branchId, setBranchId] = useState<string>('__none__');
   const [busy, setBusy] = useState(false);
 
   // Reset the form every time the dialog opens
@@ -835,17 +1071,20 @@ function SiteFormDialog({
       setClient(editing?.client_name ?? '');
       setProject(editing?.project_name ?? '');
       setSupervisor(editing?.supervisor ?? '');
+      setBranchId(editing?.branch_id ?? '__none__');
       setBusy(false);
     }
   }, [open, editing]);
 
   const trimmedName = name.trim();
+  const selectedBranchId = branchId === '__none__' ? null : branchId;
   const unchanged =
     !!editing &&
     trimmedName === editing.name &&
     client.trim() === (editing.client_name ?? '') &&
     project.trim() === (editing.project_name ?? '') &&
-    supervisor.trim() === (editing.supervisor ?? '');
+    supervisor.trim() === (editing.supervisor ?? '') &&
+    selectedBranchId === (editing.branch_id ?? null);
 
   const submit = async () => {
     if (!trimmedName || busy || unchanged) return;
@@ -857,6 +1096,7 @@ function SiteFormDialog({
           client_name: client.trim() || null,
           project_name: project.trim() || null,
           supervisor: supervisor.trim() || null,
+          branch_id: selectedBranchId,
           is_active: editing.is_active,
         });
         toast.success('Site updated', { description: `Details for "${trimmedName}" were saved.` });
@@ -866,6 +1106,7 @@ function SiteFormDialog({
           client.trim() || null,
           project.trim() || null,
           supervisor.trim() || null,
+          selectedBranchId,
         );
         toast.success('Site created', { description: `"${created.name}" has been added.` });
       }
@@ -947,6 +1188,25 @@ function SiteFormDialog({
             />
             <p className="text-[11px] text-muted-foreground">
               Shown as “Supervised by” on the site's attendance sheet — powers “View by Supervisors” on the Attendance page. Admins assigned to this site (Admins → Site Access) are listed there too.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="site-branch">Owner Branch</Label>
+            <Select value={branchId} onValueChange={setBranchId}>
+              <SelectTrigger id="site-branch" className="h-11" aria-label="Owner branch">
+                <SelectValue placeholder="No branch" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">No branch</SelectItem>
+                {branches.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name}{!b.is_active ? ' (inactive)' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              The branch that owns this site. Normal admins only see sites of the branches they are allowed — sites without a branch stay visible to every admin.
             </p>
           </div>
         </div>

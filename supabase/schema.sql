@@ -40,6 +40,18 @@ create table if not exists public.menu_permission (
   unique (profile_id, menu_key)
 );
 
+-- Regional branches — a branch owns multiple work sites (site.branch_id).
+-- Normal admins only see the branches assigned to them (admin_branch);
+-- super admins see and manage every branch.
+create table if not exists public.branch (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null unique,
+  location   text,
+  notes      text,
+  is_active  boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 -- Work sites
 create table if not exists public.site (
   id           uuid primary key default gen_random_uuid(),
@@ -47,6 +59,7 @@ create table if not exists public.site (
   client_name  text,
   project_name text,
   supervisor   text,                            -- attendance marker who marks this site's sheet
+  branch_id    uuid references public.branch(id) on delete set null,  -- owner branch
   is_active    boolean not null default true,
   created_at   timestamptz not null default now()
 );
@@ -54,6 +67,8 @@ create table if not exists public.site (
 -- attendance marker (supervisor) — added for existing databases; the create
 -- table above already covers fresh ones
 alter table public.site add column if not exists supervisor text;
+-- owner branch — added for existing databases (20261112_branches.sql)
+alter table public.site add column if not exists branch_id uuid references public.branch(id) on delete set null;
 
 -- Accommodation camps (where employees stay; one employee → at most one camp)
 -- NOTE: created BEFORE public.employee because employee.camp_id references it —
@@ -111,6 +126,15 @@ create table if not exists public.admin_site (
   profile_id uuid not null references public.profiles(id) on delete cascade,
   site_id    uuid not null references public.site(id) on delete cascade,
   unique (profile_id, site_id)
+);
+
+-- Branches a normal admin may ACCESS (Branches & branch-wise Sites pages —
+-- super admins can access every branch).
+create table if not exists public.admin_branch (
+  id         uuid primary key default gen_random_uuid(),
+  profile_id uuid not null references public.profiles(id) on delete cascade,
+  branch_id  uuid not null references public.branch(id) on delete cascade,
+  unique (profile_id, branch_id)
 );
 
 -- Site transfer log: one row is written automatically whenever an employee's
@@ -401,6 +425,8 @@ alter table public.leave_request       enable row level security;
 alter table public.cancellation_request enable row level security;
 alter table public.uniform_registry    enable row level security;
 alter table public.site_transfer       enable row level security;
+alter table public.branch              enable row level security;
+alter table public.admin_branch        enable row level security;
 
 -- profiles: read self, super admins read all
 drop policy if exists profiles_select on public.profiles;
@@ -415,6 +441,23 @@ create policy menu_perm_select on public.menu_permission
 -- site assignments: read self, super admins read all (writes via RPC below)
 drop policy if exists admin_site_select on public.admin_site;
 create policy admin_site_select on public.admin_site
+  for select using (profile_id = auth.uid() or public.is_super_admin());
+
+-- branches: super admins read all, normal admins only their assigned
+-- branches (Branches page + branch-wise Sites page)
+drop policy if exists branch_select on public.branch;
+create policy branch_select on public.branch
+  for select using (
+    public.is_super_admin()
+    or exists (
+      select 1 from public.admin_branch ab
+      where ab.profile_id = auth.uid() and ab.branch_id = branch.id
+    )
+  );
+
+-- branch assignments: read self, super admins read all (writes via RPC below)
+drop policy if exists admin_branch_select on public.admin_branch;
+create policy admin_branch_select on public.admin_branch
   for select using (profile_id = auth.uid() or public.is_super_admin());
 
 -- notifications: read + update (mark read) own rows
@@ -551,13 +594,18 @@ end; $$;
 -- ============================================================================
 -- 7. SITE RPCs
 -- ============================================================================
--- drop pre-supervisor signatures first: create or replace with a different
--- parameter count creates an OVERLOAD, leaving a stale function PostgREST
--- could still resolve to (no-ops on fresh databases)
+-- drop pre-supervisor / pre-branch signatures first: create or replace with
+-- a different parameter count creates an OVERLOAD, leaving a stale function
+-- PostgREST could still resolve to (no-ops on fresh databases)
 drop function if exists public.create_site(text, text, text);
+drop function if exists public.create_site(text, text, text, text);
 drop function if exists public.update_site(uuid, text, text, text, boolean);
+drop function if exists public.update_site(uuid, text, text, text, boolean, text);
 
-create or replace function public.create_site(p_name text, p_client_name text default null, p_project_name text default null, p_supervisor text default null)
+create or replace function public.create_site(
+  p_name text, p_client_name text default null, p_project_name text default null,
+  p_supervisor text default null, p_branch_id uuid default null
+)
 returns public.site language plpgsql
 security definer set search_path = public
 as $$
@@ -567,7 +615,11 @@ begin
   if exists (select 1 from public.site where lower(name) = lower(p_name)) then
     raise exception 'A site with this name already exists';
   end if;
-  insert into public.site (name, client_name, project_name, supervisor) values (p_name, p_client_name, p_project_name, nullif(trim(p_supervisor), ''))
+  if p_branch_id is not null and not exists (select 1 from public.branch where id = p_branch_id) then
+    raise exception 'Branch not found';
+  end if;
+  insert into public.site (name, client_name, project_name, supervisor, branch_id)
+  values (p_name, p_client_name, p_project_name, nullif(trim(p_supervisor), ''), p_branch_id)
   returning * into result;
   return result;
 end; $$;
@@ -575,7 +627,7 @@ end; $$;
 -- Returns the site + how many employees got unassigned when deactivating.
 create or replace function public.update_site(
   p_id uuid, p_name text, p_client_name text, p_project_name text, p_is_active boolean,
-  p_supervisor text default null
+  p_supervisor text default null, p_branch_id uuid default null
 )
 returns jsonb language plpgsql
 security definer set search_path = public
@@ -588,10 +640,13 @@ begin
   if exists (select 1 from public.site where lower(name) = lower(p_name) and id <> p_id) then
     raise exception 'A site with this name already exists';
   end if;
+  if p_branch_id is not null and not exists (select 1 from public.branch where id = p_branch_id) then
+    raise exception 'Branch not found';
+  end if;
 
   select is_active into was_active from public.site where id = p_id;
   update public.site set name = p_name, client_name = p_client_name, project_name = p_project_name,
-    supervisor = nullif(trim(p_supervisor), ''), is_active = p_is_active
+    supervisor = nullif(trim(p_supervisor), ''), is_active = p_is_active, branch_id = p_branch_id
   where id = p_id returning * into result;
 
   if was_active = true and p_is_active = false then
@@ -613,6 +668,119 @@ begin
   update public.employee set current_site_id = null where current_site_id = p_id;
   update public.employee set is_team_leader = false, team_leader_site_id = null where team_leader_site_id = p_id;
   delete from public.site where id = p_id;
+end; $$;
+
+-- ============================================================================
+-- 6z. BRANCH RPCs (regional site groups — 20261112_branches.sql)
+-- ============================================================================
+
+-- Scoped branch list with live counts. Powers the Branches page and the
+-- branch-wise Sites page (super admin: every branch; admin: assigned only).
+create or replace function public.list_branches()
+returns jsonb language sql stable
+security definer set search_path = public
+as $$
+  select coalesce(jsonb_agg(row_to_json(t) order by t.name), '[]'::jsonb)
+  from (
+    select
+      b.id, b.name, b.location, b.notes, b.is_active, b.created_at,
+      (select count(*)::int from public.site s where s.branch_id = b.id) as site_count,
+      (select count(*)::int from public.employee e
+         join public.site s on s.id = e.current_site_id
+        where s.branch_id = b.id and e.status <> 'deleted') as employee_count
+    from public.branch b
+    where public.is_super_admin()
+       or exists (
+         select 1 from public.admin_branch ab
+         where ab.profile_id = auth.uid() and ab.branch_id = b.id
+       )
+  ) t;
+$$;
+
+create or replace function public.create_branch(
+  p_name text, p_location text default null, p_notes text default null
+)
+returns public.branch language plpgsql
+security definer set search_path = public
+as $$
+declare result public.branch;
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can manage branches'; end if;
+  if exists (select 1 from public.branch where lower(name) = lower(p_name)) then
+    raise exception 'A branch with this name already exists';
+  end if;
+  insert into public.branch (name, location, notes)
+  values (p_name, nullif(trim(p_location), ''), nullif(trim(p_notes), ''))
+  returning * into result;
+  return result;
+end; $$;
+
+create or replace function public.update_branch(
+  p_id uuid, p_name text, p_location text, p_notes text, p_is_active boolean
+)
+returns public.branch language plpgsql
+security definer set search_path = public
+as $$
+declare result public.branch;
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can manage branches'; end if;
+  if exists (select 1 from public.branch where lower(name) = lower(p_name) and id <> p_id) then
+    raise exception 'A branch with this name already exists';
+  end if;
+  update public.branch set name = p_name, location = nullif(trim(p_location), ''),
+    notes = nullif(trim(p_notes), ''), is_active = p_is_active
+  where id = p_id returning * into result;
+  return result;
+end; $$;
+
+create or replace function public.delete_branch(p_id uuid)
+returns void language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can manage branches'; end if;
+  -- sites fall back to "no branch" (FK on delete set null); admin_branch
+  -- rows cascade; employees are untouched
+  delete from public.branch where id = p_id;
+end; $$;
+
+-- Move a site to another branch (null = unassign). Super admin only.
+create or replace function public.set_site_branch(
+  p_site_id uuid, p_branch_id uuid default null
+)
+returns void language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can assign sites to branches'; end if;
+  if p_branch_id is not null and not exists (select 1 from public.branch where id = p_branch_id) then
+    raise exception 'Branch not found';
+  end if;
+  update public.site set branch_id = p_branch_id where id = p_site_id;
+end; $$;
+
+-- Grant / revoke a branch to a normal admin (super admin only). Assigned
+-- admins see that branch (and its sites) on the Branches & Sites pages.
+create or replace function public.set_admin_branch(
+  p_profile_id uuid, p_branch_id uuid, p_allowed boolean
+)
+returns void language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can assign branches'; end if;
+  if (select role from public.profiles where id = p_profile_id) = 'super_admin' then
+    raise exception 'Super admins can access every branch already';
+  end if;
+  if p_allowed then
+    if not exists (select 1 from public.branch where id = p_branch_id) then
+      raise exception 'Branch not found';
+    end if;
+    insert into public.admin_branch (profile_id, branch_id) values (p_profile_id, p_branch_id)
+    on conflict (profile_id, branch_id) do nothing;
+  else
+    delete from public.admin_branch where profile_id = p_profile_id and branch_id = p_branch_id;
+  end if;
 end; $$;
 
 -- ============================================================================
@@ -1668,6 +1836,8 @@ begin
   alter publication supabase_realtime add table public.profiles;
   alter publication supabase_realtime add table public.menu_permission;
   alter publication supabase_realtime add table public.admin_site;
+  alter publication supabase_realtime add table public.branch;
+  alter publication supabase_realtime add table public.admin_branch;
   alter publication supabase_realtime add table public.site;
   alter publication supabase_realtime add table public.camp;
   alter publication supabase_realtime add table public.employee;

@@ -13,6 +13,7 @@ export type AppView =
   | 'employee_details'
   | 'employee_form'
   | 'employee_export'
+  | 'branches'
   | 'sites'
   | 'camps'
   | 'attendance'
@@ -34,6 +35,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   employee_details: 'Employee Details',
   employee_form: 'Add / Edit Employee',
   employee_export: 'Excel Export Preview',
+  branches: 'Branch Management',
   sites: 'Site Management',
   camps: 'Camp Management',
   attendance: 'Attendance',

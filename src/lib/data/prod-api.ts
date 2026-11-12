@@ -11,6 +11,8 @@ import {
   type AdminSiteAssignment,
   type Attendance,
   type BulkAttendanceEntry,
+  type Branch,
+  type BranchWithCount,
   type Camp,
   type CampWithCount,
   type CardType,
@@ -97,6 +99,8 @@ function ensureRealtimeChannel(): void {
     'profiles',
     'menu_permission',
     'admin_site',
+    'branch',
+    'admin_branch',
     'site',
     'camp',
     'employee',
@@ -322,6 +326,64 @@ export const prodApi = {
     });
   },
 
+  // ---- branches (regional site groups) ---------------------------------------
+  /** Branches the signed-in admin may access, with site + employee counts.
+   *  Super admins → every branch; normal admins → only assigned branches
+   *  (RLS on public.branch). */
+  async listBranches(): Promise<BranchWithCount[]> {
+    const { data, error } = await sb().rpc('list_branches');
+    assertOk(error);
+    return ((data ?? []) as unknown as BranchWithCount[]);
+  },
+
+  async createBranch(name: string, location: string | null, notes: string | null): Promise<Branch> {
+    const { data, error } = await sb().rpc('create_branch', {
+      p_name: name, p_location: location, p_notes: notes,
+    });
+    assertOk(error);
+    return data as unknown as Branch;
+  },
+
+  async updateBranch(
+    id: string,
+    input: { name: string; location: string | null; notes: string | null; is_active: boolean },
+  ): Promise<Branch> {
+    const { data, error } = await sb().rpc('update_branch', {
+      p_id: id, p_name: input.name, p_location: input.location,
+      p_notes: input.notes, p_is_active: input.is_active,
+    });
+    assertOk(error);
+    return data as unknown as Branch;
+  },
+
+  async deleteBranch(id: string): Promise<void> {
+    const { error } = await sb().rpc('delete_branch', { p_id: id });
+    assertOk(error);
+  },
+
+  /** Move a site to another branch (null = unassign). Super admin only. */
+  async setSiteBranch(siteId: string, branchId: string | null): Promise<void> {
+    const { error } = await sb().rpc('set_site_branch', {
+      p_site_id: siteId, p_branch_id: branchId,
+    });
+    assertOk(error);
+  },
+
+  /** Branch ids a normal admin may access (Admin Management dialog). */
+  async getBranchAssignments(profileId: string): Promise<string[]> {
+    const { data, error } = await sb().from('admin_branch')
+      .select('branch_id').eq('profile_id', profileId);
+    assertOk(error);
+    return ((data ?? []) as { branch_id: string }[]).map((r) => r.branch_id);
+  },
+
+  async setBranchAssignment(profileId: string, branchId: string, allowed: boolean): Promise<void> {
+    const { error } = await sb().rpc('set_admin_branch', {
+      p_profile_id: profileId, p_branch_id: branchId, p_allowed: allowed,
+    });
+    assertOk(error);
+  },
+
   // ---- sites -----------------------------------------------------------------
   async listSites(): Promise<SiteWithCount[]> {
     const [sitesRes, empRes] = await Promise.all([
@@ -342,9 +404,11 @@ export const prodApi = {
 
   async createSite(
     name: string, clientName: string | null, projectName: string | null, supervisor: string | null,
+    branchId: string | null = null,
   ): Promise<Site> {
     const { data, error } = await sb().rpc('create_site', {
       p_name: name, p_client_name: clientName, p_project_name: projectName, p_supervisor: supervisor,
+      p_branch_id: branchId,
     });
     assertOk(error);
     return data as unknown as Site;
@@ -352,11 +416,12 @@ export const prodApi = {
 
   async updateSite(
     id: string,
-    input: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean },
+    input: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean; branch_id?: string | null },
   ): Promise<{ unassignedCount: number }> {
     const { data, error } = await sb().rpc('update_site', {
       p_id: id, p_name: input.name, p_client_name: input.client_name,
       p_project_name: input.project_name, p_is_active: input.is_active, p_supervisor: input.supervisor,
+      p_branch_id: input.branch_id === undefined ? null : input.branch_id,
     });
     assertOk(error);
     const json = (data ?? {}) as { unassignedCount?: number };

@@ -22,7 +22,7 @@ const eq = (a: number, b: number, eps = 0.005): boolean => Math.abs(a - b) < eps
 
 const T0 = '2026-01-01T00:00:00.000Z';
 const site = (id: string, name: string): Site =>
-  ({ id, name, client_name: null, project_name: null, supervisor: null, is_active: true, created_at: T0 });
+  ({ id, name, client_name: null, project_name: null, supervisor: null, branch_id: null, is_active: true, created_at: T0 });
 
 const emp = (id: string, name: string, siteId: string | null, opening = 0, join = '2026-01-01', tradeId: string | null = null): Employee => ({
   id, full_name: name, employee_code: `PUL-2026-${id}`, nationality: null, date_of_birth: null,

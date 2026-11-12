@@ -11,7 +11,7 @@
 
 import { motion } from 'framer-motion';
 import {
-  Building2, Calendar, Crown, Eye, EyeOff,
+  Building2, Calendar, Crown, Eye, EyeOff, GitBranch,
   KeyRound, Loader2, Lock, Mail, Pencil, Plus, Search, Shield,
   Trash2, User, X,
 } from 'lucide-react';
@@ -43,7 +43,7 @@ import { fmtDate, initials } from '@/lib/format';
 import {
   ALWAYS_ON_MENUS, MENU_BY_ID, MENU_KEYS, defaultPermissionMap,
 } from '@/lib/menus';
-import type { MenuKey, MenuPermissionMap, Profile, Role, SiteWithCount } from '@/lib/types';
+import type { BranchWithCount, MenuKey, MenuPermissionMap, Profile, Role, SiteWithCount } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -86,12 +86,14 @@ const matchesSearch = (profile: Profile, query: string): boolean => {
 export function AdminPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
-  const version = useRealtimeVersion(['profiles', 'menu_permission', 'admin_site', 'site']);
+  const version = useRealtimeVersion(['profiles', 'menu_permission', 'admin_site', 'site', 'branch', 'admin_branch']);
 
   const [profiles, setProfiles] = useState<Profile[] | null>(null);
   const [permCache, setPermCache] = useState<Record<string, MenuPermissionMap>>({});
   const [sitesCache, setSitesCache] = useState<Record<string, string[]>>({});
+  const [branchesCache, setBranchesCache] = useState<Record<string, string[]>>({});
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
   const [superSearch, setSuperSearch] = useState('');
   const [adminSearch, setAdminSearch] = useState('');
 
@@ -99,6 +101,7 @@ export function AdminPage() {
   const [accountTarget, setAccountTarget] = useState<AccountTarget | null>(null);
   const [permTarget, setPermTarget] = useState<Profile | null>(null);
   const [sitesTarget, setSitesTarget] = useState<Profile | null>(null);
+  const [branchesTarget, setBranchesTarget] = useState<Profile | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -108,12 +111,17 @@ export function AdminPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [list, siteList] = await Promise.all([dataApi.listProfiles(), dataApi.listSites()]);
+        const [list, siteList, branchList] = await Promise.all([
+          dataApi.listProfiles(),
+          dataApi.listSites(),
+          dataApi.listBranches().catch(() => [] as BranchWithCount[]),
+        ]);
         if (cancelled) return;
         setProfiles(list);
         setSites(siteList);
-        // Permission summaries + site assignments for the admin rows
-        const [maps, siteSets] = await Promise.all([
+        setBranches(branchList);
+        // Permission summaries + site/branch assignments for the admin rows
+        const [maps, siteSets, branchSets] = await Promise.all([
           Promise.all(
             list
               .filter((p) => p.role === 'admin')
@@ -136,10 +144,22 @@ export function AdminPage() {
                 }
               }),
           ),
+          Promise.all(
+            list
+              .filter((p) => p.role === 'admin')
+              .map(async (p): Promise<[string, string[]]> => {
+                try {
+                  return [p.id, await dataApi.getBranchAssignments(p.id)];
+                } catch {
+                  return [p.id, [] as string[]];
+                }
+              }),
+          ),
         ]);
         if (!cancelled) {
           setPermCache(Object.fromEntries(maps));
           setSitesCache(Object.fromEntries(siteSets));
+          setBranchesCache(Object.fromEntries(branchSets));
         }
       } catch {
         if (!cancelled) setProfiles([]);
@@ -194,6 +214,11 @@ export function AdminPage() {
   // Keep the "Sites" column in sync when toggles fire in the site-access dialog
   const handleSitesChanged = (profileId: string, siteIds: string[]) => {
     setSitesCache((prev) => ({ ...prev, [profileId]: siteIds }));
+  };
+
+  // Keep the "Branches" column in sync when toggles fire in the branch dialog
+  const handleBranchesChanged = (profileId: string, branchIds: string[]) => {
+    setBranchesCache((prev) => ({ ...prev, [profileId]: branchIds }));
   };
 
   // ---- super-admin-only guard -------------------------------------------------
@@ -453,6 +478,7 @@ export function AdminPage() {
                       <TableHead className={TH}>Member</TableHead>
                       <TableHead className={TH}>Role</TableHead>
                       <TableHead className={TH}>Access</TableHead>
+                      <TableHead className={TH}>Branches</TableHead>
                       <TableHead className={TH}>Assigned Sites</TableHead>
                       <TableHead className={TH}>Created</TableHead>
                       <TableHead className={cn(TH, 'text-right')}>Actions</TableHead>
@@ -488,6 +514,9 @@ export function AdminPage() {
                           <AccessChips map={permCache[p.id]} />
                         </TableCell>
                         <TableCell className="px-3 py-3">
+                          <BranchChips branchIds={branchesCache[p.id] ?? []} branches={branches} />
+                        </TableCell>
+                        <TableCell className="px-3 py-3">
                           <SiteChips siteIds={sitesCache[p.id] ?? []} sites={sites} />
                         </TableCell>
                         <TableCell className="whitespace-nowrap px-3 py-3">
@@ -503,6 +532,7 @@ export function AdminPage() {
                               canDelete
                               onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
                               onPermissions={() => setPermTarget(p)}
+                              onBranches={() => setBranchesTarget(p)}
                               onSites={() => setSitesTarget(p)}
                               onDelete={() => requestDelete(p)}
                             />
@@ -547,6 +577,10 @@ export function AdminPage() {
                         {grantedLabels.length > 0 ? ` plus ${grantedLabels.join(', ')}` : ' only'}
                       </p>
                       <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <GitBranch size={12} className="shrink-0 text-brand" aria-hidden /> Branches:
+                        <BranchChips branchIds={branchesCache[p.id] ?? []} branches={branches} inline />
+                      </p>
+                      <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                         <Building2 size={12} className="shrink-0 text-brand" aria-hidden /> Sites:
                         <SiteChips siteIds={sitesCache[p.id] ?? []} sites={sites} inline />
                       </p>
@@ -559,6 +593,7 @@ export function AdminPage() {
                           canDelete
                           onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
                           onPermissions={() => setPermTarget(p)}
+                          onBranches={() => setBranchesTarget(p)}
                           onSites={() => setSitesTarget(p)}
                           onDelete={() => requestDelete(p)}
                         />
@@ -584,6 +619,14 @@ export function AdminPage() {
         profile={permTarget}
         onClose={() => setPermTarget(null)}
         onChanged={handlePermChanged}
+      />
+
+      {/* ---- Branch access dialog ---- */}
+      <BranchAccessDialog
+        profile={branchesTarget}
+        branches={branches}
+        onClose={() => setBranchesTarget(null)}
+        onChanged={handleBranchesChanged}
       />
 
       {/* ---- Site access dialog ---- */}
@@ -751,6 +794,36 @@ function AccessChips({ map }: { map: MenuPermissionMap | undefined }) {
   );
 }
 
+/** Summary of the branches an admin may access (branch scoping). */
+function BranchChips({
+  branchIds, branches, inline = false,
+}: {
+  branchIds: string[];
+  branches: BranchWithCount[] | null;
+  inline?: boolean;
+}) {
+  const names = (branches ?? []).filter((b) => branchIds.includes(b.id)).map((b) => b.name);
+  return (
+    <span
+      className={cn('flex items-center gap-1', inline ? 'flex-wrap' : 'max-w-[220px] flex-wrap')}
+      title="Admins only see the branches assigned to them"
+    >
+      {names.length === 0 ? (
+        <span className={cn('rounded-full border px-1.5 py-px text-[10px] font-medium', inline ? 'text-amber-600 dark:text-amber-400 border-amber-500/25 bg-amber-500/10' : 'text-muted-foreground bg-muted')}>
+          All / none
+        </span>
+      ) : names.map((n) => (
+        <span
+          key={n}
+          className="rounded-full border border-brand/25 bg-brand/10 px-1.5 py-px text-[10px] font-medium text-brand"
+        >
+          {n}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /** Summary of the sites an admin is assigned to (attendance scoping). */
 function SiteChips({
   siteIds, sites, inline = false,
@@ -781,14 +854,15 @@ function SiteChips({
   );
 }
 
-/** Row action icon buttons (permissions + site access for admins, edit, guarded delete). */
+/** Row action icon buttons (permissions + branch/site access for admins, edit, guarded delete). */
 function RowActions({
-  profile, canDelete, onEdit, onPermissions, onSites, onDelete,
+  profile, canDelete, onEdit, onPermissions, onBranches, onSites, onDelete,
 }: {
   profile: Profile;
   canDelete: boolean;
   onEdit: () => void;
   onPermissions?: () => void;
+  onBranches?: () => void;
   onSites?: () => void;
   onDelete: () => void;
 }) {
@@ -804,6 +878,18 @@ function RowActions({
           className="size-9 text-muted-foreground hover:bg-brand/10 hover:text-brand"
         >
           <KeyRound size={15} aria-hidden />
+        </Button>
+      )}
+      {onBranches && (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onBranches}
+          title="Assign branches (branch access)"
+          aria-label={`Assign branches — ${profile.name}`}
+          className="size-9 text-muted-foreground hover:bg-brand/10 hover:text-brand"
+        >
+          <GitBranch size={15} aria-hidden />
         </Button>
       )}
       {onSites && (
@@ -1485,6 +1571,171 @@ function SiteAccessDialog({
             })}
             <p className="px-1 pt-1 text-[11px] text-muted-foreground">
               Idle employees (no site) can only be marked by super admins.
+            </p>
+          </motion.div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Done
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Branch access dialog — which branches a normal admin can access
+// ---------------------------------------------------------------------------
+function BranchAccessDialog({
+  profile, branches, onClose, onChanged,
+}: {
+  profile: Profile | null;
+  branches: BranchWithCount[] | null;
+  onClose: () => void;
+  onChanged: (profileId: string, branchIds: string[]) => void;
+}) {
+  const open = profile !== null;
+  const [assigned, setAssigned] = useState<Set<string> | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  // Load the initial assignments each time the dialog opens
+  useEffect(() => {
+    if (!profile) {
+      setAssigned(null);
+      return;
+    }
+    let cancelled = false;
+    setAssigned(null);
+    setSavingId(null);
+    (async () => {
+      const ids = await dataApi.getBranchAssignments(profile.id);
+      if (!cancelled) setAssigned(new Set(ids));
+    })().catch(() => {
+      if (!cancelled) {
+        setAssigned(new Set());
+        toast.error('Failed to load branch assignments', { description: 'Please close the dialog and try again.' });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [profile]);
+
+  // Toggle one branch — optimistic, instantly saved, reverted on failure
+  const toggle = async (branchId: string, branchName: string, allowed: boolean) => {
+    if (!profile || !assigned) return;
+    const previous = new Set(assigned);
+    setSavingId(branchId);
+    const next = new Set(assigned);
+    if (allowed) next.add(branchId);
+    else next.delete(branchId);
+    setAssigned(next);
+    try {
+      await dataApi.setBranchAssignment(profile.id, branchId, allowed);
+      toast.success(
+        allowed ? `${branchName} granted to ${profile.name}` : `${branchName} removed from ${profile.name}`,
+        {
+          description: allowed
+            ? 'They can now see this branch and its sites on the Branches & Sites pages.'
+            : 'They no longer see this branch or its sites.',
+        },
+      );
+      onChanged(profile.id, [...next]);
+    } catch (err) {
+      setAssigned(previous);
+      toast.error(err instanceof Error ? err.message : 'Failed to update the branch assignment');
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <span className="rounded-lg bg-brand/10 p-1.5 text-brand">
+              <GitBranch size={14} aria-hidden />
+            </span>
+            Assign Branches
+          </DialogTitle>
+          <DialogDescription>
+            Choose the branches{' '}
+            <span className="font-medium text-foreground">{profile?.name}</span> can access.
+            They will only see these branches (and their sites) on the Branches and Sites pages.
+            Every change saves instantly.
+          </DialogDescription>
+        </DialogHeader>
+
+        {assigned === null || branches === null ? (
+          <div className="space-y-2 py-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="shimmer h-11 rounded-lg border" />
+            ))}
+          </div>
+        ) : branches.length === 0 ? (
+          <p className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+            No branches exist yet — create one on the Branches page first.
+          </p>
+        ) : (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+            className="space-y-1.5 py-1"
+          >
+            <p className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Branches this admin can access
+            </p>
+            {branches.map((b, i) => {
+              const allowed = assigned.has(b.id);
+              return (
+                <motion.div
+                  key={b.id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.15 + i * 0.04, duration: 0.25, ease: EASE }}
+                  className={cn(
+                    'flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 transition-colors',
+                    allowed ? 'border-brand/25 bg-brand/5' : 'bg-muted/30',
+                  )}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span
+                      className={cn(
+                        'flex size-9 shrink-0 items-center justify-center rounded-md text-xs font-bold tabular-nums',
+                        allowed ? 'bg-brand/10 text-brand' : 'bg-muted text-muted-foreground',
+                      )}
+                    >
+                      {b.site_count}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{b.name}</p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {allowed
+                          ? 'Access granted'
+                          : `${b.site_count} site${b.site_count === 1 ? '' : 's'} · no access`}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {savingId === b.id && (
+                      <Loader2 size={13} className="animate-spin text-muted-foreground" aria-hidden />
+                    )}
+                    <Switch
+                      checked={allowed}
+                      disabled={savingId === b.id}
+                      onCheckedChange={(v) => { void toggle(b.id, b.name, v === true); }}
+                      aria-label={`${allowed ? 'Remove' : 'Grant'} ${b.name}`}
+                      className="data-[state=checked]:bg-brand [&_[data-slot=switch-thumb]]:bg-white!"
+                    />
+                  </div>
+                </motion.div>
+              );
+            })}
+            <p className="px-1 pt-1 text-[11px] text-muted-foreground">
+              Sites without a branch stay visible to every admin. Attendance marking is governed
+              separately by the site assignments.
             </p>
           </motion.div>
         )}

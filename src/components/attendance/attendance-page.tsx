@@ -1039,6 +1039,7 @@ export function AttendancePage() {
       siteId ? (sites ?? []).find((s) => s.id === siteId)?.name ?? 'Former site' : 'Unassigned / Idle';
     return (
       <motion.section
+        key={section.key}
         initial={{ opacity: 0, y: 14 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.35, delay: Math.min(index * 0.05, 0.3), ease: EASE }}

@@ -15,12 +15,20 @@
 //     overwrites the stored trade + assignment history and re-prices the
 //     month, so every linked page (Salary Sheet, Employee Details,
 //     Attendance page, Attendance PDF, …) updates together
+//   • the ADVANCE value is a BUTTON that opens the ADVANCE BOOK popover:
+//     the stored settlement note (clickable now — it used to be a hover-only
+//     tooltip) + the employee's DUE advance records. From there you can add
+//     an advance with ANY cut month, reschedule a record to THIS month
+//     ("Cut here") or delete it — the backend sync folds scheduled records
+//     into the cut month's Advance column (a “B” chip marks the book part).
+//     The full ledger lives on the Advance Book page.
 //   • MARK PAID is an INSTANT toggle — no confirmation dialog. Clicking
 //     Mark paid records the payment immediately (name + date, audited); the
 //     button then becomes UNMARK and clicking it reverts instantly (also
-//     audited — the reason defaults to an audit note). Marking requires a
-//     salary this month; marking paid turns the employee's rows green in
-//     every Salary Sheet section
+//     audited — the reason defaults to an audit note). The Paid chip and the
+//     Unmark button STACK VERTICALLY so the column stays narrow. Marking
+//     requires a salary this month; marking paid turns the employee's rows
+//     green in every Salary Sheet section
 //   • NATIONALITY column right after Code — Asian / African / Arab /
 //     European / Latin American / Others (the region of the employee's
 //     nationality country)
@@ -28,8 +36,9 @@
 //     section has its own Time Card button). Its effect shows HERE: the extra
 //     Final Hours + Balance columns render ONLY after time card hours exist
 //     (compact layout otherwise), and the NET PAYABLE includes the positive
-//     time card difference, shown as the full calculation:
-//       1,160.00 (from attendance) + 60.00 (time card) = 1,220.00
+//     time card difference, shown as the full calculation (compact numbers,
+//     exact amounts in the tooltip):
+//       1,160 + 60 = 1,220.00
 //     A NEGATIVE difference is NOT deducted this month — it is carried to the
 //     NEXT month's salary (added to that employee's advance there, with a
 //     note carrying the time card + attendance hours details; the note is
@@ -40,7 +49,13 @@
 //       Balance = net payable − extra — 0 while the difference is 0 (the
 //       amount only shows when the time card actually differs); when it
 //       differs, the cell shows the FULL CALCULATION the same way:
-//       1,220.00 − 60.00 = 1,160.00 (a negative extra appears as +|extra|)
+//       1,220 − 60 = 1,160.00 (a negative extra appears as +|extra|)
+//   • FIT-TO-SCREEN table — table-fixed with capped column widths in view
+//     mode (long content ellipsizes instead of stretching the table) and
+//     uniform compact column padding (consistent spacing between ALL
+//     columns), so the whole table stays visible without scrolling
+//     left/right; the inline calculations render small (10px, compact
+//     numbers) above their values
 //   • amounts everywhere are PLAIN numbers (no “AED” prefix — the whole
 //     page uses one currency by default)
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
@@ -91,9 +106,9 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
+  BadgeCheck, Banknote, BookOpenText, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
   FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock,
-  LockOpen, Pencil, PencilLine, RotateCcw, Scale, Search, StickyNote, Trash2,
+  LockOpen, Pencil, PencilLine, Plus, RotateCcw, Scale, Search, StickyNote, Trash2,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
@@ -134,6 +149,7 @@ import {
 import { cn } from '@/lib/utils';
 import {
   type CardType, DEFAULT_DEDUCTION_SETTINGS, type DeductionSettings,
+  type AdvanceBookDueRecord,
   type EmployeeNote, type PayrollEmployeeVM,
   type SalarySheetReport, type SiteWithCount, type Trade,
   type BranchWithCount,
@@ -147,6 +163,9 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
 const fmtMoney = (n: number): string => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** compact money for the small inline CALCULATION lines (no decimals — the
+ *  bold result value and the tooltip keep the exact amounts) */
+const fmtMoneyShort = (n: number): string => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
 const fmtHrs = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(2));
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
@@ -679,6 +698,312 @@ function EmployeeNotesCell({ employee, notes, onChanged }: {
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Advance cell — the settlement value PLUS the Advance Book popover (opens
+// on click — also shows the stored settlement note). The popover lists the
+// employee's DUE advance records: quick-add one with ANY cut month,
+// reschedule an existing record to THIS month, or delete it. The backend
+// sync folds records scheduled for a month into that month's Advance column
+// (advance_book_applied tracks the book part — manual edits and the time-card
+// carryover are never double-counted).
+// ---------------------------------------------------------------------------
+function AdvanceCell({ e, year, month, editable, settleBusy, onCommit, onChanged }: {
+  e: PayrollEmployeeVM;
+  year: number;
+  month: number;
+  editable: boolean;
+  settleBusy: boolean;
+  onCommit: (next: number) => void;
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState('');
+  const [cutMonth, setCutMonth] = useState(String(month));
+  const [cutYear, setCutYear] = useState(String(year));
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const due = e.advance_book_due ?? [];
+  const thisMonthDue = due.filter((r) => r.cut_year === year && r.cut_month === month);
+  const otherDue = due.filter((r) => r.cut_year !== year || r.cut_month !== month);
+  const hasBookPart = (e.advance_book_applied ?? 0) > 0;
+  const monthLabel = (y: number, m: number): string => `${MONTH_NAMES[m - 1].slice(0, 3)} ${y}`;
+
+  const add = async (): Promise<void> => {
+    const n = Number(amount);
+    if (saving) return;
+    if (!Number.isFinite(n) || n <= 0) {
+      toast.error('Advance amount must be greater than 0');
+      return;
+    }
+    setSaving(true);
+    try {
+      await dataApi.saveAdvanceRecord({
+        employee_id: e.employee_id,
+        amount: round2(n),
+        given_date: new Date().toISOString().slice(0, 10),
+        cut_year: Number(cutYear),
+        cut_month: Number(cutMonth),
+        note: note.trim() || null,
+      });
+      setAmount('');
+      setNote('');
+      toast.success('Advance recorded', {
+        description: `${e.full_name} — ${fmtMoney(round2(n))} cut from ${MONTH_NAMES[Number(cutMonth) - 1]} ${cutYear}; that month's Advance column follows automatically.`,
+      });
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to record the advance');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cutHere = async (r: AdvanceBookDueRecord): Promise<void> => {
+    if (busyId) return;
+    setBusyId(r.id);
+    try {
+      await dataApi.saveAdvanceRecord({
+        id: r.id, employee_id: e.employee_id, amount: r.amount,
+        given_date: r.given_date, cut_year: year, cut_month: month, note: r.note,
+      });
+      toast.success('Rescheduled to this month', {
+        description: `${e.full_name} — ${fmtMoney(r.amount)} now cuts from ${MONTH_NAMES[month - 1]} ${year}.`,
+      });
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to reschedule');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const remove = async (r: AdvanceBookDueRecord): Promise<void> => {
+    if (busyId) return;
+    setBusyId(r.id);
+    try {
+      await dataApi.deleteAdvanceRecord(r.id);
+      toast.success('Advance record deleted', {
+        description: `${e.full_name} — ${fmtMoney(r.amount)} removed; the cut month's Advance column was corrected.`,
+      });
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const yearOptions = useMemo(() => {
+    const y = new Date().getFullYear();
+    return [y - 2, y - 1, y, y + 1, y + 2];
+  }, []);
+
+  const recordRow = (r: AdvanceBookDueRecord, isThisMonth: boolean): ReactNode => (
+    <li key={r.id} className="rounded-lg border px-2.5 py-2"
+        style={{ borderColor: isThisMonth ? 'rgb(245 158 11 / 0.25)' : undefined }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-xs font-semibold">{fmtMoney(r.amount)}</span>
+        <span className={cn(
+          'rounded px-1.5 py-0.5 text-[10px] font-semibold',
+          isThisMonth
+            ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+            : 'bg-muted text-muted-foreground',
+        )}>
+          {isThisMonth ? 'this month' : monthLabel(r.cut_year, r.cut_month)}
+        </span>
+      </div>
+      {r.note && <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={r.note}>{r.note}</p>}
+      <div className="mt-1 flex items-center justify-end gap-1.5">
+        {!isThisMonth && (
+          <Button
+            variant="ghost" size="sm" className="h-6 px-2 text-[10px] text-brand"
+            disabled={busyId === r.id}
+            onClick={() => { void cutHere(r); }}
+            title={`Reschedule — cut this ${fmtMoney(r.amount)} from ${MONTH_NAMES[month - 1]} ${year} instead`}
+          >
+            {busyId === r.id ? <Loader2 size={10} className="animate-spin" /> : <CalendarDays size={10} />} Cut here
+          </Button>
+        )}
+        <Button
+          variant="ghost" size="sm"
+          className="h-6 px-2 text-[10px] text-rose-500 hover:text-rose-600"
+          disabled={busyId === r.id}
+          onClick={() => { void remove(r); }}
+          title="Delete this advance record"
+        >
+          {busyId === r.id ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
+        </Button>
+      </div>
+    </li>
+  );
+
+  return (
+    <div className="flex items-center justify-end gap-1.5">
+      {editable && (
+        <AdjustInput value={e.advance} busy={settleBusy} label="Advance" onCommit={onCommit} />
+      )}
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          {editable ? (
+            <button
+              type="button"
+              aria-label={`Advance book of ${e.full_name}`}
+              title={`Advance book — ${due.length} due record${due.length === 1 ? '' : 's'}${e.notes ? ' · settlement note' : ''}`}
+              className={cn(
+                'inline-flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors',
+                due.length > 0 || e.notes
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20'
+                  : 'border-border/60 bg-card text-muted-foreground/70 hover:text-brand',
+              )}
+            >
+              <BookOpenText size={13} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              aria-label={`Advance details of ${e.full_name}`}
+              title={[
+                e.advance > 0 ? `Advance: ${fmtMoney(e.advance)}${hasBookPart ? ` (incl. ${fmtMoney(e.advance_book_applied)} from the Advance Book)` : ''}` : 'No advance this month',
+                e.notes ? `Note: ${e.notes}` : null,
+                due.length > 0 ? `${due.length} due advance record${due.length === 1 ? '' : 's'} — click to manage` : 'Click to open the advance book',
+              ].filter(Boolean).join('\n')}
+              className={cn(
+                'inline-flex items-center gap-1 rounded px-1 py-0.5 font-mono text-xs transition-colors hover:bg-muted/60',
+                e.advance > 0 ? '' : 'text-muted-foreground',
+              )}
+            >
+              {e.advance > 0 ? fmtMoney(e.advance) : '—'}
+              {hasBookPart && (
+                <span
+                  className="rounded bg-amber-500/15 px-1 text-[9px] font-bold text-amber-600 dark:text-amber-400"
+                  title={`${fmtMoney(e.advance_book_applied)} of this advance comes from the Advance Book`}
+                >
+                  B
+                </span>
+              )}
+              {e.notes && <StickyNote size={10} className="text-amber-500" aria-hidden />}
+            </button>
+          )}
+        </PopoverTrigger>
+        <PopoverContent
+          align="end"
+          collisionPadding={{ top: 90, right: 16, bottom: 16, left: 16 }}
+          className="w-[min(320px,88vw)] border-2 border-brand/50 p-0 shadow-lg shadow-[var(--glow)]"
+        >
+          <div className="border-b border-brand/20 bg-brand/10 px-3 py-2.5">
+            <p className="flex items-center gap-1.5 text-sm font-semibold">
+              <BookOpenText size={14} className="text-brand" /> Advance book
+            </p>
+            <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+              {e.full_name} · <span className="font-mono">{e.employee_code}</span>
+              {hasBookPart
+                ? ` — ${fmtMoney(e.advance_book_applied)} of this month's advance comes from the book`
+                : ' — pick the month each advance cuts from'}
+            </p>
+          </div>
+
+          {e.notes && (
+            <div className="border-b bg-amber-500/[0.06] px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">Settlement note</p>
+              <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">{e.notes}</p>
+            </div>
+          )}
+
+          <div className="max-h-52 overflow-y-auto px-3 py-2">
+            {due.length === 0 ? (
+              <p className="rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+                No due advance records — add one below with its cut month.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {thisMonthDue.map((r) => (
+                  <li key={r.id} className="rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-semibold">{fmtMoney(r.amount)}</span>
+                      <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                        cuts this month
+                      </span>
+                    </div>
+                    {r.note && <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={r.note}>{r.note}</p>}
+                    <div className="mt-1 flex justify-end">
+                      <Button
+                        variant="ghost" size="sm"
+                        className="h-6 px-2 text-[10px] text-rose-500 hover:text-rose-600"
+                        disabled={busyId === r.id}
+                        onClick={() => { void remove(r); }}
+                        title="Delete this advance record"
+                      >
+                        {busyId === r.id ? <Loader2 size={10} className="animate-spin" /> : <Trash2 size={10} />}
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+                {otherDue.map((r) => recordRow(r, false))}
+              </ul>
+            )}
+          </div>
+
+          <div className="border-t border-brand/20 p-3">
+            <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Add advance — pick the cut month
+            </p>
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="number" min={0} step="0.01" inputMode="decimal"
+                value={amount} onChange={(ev) => setAmount(ev.target.value)}
+                disabled={saving}
+                className="h-8 w-20 border-brand/25 bg-card text-right font-mono text-xs"
+                placeholder="0.00" aria-label={`New advance amount for ${e.full_name}`}
+              />
+              <Select value={cutMonth} onValueChange={setCutMonth} disabled={saving}>
+                <SelectTrigger className="h-8 flex-1 bg-card text-xs" aria-label="Cut month">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {MONTH_NAMES.map((m, idx) => (
+                    <SelectItem key={m} value={String(idx + 1)}>{m.slice(0, 3)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={cutYear} onValueChange={setCutYear} disabled={saving}>
+                <SelectTrigger className="h-8 w-[4.5rem] bg-card text-xs" aria-label="Cut year">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {yearOptions.map((y) => (
+                    <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Textarea
+              value={note} onChange={(ev) => setNote(ev.target.value)}
+              disabled={saving} rows={1}
+              placeholder="note (optional)"
+              className="mt-1.5 resize-none border-brand/25 bg-card text-xs focus-visible:ring-brand/40"
+              aria-label={`Note for the new advance of ${e.full_name}`}
+            />
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <p className="text-[10px] text-muted-foreground">folds into that month&apos;s Advance column</p>
+              <Button
+                size="sm"
+                onClick={() => { void add(); }}
+                disabled={saving || amount.trim() === ''}
+                className="h-8 brand-gradient px-3 text-xs font-semibold text-white"
+              >
+                {saving ? <Loader2 size={12} className="mr-1 animate-spin" /> : <Plus size={12} className="mr-1" />}
+                Add
+              </Button>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </div>
   );
 }
 
@@ -1621,23 +1946,38 @@ export function PayrollPage() {
           </div>
 
           {/* consolidated table — ONE row per employee, settlement always
-              visible. Wide layout (matches the Attendance page) so the ten
-              columns breathe; cells get extra horizontal padding. */}
+              visible. FIT-TO-SCREEN layout (no horizontal scrolling):
+              • VIEW MODE → table-fixed: the table is exactly as wide as its
+                container, every column has a capped width and long content
+                ELLIPSIZES instead of stretching the table. The Employee
+                column (the only one without a width) absorbs the remainder —
+                consistent spacing at every screen size. Only below ~940px
+                does the built-in container scroll (phones).
+              • EDIT MODE → table-auto with a wider min-width so the inline
+                inputs (trade dropdown, advance/deduction) keep their room —
+                the container may scroll slightly WHILE EDITING only.
+              • uniform px-2 column padding everywhere (consistent gaps). */}
           <section className="card-glow overflow-hidden rounded-xl border bg-card">
-            <div className="overflow-x-auto">
-              <Table className="[&_td]:px-4 [&_th]:px-4 [&_td]:py-3">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-14">Sl No</TableHead>
-                    <TableHead className="min-w-56">Employee</TableHead>
-                    <TableHead className="min-w-28">Code</TableHead>
-                    <TableHead className="min-w-24" title="Region of the employee's nationality country">Nationality</TableHead>
-                    <TableHead className="text-right">Total Hours</TableHead>
+            <Table
+              className={cn(
+                '[&_td]:px-2 [&_th]:px-2 [&_td]:py-2.5 [&_th]:h-9',
+                editMode
+                  ? 'min-w-[1060px]'
+                  : 'table-fixed w-full min-w-[940px] [&_td]:overflow-hidden [&_td]:text-ellipsis [&_th]:overflow-hidden',
+              )}
+            >
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-8">Sl No</TableHead>
+                  <TableHead title="Employee — name, code and quick notes">Employee</TableHead>
+                  <TableHead className="w-14">Code</TableHead>
+                  <TableHead className="w-16" title="Region of the employee's nationality country">Nationality</TableHead>
+                    <TableHead className="w-[60px] text-right">Total Hours</TableHead>
                     {/* time-card columns — ONLY after time card hours were
                         added for a site (compact layout otherwise) */}
                     {hasTimeCard && (
                       <TableHead
-                        className="text-right"
+                        className="w-[56px] text-right"
                         title="Approved time card hours of the month (entered per site via the Time Card button)"
                       >
                         Final Hours
@@ -1645,19 +1985,19 @@ export function PayrollPage() {
                     )}
                     {hasTimeCard && (
                       <TableHead
-                        className="text-right"
+                        className="w-[88px] text-right"
                         title="Net Payable − time card amount ((Final Hours − Total Hours) × rate) — 0 while the difference is 0 (the amount only shows when the time card actually differs); the calculation renders inline in the cell"
                       >
                         Balance
                       </TableHead>
                     )}
-                    <TableHead className="min-w-40">Trade</TableHead>
-                    <TableHead className="min-w-32">Payment Method</TableHead>
-                    <TableHead className="text-right">Amount</TableHead>
-                    <TableHead className="text-right">Advance</TableHead>
-                    <TableHead className="text-right" title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
-                    <TableHead className="text-right">Net Payable</TableHead>
-                    <TableHead className="text-right">Paid</TableHead>
+                    <TableHead className="w-[84px]">Trade</TableHead>
+                    <TableHead className="w-[84px]" title="Payment method — cash, or the card type">Payment</TableHead>
+                    <TableHead className="w-[68px] text-right">Amount</TableHead>
+                    <TableHead className="w-[80px] text-right">Advance</TableHead>
+                    <TableHead className="w-[80px] text-right" title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
+                    <TableHead className="w-[84px] text-right">Net Payable</TableHead>
+                    <TableHead className="w-[88px] text-right">Paid</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1773,8 +2113,8 @@ export function PayrollPage() {
                                   className="flex flex-col items-end leading-tight"
                                   title={`net payable ${fmtMoney(payrollNetPayableOf(e))} − time card amount ${fmtMoney(extra)} = ${fmtMoney(bal)}`}
                                 >
-                                  <span className="font-mono text-[11px] text-muted-foreground">
-                                    {fmtMoney(payrollNetPayableOf(e))}{' '}
+                                  <span className="font-mono text-[10px] leading-tight text-muted-foreground">
+                                    {fmtMoneyShort(payrollNetPayableOf(e))}{' '}
                                     <span aria-hidden>{extra > 0 ? '−' : '+'}</span>{' '}
                                     <span
                                       className={cn(
@@ -1784,7 +2124,7 @@ export function PayrollPage() {
                                           : 'text-rose-500',
                                       )}
                                     >
-                                      {fmtMoney(operand)}
+                                      {fmtMoneyShort(operand)}
                                     </span>{' '}
                                     <span aria-hidden>=</span>
                                   </span>
@@ -1811,7 +2151,7 @@ export function PayrollPage() {
                                 disabled={tradeBusy}
                                 onValueChange={(v) => { void onTradeChange(e, v === NO_TRADE ? null : v); }}
                               >
-                                <SelectTrigger className="h-8 w-40 bg-card text-xs" aria-label={`Trade of ${e.full_name}`}>
+                                <SelectTrigger className="h-8 w-36 bg-card text-xs" aria-label={`Trade of ${e.full_name}`}>
                                   <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
@@ -1837,26 +2177,17 @@ export function PayrollPage() {
                         <TableCell className="text-right font-mono text-sm font-semibold">
                           {fmtMoney(e.gross_salary)}
                         </TableCell>
+                        {/* Advance — the settlement value + the Advance Book
+                            popover (click): stored note, due advance records,
+                            quick-add with any cut month, reschedule to this
+                            month, delete. */}
                         <TableCell className="text-right">
-                          {editable ? (
-                            <div className="flex justify-end">
-                              <AdjustInput
-                                value={e.advance} busy={settleBusy} label="Advance"
-                                onCommit={(next) => { void onAdjust(e, next, e.deduction); }}
-                              />
-                            </div>
-                          ) : (
-                            <span
-                              className={cn('font-mono text-xs', e.advance > 0 ? '' : 'text-muted-foreground')}
-                              title={[
-                                e.advance > 0 ? `Advance: ${fmtMoney(e.advance)}` : 'No advance this month',
-                                e.notes ? `Note: ${e.notes}` : null,
-                              ].filter(Boolean).join('\n')}
-                            >
-                              {e.advance > 0 ? fmtMoney(e.advance) : '—'}
-                              {e.notes && <StickyNote size={10} className="ml-1 inline text-amber-500" aria-hidden />}
-                            </span>
-                          )}
+                          <AdvanceCell
+                            e={e} year={year} month={month}
+                            editable={editable} settleBusy={settleBusy}
+                            onCommit={(next) => { void onAdjust(e, next, e.deduction); }}
+                            onChanged={load}
+                          />
                         </TableCell>
                         <TableCell className="text-right">
                           {editable ? (
@@ -1960,9 +2291,9 @@ export function PayrollPage() {
                                   className="flex flex-col items-end leading-tight"
                                   title={`Net from attendance ${fmtMoney(e.net_salary)} + time card extra ${fmtMoney(extra)} = ${fmtMoney(payrollNetPayableOf(e))}`}
                                 >
-                                  <span className="font-mono text-[11px] text-muted-foreground">
-                                    {fmtMoney(e.net_salary)} <span aria-hidden>+</span>{' '}
-                                    <span className="font-semibold text-amber-600 dark:text-amber-400">{fmtMoney(extra)}</span> <span aria-hidden>=</span>
+                                  <span className="font-mono text-[10px] leading-tight text-muted-foreground">
+                                    {fmtMoneyShort(e.net_salary)} <span aria-hidden>+</span>{' '}
+                                    <span className="font-semibold text-amber-600 dark:text-amber-400">{fmtMoneyShort(extra)}</span> <span aria-hidden>=</span>
                                   </span>
                                   <span className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
                                     {fmtMoney(payrollNetPayableOf(e))}
@@ -1993,20 +2324,22 @@ export function PayrollPage() {
                           })()}
                         </TableCell>
                         <TableCell className="text-right">
-                          {/* INSTANT toggle — no confirmation dialogs */}
-                          <div className="flex items-center justify-end gap-1.5">
+                          {/* INSTANT toggle — no confirmation dialogs; the chip
+                              and the Unmark button stack vertically so the
+                              column stays narrow (no horizontal overflow) */}
+                          <div className="flex flex-col items-end gap-1">
                             {paid ? (
                               <>
                                 <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-500">
                                   <BadgeCheck size={11} /> Paid
                                 </span>
                                 <Button
-                                  variant="ghost" size="sm" className="h-7 px-2 text-[11px] text-muted-foreground"
+                                  variant="ghost" size="sm" className="h-6 px-1.5 text-[10px] text-muted-foreground"
                                   disabled={unpayBusy}
                                   onClick={() => { void onUnmarkPaid(e); }}
                                   title="Revert to unpaid (audited)"
                                 >
-                                  {unpayBusy ? <Loader2 size={12} className="animate-spin" /> : <LockOpen size={12} />} Unmark
+                                  {unpayBusy ? <Loader2 size={11} className="animate-spin" /> : <LockOpen size={11} />} Unmark
                                 </Button>
                               </>
                             ) : (
@@ -2017,11 +2350,11 @@ export function PayrollPage() {
                                   ? `Mark the monthly salary paid (net ${fmtMoney(e.net_salary)})`
                                   : 'No salary calculated for this employee this month'}
                                 onClick={() => { void onMarkPaid(e); }}
-                                className="h-8 brand-gradient px-3 text-xs font-semibold text-white"
+                                className="h-7 px-2.5 text-[11px] font-semibold text-white brand-gradient"
                               >
                                 {payBusy
-                                  ? <Loader2 size={13} className="mr-1 animate-spin" />
-                                  : <BadgeCheck size={13} className="mr-1" />} Mark paid
+                                  ? <Loader2 size={12} className="mr-1 animate-spin" />
+                                  : <BadgeCheck size={12} className="mr-1" />} Mark paid
                               </Button>
                             )}
                           </div>
@@ -2068,8 +2401,7 @@ export function PayrollPage() {
                     </TableRow>
                   </TableFooter>
                 )}
-              </Table>
-            </div>
+            </Table>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
               Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.

@@ -13,6 +13,8 @@ import {
   type BulkAttendanceEntry,
   type Branch,
   type BranchWithCount,
+  type AdvanceBookReport,
+  type AdvanceRecordInput,
   type Camp,
   type CampWithCount,
   type CardType,
@@ -136,6 +138,7 @@ function ensureRealtimeChannel(): void {
     'payroll_period',
     'payroll_employee',
     'attendance_share_link',
+    'advance_record',
   ];
 
   // Clean up any stale channel on the same topic before subscribing
@@ -1249,6 +1252,30 @@ export const prodApi = {
     const { error } = await sb().rpc('reset_payroll_employee_auto', {
       p_payroll_employee_id: payrollEmployeeId,
     });
+    assertOk(error);
+  },
+
+  // ---- advance book (the advance ledger — 20261113e) ----------------------
+
+  /** The whole advance ledger with DERIVED status (due / cleared / overdue)
+   *  + totals (get_advance_book RPC). */
+  async getAdvanceBook(): Promise<AdvanceBookReport> {
+    const { data, error } = await sb().rpc('get_advance_book');
+    assertOk(error);
+    return data as unknown as AdvanceBookReport;
+  },
+
+  /** Add an advance record, or edit / reschedule a DUE one
+   *  (save_advance_record RPC — folds the record into the cut month's
+   *  Advance column via the sync). */
+  async saveAdvanceRecord(input: AdvanceRecordInput): Promise<void> {
+    const { error } = await sb().rpc('save_advance_record', { p_payload: input });
+    assertOk(error);
+  },
+
+  /** Remove a DUE record (cleared ones are kept as history). */
+  async deleteAdvanceRecord(id: string): Promise<void> {
+    const { error } = await sb().rpc('delete_advance_record', { p_id: id });
     assertOk(error);
   },
 

@@ -19,6 +19,8 @@
 // ============================================================================
 
 import type {
+  AdvanceBookReport,
+  AdvanceRecordVM,
   EmployeeSalaryAssignment,
   ExperienceTier,
   PayrollEmployeeSiteVM,
@@ -38,7 +40,7 @@ import {
   ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE,
   SALARY_THRESHOLD_HOURS, SALARY_THRESHOLD_MONTHS,
 } from '@/lib/types';
-import type { DemoDB, DemoPayrollEmployee } from './demo-store';
+import type { DemoAdvanceRecord, DemoDB, DemoPayrollEmployee } from './demo-store';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
 // ---------------------------------------------------------------------------
@@ -548,6 +550,7 @@ export const refreshPayrollEmployee = (
       unassigned_hours: calc.unassigned_hours,
       gross_salary: calc.gross_salary,
       advance: 0,
+      advance_book_applied: 0,
       deduction: 0,
       absent_deduction: calc.absent_deduction,
       absent_deduction_edited: false,
@@ -648,7 +651,115 @@ export const refreshPayrollPeriod = (
     (pe) => pe.payroll_period_id !== period!.id || scopeIds.has(pe.employee_id),
   );
 
+  // fold due advance records scheduled for this month into the Advance column
+  syncAdvanceBookPeriod(database, year, month);
+
   return period;
+};
+
+// ---------------------------------------------------------------------------
+// Advance Book (mirrors advance_book_sync_period / get_advance_book)
+// ---------------------------------------------------------------------------
+/** CLEARED = the record was folded into the cut month's advance (marker > 0)
+ *  AND that salary was paid. Derived — it can never drift. */
+const advanceRecordCleared = (database: DemoDB, r: DemoAdvanceRecord): boolean => {
+  if (r.applied_amount <= 0) return false;
+  const period = database.payrollPeriods.find(
+    (p) => p.year === r.cut_year && p.month === r.cut_month);
+  if (!period) return false;
+  const pe = database.payrollEmployees.find(
+    (x) => x.payroll_period_id === period.id && x.employee_id === r.employee_id);
+  return pe?.payment_status === 'paid';
+};
+
+/** Fold the DUE advance records scheduled for (year, month) into that month's
+ *  payroll rows. PAID rows are skipped (their markers stay frozen as the
+ *  "recovered by that salary" evidence); manual advance edits and the
+ *  time-card carryover are never double-counted (advance_book_applied tracks
+ *  exactly the book part inside the stored advance). */
+export const syncAdvanceBookPeriod = (database: DemoDB, year: number, month: number): void => {
+  const period = database.payrollPeriods.find((p) => p.year === year && p.month === month);
+  if (!period) return;
+  const rows = database.payrollEmployees.filter((pe) => pe.payroll_period_id === period.id);
+  const now = new Date().toISOString();
+
+  for (const pe of rows) {
+    if (pe.payment_status === 'paid') continue;                 // locked
+    const bookSum = round2(database.advanceRecords
+      .filter((r) => r.employee_id === pe.employee_id
+        && r.cut_year === year && r.cut_month === month)
+      .reduce((n, r) => n + r.amount, 0));
+    if (pe.advance_book_applied === bookSum) continue;           // unchanged
+    pe.advance = round2(Math.max(0, pe.advance - pe.advance_book_applied + bookSum));
+    pe.advance_book_applied = bookSum;
+    pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction - pe.absent_deduction);
+  }
+
+  // per-record markers — folded into an UNPAID row → full amount; row gone
+  // → back to 0 (the record is due again); PAID row → marker frozen
+  database.advanceRecords.forEach((r) => {
+    if (r.cut_year !== year || r.cut_month !== month) return;
+    const pe = rows.find((x) => x.employee_id === r.employee_id);
+    const target = !pe ? 0 : pe.payment_status === 'paid' ? r.applied_amount : round2(r.amount);
+    if (r.applied_amount !== target) {
+      r.applied_amount = target;
+      r.updated_at = now;
+    }
+  });
+};
+
+/** The whole ledger with DERIVED status + totals (mirrors get_advance_book). */
+export const buildAdvanceBook = (database: DemoDB): AdvanceBookReport => {
+  const now = new Date();
+  const currentYm: [number, number] = [now.getFullYear(), now.getMonth() + 1];
+  const records: AdvanceRecordVM[] = database.advanceRecords
+    .map((r) => {
+      const emp = database.employees.find((e) => e.id === r.employee_id);
+      const period = database.payrollPeriods.find(
+        (p) => p.year === r.cut_year && p.month === r.cut_month);
+      const pe = period
+        ? database.payrollEmployees.find(
+            (x) => x.payroll_period_id === period.id && x.employee_id === r.employee_id)
+        : undefined;
+      const cleared = advanceRecordCleared(database, r);
+      const ym: [number, number] = [r.cut_year, r.cut_month];
+      return {
+        id: r.id,
+        employee_id: r.employee_id,
+        full_name: emp?.full_name ?? 'Unknown',
+        employee_code: emp?.employee_code ?? '—',
+        photo: emp?.photo ?? null,
+        amount: r.amount,
+        given_date: r.given_date,
+        cut_year: r.cut_year,
+        cut_month: r.cut_month,
+        note: r.note,
+        cleared,
+        cleared_at: cleared ? pe?.paid_at ?? null : null,
+        applied: r.applied_amount > 0,
+        overdue: !cleared && (ym[0] < currentYm[0] || (ym[0] === currentYm[0] && ym[1] < currentYm[1])),
+        created_by_name: r.created_by
+          ? database.profiles.find((p) => p.id === r.created_by)?.name ?? null
+          : null,
+        created_at: r.created_at,
+      } satisfies AdvanceRecordVM;
+    })
+    .sort((a, b) => (a.given_date === b.given_date
+      ? (a.created_at < b.created_at ? 1 : -1)
+      : (a.given_date < b.given_date ? 1 : -1)));
+
+  const due = records.filter((r) => !r.cleared);
+  return {
+    records,
+    totals: {
+      due_count: due.length,
+      due_amount: round2(due.reduce((n, r) => n + r.amount, 0)),
+      overdue_count: due.filter((r) => r.overdue).length,
+      overdue_amount: round2(due.filter((r) => r.overdue).reduce((n, r) => n + r.amount, 0)),
+      cleared_count: records.length - due.length,
+      cleared_amount: round2(records.filter((r) => r.cleared).reduce((n, r) => n + r.amount, 0)),
+    },
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1107,18 @@ export const buildSalarySheet = (
       })(),
       gross_salary: pe.gross_salary,
       advance: pe.advance,
+      advance_book_applied: pe.advance_book_applied,
+      advance_book_due: database.advanceRecords
+        .filter((r) => r.employee_id === pe.employee_id && !advanceRecordCleared(database, r))
+        .sort((a, b) => (a.cut_year - b.cut_year) || (a.cut_month - b.cut_month))
+        .map((r) => ({
+          id: r.id,
+          amount: r.amount,
+          given_date: r.given_date,
+          cut_year: r.cut_year,
+          cut_month: r.cut_month,
+          note: r.note,
+        })),
       deduction: pe.deduction,
       absent_deduction: pe.absent_deduction,
       absent_deduction_edited: pe.absent_deduction_edited,

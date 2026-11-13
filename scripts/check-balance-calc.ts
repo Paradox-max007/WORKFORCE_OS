@@ -3,12 +3,13 @@
 import {
   payrollBalanceOf, payrollNetPayableOf, payrollTimeCardExtraOf,
 } from '@/lib/export-payroll-xlsx';
+import type { PayrollEmployeeVM } from '@/lib/types';
 
 const base = {
   full_name: 'Test', employee_code: 'T1', gross_salary: 1560, total_hours: 120,
   net_salary: 1160, advance: 0, deduction: 0, time_card_hours: null,
   time_card_amount: null,
-};
+} as unknown as PayrollEmployeeVM;
 
 const cases = [
   { name: 'no time card entered', e: { ...base } },

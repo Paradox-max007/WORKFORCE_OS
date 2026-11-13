@@ -84,6 +84,9 @@ export interface DemoPayrollEmployee {
   unassigned_hours: number;
   gross_salary: number;
   advance: number;
+  /** how much of the advance came from the Advance Book (due records
+   *  scheduled for this period — folded in by syncAdvanceBookPeriod) */
+  advance_book_applied: number;
   deduction: number;
   /** automatic absent deduction (absences beyond the configured free days
    *  × the configured amount — db.deductionSettings); when EDITED on the
@@ -164,6 +167,24 @@ export interface DemoPayrollTimeCard {
   updated_by: string | null;
 }
 
+/** One advance ledger row (mirrors the advance_record table). Status is
+ *  DERIVED at read time: cleared = the cut month's payroll row is PAID and
+ *  the record was folded into it (applied_amount > 0). */
+export interface DemoAdvanceRecord {
+  id: string;
+  employee_id: string;
+  amount: number;
+  given_date: string;
+  cut_year: number;
+  cut_month: number;
+  /** how much of this record is currently inside the cut month's advance */
+  applied_amount: number;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DemoDB {
   version: number;
   profiles: DemoProfile[];
@@ -195,6 +216,8 @@ export interface DemoDB {
   payrollTimeCards: DemoPayrollTimeCard[];
   payrollAudit: DemoAuditEntry[];
   tradeRateAudit: DemoAuditEntry[];
+  // advance ledger (Advance Book page — mirrors the advance_record table)
+  advanceRecords: DemoAdvanceRecord[];
   // manpower companies (own table — the Add Employee company dropdown)
   companies: Company[];
   // payroll card types (own table — Lulu Card, C3 Card, …)
@@ -308,6 +331,7 @@ function seedDB(): DemoDB {
     payrollTimeCards: [],
     payrollAudit: [],
     tradeRateAudit: [],
+    advanceRecords: [],
     companies: [],
     cardTypes: [],
     employeeNotes: [],
@@ -815,6 +839,11 @@ function loadDB(): DemoDB {
         if (!parsed.payrollTimeCards) parsed.payrollTimeCards = [];
         parsed.payrollTimeCards?.forEach((tc) => {
           if (tc.carryover_applied == null) tc.carryover_applied = 0;
+        });
+        // advance ledger shipped without a version bump — heal to []
+        if (!parsed.advanceRecords) parsed.advanceRecords = [];
+        parsed.payrollEmployees?.forEach((pe) => {
+          if (pe.advance_book_applied == null) pe.advance_book_applied = 0;
         });
         return parsed;
       }

@@ -4,6 +4,8 @@
 
 import {
   type AdminSiteAssignment,
+  type AdvanceBookReport,
+  type AdvanceRecordInput,
   type Attendance,
   type AttendanceShareLink,
   type Branch,
@@ -77,6 +79,7 @@ import {
   applySalarySheetRow,
   applyTradeRates,
   assignmentHistoryOf,
+  buildAdvanceBook,
   buildSalarySheet,
   calcEligibility,
   currentRatesOf,
@@ -85,6 +88,7 @@ import {
   refreshPayrollPeriod,
   resetPayrollEmployeeAuto,
   round2,
+  syncAdvanceBookPeriod,
   tradesWithRates,
 } from './demo-salary';
 import { defaultPermissionMap } from '@/lib/menus';
@@ -2007,6 +2011,116 @@ export const demoApi = {
     saveAndEmit(['payroll_period', 'payroll_employee']);
   },
 
+  // ---- advance book (the advance ledger — mirrors the 20261113e RPCs) -----
+
+  async getAdvanceBook(): Promise<AdvanceBookReport> {
+    return buildAdvanceBook(db);
+  },
+
+  async saveAdvanceRecord(input: AdvanceRecordInput): Promise<void> {
+    const me = currentProfile();
+    const emp = db.employees.find((e) => e.id === input.employee_id && e.status !== 'deleted');
+    if (!emp) throw new Error('Employee not found');
+    if (!Number.isFinite(input.amount) || input.amount <= 0) {
+      throw new Error('Advance amount must be greater than 0');
+    }
+    if (!Number.isInteger(input.cut_year) || !Number.isInteger(input.cut_month)
+      || input.cut_month < 1 || input.cut_month > 12) {
+      throw new Error('A valid cut month is required');
+    }
+    const note = input.note?.trim() || null;
+    const monthName = (y: number, m: number): string =>
+      `${MONTH_NAMES[m - 1]} ${y}`;
+
+    if (input.id) {
+      const old = db.advanceRecords.find((r) => r.id === input.id);
+      if (!old) throw new Error('Advance record not found');
+      if (old.employee_id !== input.employee_id) {
+        throw new Error('An advance record cannot move to another employee — delete it and add a new one');
+      }
+      // only DUE records can be edited (cleared = recovered by a paid salary)
+      const oldPeriod = db.payrollPeriods.find(
+        (p) => p.year === old.cut_year && p.month === old.cut_month);
+      const oldRow = oldPeriod
+        ? db.payrollEmployees.find((x) => x.payroll_period_id === oldPeriod.id
+          && x.employee_id === old.employee_id)
+        : undefined;
+      if (old.applied_amount > 0 && oldRow?.payment_status === 'paid') {
+        throw new Error(`This advance is already cleared — the ${monthName(old.cut_year, old.cut_month)} salary was paid. Add a new record instead.`);
+      }
+      const oldYm = { y: old.cut_year, m: old.cut_month, a: old.amount };
+      old.amount = round2(input.amount);
+      old.given_date = input.given_date;
+      old.cut_year = input.cut_year;
+      old.cut_month = input.cut_month;
+      old.note = note;
+      old.applied_amount = 0;                    // re-marked by the sync below
+      old.updated_at = nowISO();
+      syncAdvanceBookPeriod(db, oldYm.y, oldYm.m);
+      syncAdvanceBookPeriod(db, input.cut_year, input.cut_month);
+      db.payrollAudit.push({
+        id: uid(), period_id: db.payrollPeriods.find(
+          (p) => p.year === input.cut_year && p.month === input.cut_month)?.id ?? null,
+        trade_id: null, action: 'advance_edit', actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+        details: `Advance book: record of ${emp.full_name} (${emp.employee_code}) updated — `
+          + `${oldYm.a} (${monthName(oldYm.y, oldYm.m)}) → ${round2(input.amount)} `
+          + `(${monthName(input.cut_year, input.cut_month)})`,
+        created_at: nowISO(),
+      });
+    } else {
+      db.advanceRecords.push({
+        id: uid(),
+        employee_id: input.employee_id,
+        amount: round2(input.amount),
+        given_date: input.given_date,
+        cut_year: input.cut_year,
+        cut_month: input.cut_month,
+        applied_amount: 0,
+        note,
+        created_by: me?.id ?? null,
+        created_at: nowISO(),
+        updated_at: nowISO(),
+      });
+      syncAdvanceBookPeriod(db, input.cut_year, input.cut_month);
+      db.payrollAudit.push({
+        id: uid(), period_id: db.payrollPeriods.find(
+          (p) => p.year === input.cut_year && p.month === input.cut_month)?.id ?? null,
+        trade_id: null, action: 'advance_add', actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+        details: `Advance book: ${round2(input.amount)} given to ${emp.full_name} `
+          + `(${emp.employee_code}) — cutting from ${monthName(input.cut_year, input.cut_month)}`,
+        created_at: nowISO(),
+      });
+    }
+    saveAndEmit(['advance_record', 'payroll_period', 'payroll_employee', 'payroll_audit']);
+  },
+
+  async deleteAdvanceRecord(id: string): Promise<void> {
+    const me = currentProfile();
+    const old = db.advanceRecords.find((r) => r.id === id);
+    if (!old) throw new Error('Advance record not found');
+    const oldPeriod = db.payrollPeriods.find(
+      (p) => p.year === old.cut_year && p.month === old.cut_month);
+    const oldRow = oldPeriod
+      ? db.payrollEmployees.find((x) => x.payroll_period_id === oldPeriod.id
+        && x.employee_id === old.employee_id)
+      : undefined;
+    if (old.applied_amount > 0 && oldRow?.payment_status === 'paid') {
+      throw new Error(`This advance is already cleared — the ${MONTH_NAMES[old.cut_month - 1]} ${old.cut_year} salary was paid. Cleared records are kept as history.`);
+    }
+    const emp = db.employees.find((e) => e.id === old.employee_id);
+    db.advanceRecords = db.advanceRecords.filter((r) => r.id !== id);
+    syncAdvanceBookPeriod(db, old.cut_year, old.cut_month);
+    db.payrollAudit.push({
+      id: uid(), period_id: oldPeriod?.id ?? null,
+      trade_id: null, action: 'advance_delete', actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+      details: `Advance book: record of ${emp?.full_name ?? 'Unknown employee'} `
+        + `(${emp?.employee_code ?? '—'}) deleted — ${old.amount} `
+        + `(${MONTH_NAMES[old.cut_month - 1]} ${old.cut_year})`,
+      created_at: nowISO(),
+    });
+    saveAndEmit(['advance_record', 'payroll_period', 'payroll_employee', 'payroll_audit']);
+  },
+
   async markPayrollPaid(
     payrollEmployeeId: string,
     input: PayrollAdjustmentInput & { paid?: boolean },
@@ -2207,6 +2321,7 @@ export const demoApi = {
             unassigned_hours: 0,
             gross_salary: 0,
             advance: delta,
+            advance_book_applied: 0,
             deduction: 0,
             absent_deduction: 0,
             absent_deduction_edited: false,

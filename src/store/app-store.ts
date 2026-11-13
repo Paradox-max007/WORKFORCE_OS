@@ -21,6 +21,7 @@ export type AppView =
   | 'salary_sheet'
   | 'payroll'
   | 'payroll_export'
+  | 'advance_book'
   | 'attendance_calendar'
   | 'trade_management'
   | 'uniform_registry'
@@ -43,6 +44,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   salary_sheet: 'Salary Sheet',
   payroll: 'Payroll',
   payroll_export: 'Payroll Excel Preview',
+  advance_book: 'Advance Book',
   attendance_calendar: 'Attendance Record',
   trade_management: 'Trade / Deduction Management',
   uniform_registry: 'Uniform Registry',

@@ -670,6 +670,13 @@ export interface PayrollEmployeeVM {
   time_card_amount: number | null;
   gross_salary: number;
   advance: number;
+  /** how much of the stored advance came from the Advance Book (due
+   *  records scheduled for THIS period — folded in by the sync). The rest of
+   *  the advance is manual entry + the time-card carryover. */
+  advance_book_applied: number;
+  /** the employee's DUE advance records (any cut month) — the Payroll Advance
+   *  popover lists them; rescheduling one to this month folds it in */
+  advance_book_due: AdvanceBookDueRecord[];
   deduction: number;
   /** automatic absent deduction — absences beyond the configured free days
  *  of the month × the configured amount (Trade Management → Deductions);
@@ -761,6 +768,69 @@ export interface PayrollAdjustmentInput {
   absent_auto?: boolean;
 }
 
+// ============================================================================
+// Advance Book — the advance ledger (due / cleared + cut-month scheduling)
+// ============================================================================
+
+/** A DUE advance record attached to a Payroll row (subset of AdvanceRecordVM). */
+export interface AdvanceBookDueRecord {
+  id: string;
+  amount: number;
+  given_date: string;
+  cut_year: number;
+  cut_month: number;
+  note: string | null;
+}
+
+/** One advance ledger row — status is DERIVED from the payroll data:
+ *  cleared = the cut month's salary was PAID with this advance folded in. */
+export interface AdvanceRecordVM {
+  id: string;
+  employee_id: string;
+  full_name: string;
+  employee_code: string;
+  photo: string | null;
+  amount: number;
+  given_date: string;
+  cut_year: number;
+  cut_month: number;
+  note: string | null;
+  cleared: boolean;
+  cleared_at: string | null;
+  /** true → the amount is currently inside the cut month's Advance column */
+  applied: boolean;
+  /** due + the cut month already passed without the salary being paid */
+  overdue: boolean;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface AdvanceBookTotals {
+  due_count: number;
+  due_amount: number;
+  overdue_count: number;
+  overdue_amount: number;
+  cleared_count: number;
+  cleared_amount: number;
+}
+
+export interface AdvanceBookReport {
+  records: AdvanceRecordVM[];
+  totals: AdvanceBookTotals;
+}
+
+/** Add / edit (reschedule) payload — save_advance_record RPC. */
+export interface AdvanceRecordInput {
+  /** present → edit an existing DUE record; absent → add a new one */
+  id?: string;
+  employee_id: string;
+  amount: number;
+  given_date: string;
+  cut_year: number;
+  cut_month: number;
+  note?: string | null;
+}
+
 /** One manually overridden employee × site row of the Salary Sheet */
 export interface SalarySheetSiteUpdate {
   /** null → the "No site" row */
@@ -821,6 +891,7 @@ export type RealtimeTable =
   | 'payroll_period'
   | 'payroll_employee'
   | 'payroll_time_card'
+  | 'advance_record'
   | 'deduction_settings'
   | 'attendance_share_link';
 

@@ -91,7 +91,46 @@ export async function POST(request: Request): Promise<Response> {
         if (body.password) patch.password = body.password;
         if (Object.keys(patch).length > 0) {
           const { error } = await admin.auth.admin.updateUserById(body.id, { ...patch, email_confirm: true });
-          if (error) return Response.json({ error: error.message }, { status: 400 });
+          if (error) {
+            // "Database error loading user" / "User not found" from GoTrue mean
+            // the account's auth data is damaged (SQL-seeded auth.users row
+            // without a valid auth.identities row, missing login for an
+            // existing profile, or an unhealthy Auth service). Fall back to the
+            // security-definer repair RPC (20261113_admin_auth_repair.sql):
+            // it re-creates / repairs the auth rows and sets the password
+            // directly, keeping the same user id (role + permissions intact).
+            if (/database error|user not found/i.test(error.message)) {
+              const { data: repaired, error: rpcError } = await admin.rpc('admin_repair_auth_user', {
+                p_user_id: body.id,
+                p_password: patch.password ?? null,
+                p_email: patch.email ?? null,
+              });
+              if (rpcError) {
+                const hint = /PGRST202|does not exist|could not find/i.test(rpcError.message)
+                  ? ' Run supabase/migrations/20261113_admin_auth_repair.sql in the Supabase SQL editor to enable the repair fallback, then try again.'
+                  : '';
+                return Response.json(
+                  { error: `Supabase auth could not update this account (${error.message}) and the repair fallback failed: ${rpcError.message}.${hint}` },
+                  { status: 500 },
+                );
+              }
+              const result = (repaired ?? {}) as { ok?: boolean; reason?: string };
+              if (result.ok !== true) {
+                return Response.json(
+                  {
+                    error:
+                      result.reason === 'auth_user_missing'
+                        ? 'This admin has no Supabase login account. Enter a new password so it can be re-created, or delete and re-create the account.'
+                        : `Could not repair the auth account: ${result.reason ?? 'unknown error'}`,
+                  },
+                  { status: 400 },
+                );
+              }
+              // repaired — fall through to the profiles sync below
+            } else {
+              return Response.json({ error: error.message }, { status: 400 });
+            }
+          }
         }
         if (body.email) {
           const { error } = await admin.from('profiles').update({ email: body.email.toLowerCase() }).eq('id', body.id);

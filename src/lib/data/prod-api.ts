@@ -42,6 +42,7 @@ import {
   type SharedSheetSubmitEntry,
   type SharedSheetSubmitMeta,
   type SharedSheetSubmitResult,
+  type SiteTimeCardEntry,
   type AttendanceShareLink,
   type DeductionSettings,
   type DeductionSettingsInput,
@@ -1205,12 +1206,33 @@ export const prodApi = {
     assertOk(error);
   },
 
-  /** Revert a payment — super admin only, reason mandatory, audited
-   *  (unmark_employee_salary_paid RPC in 20261104_payroll_idle.sql). */
-  async unmarkPayrollPaid(payrollEmployeeId: string, reason: string): Promise<void> {
+  /** Revert a payment — instant toggle on the Payroll page. Reason OPTIONAL
+   *  (the RPC defaults it to an audit note); permission = salary_sheet /
+   *  payroll (mirrors marking paid); still audited
+   *  (unmark_employee_salary_paid RPC, relaxed in 20261113c). */
+  async unmarkPayrollPaid(payrollEmployeeId: string, reason?: string): Promise<void> {
     const { error } = await sb().rpc('unmark_employee_salary_paid', {
       p_payroll_employee_id: payrollEmployeeId,
-      p_reason: reason,
+      p_reason: reason ?? null,
+    });
+    assertOk(error);
+  },
+
+  /** Bulk-save ONE site's approved TIME CARD hours for a payroll period
+   *  (save_site_time_card_hours RPC in 20261113c_payroll_time_card.sql).
+   *  Entries with hours null are removed. */
+  async saveSiteTimeCardHours(
+    payrollPeriodId: string,
+    siteId: string,
+    entries: SiteTimeCardEntry[],
+  ): Promise<void> {
+    const { error } = await sb().rpc('save_site_time_card_hours', {
+      p_period_id: payrollPeriodId,
+      p_site_id: siteId,
+      p_entries: entries.map((en) => ({
+        employee_id: en.employee_id,
+        hours: en.hours,
+      })),
     });
     assertOk(error);
   },

@@ -145,6 +145,19 @@ export interface DemoAuditEntry {
   created_at: string;
 }
 
+/** Approved time card hours for one (period, site, employee) — entered in the
+ *  Payroll page's Time Card dialog. Lives OUTSIDE the regenerated calculation
+ *  rows so drafts never wipe it (mirrors the payroll_time_card table). */
+export interface DemoPayrollTimeCard {
+  id: string;
+  payroll_period_id: string;
+  site_id: string;
+  employee_id: string;
+  time_card_hours: number;
+  updated_at: string;
+  updated_by: string | null;
+}
+
 export interface DemoDB {
   version: number;
   profiles: DemoProfile[];
@@ -173,6 +186,7 @@ export interface DemoDB {
   payrollEmployees: DemoPayrollEmployee[];
   payrollSites: DemoPayrollSite[];
   payrollLines: DemoPayrollLine[];
+  payrollTimeCards: DemoPayrollTimeCard[];
   payrollAudit: DemoAuditEntry[];
   tradeRateAudit: DemoAuditEntry[];
   // manpower companies (own table — the Add Employee company dropdown)
@@ -285,6 +299,7 @@ function seedDB(): DemoDB {
     payrollEmployees: [],
     payrollSites: [],
     payrollLines: [],
+    payrollTimeCards: [],
     payrollAudit: [],
     tradeRateAudit: [],
     companies: [],
@@ -790,6 +805,8 @@ function loadDB(): DemoDB {
         parsed.payrollEmployees?.forEach((pe) => {
           if (pe.absent_deduction_edited == null) pe.absent_deduction_edited = false;
         });
+        // payroll time card hours shipped without a version bump — heal to []
+        if (!parsed.payrollTimeCards) parsed.payrollTimeCards = [];
         return parsed;
       }
     }

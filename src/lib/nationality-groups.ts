@@ -91,6 +91,16 @@ export function regionOfNationality(nationality: string | null | undefined): str
   return 'Others';
 }
 
+/** SHORT singular region label for compact table cells / Excel columns
+ *  (e.g. "India" → "Asian", "Ghana" → "African", "Egypt" → "Arab"). */
+export function regionShortOfNationality(nationality: string | null | undefined): string {
+  const label = regionOfNationality(nationality);
+  if (label === 'Others') return 'Others';
+  // "Asians" → "Asian", "Latin Americans" → "Latin American",
+  // "Arabs / Middle East" → "Arab", "Africans" → "African"
+  return label.split(' / ')[0].replace(/s$/, '');
+}
+
 /** Countries actually present among `nationalities`, grouped under their region. */
 export function countriesByRegion(
   nationalities: (string | null | undefined)[],

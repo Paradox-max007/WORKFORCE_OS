@@ -730,6 +730,14 @@ export const buildSalarySheet = (
   });
 
   const sites: SalarySheetSiteGroup[] = [];
+  // approved time card hours (period × site × employee) — one lookup map
+  const timeCardOf = (siteId: string, employeeId: string): number | null => {
+    const tc = database.payrollTimeCards.find(
+      (x) => x.payroll_period_id === period!.id
+        && x.site_id === siteId && x.employee_id === employeeId,
+    );
+    return tc ? tc.time_card_hours : null;
+  };
   siteKeys.forEach(({ site_id, site_name }) => {
     const rows: SalarySheetSiteGroup['rows'] = [];
     pes.forEach((pe) => {
@@ -761,6 +769,7 @@ export const buildSalarySheet = (
         gross_salary: siteRow.gross_salary,
         has_missing_rate: siteRow.has_missing_rate,
         manually_edited: siteRow.manually_edited,
+        time_card_hours: site_id ? timeCardOf(site_id, pe.employee_id) : null,
         lines,
         employee_id: pe.employee_id,
         full_name: emp?.full_name ?? 'Unknown',
@@ -774,12 +783,18 @@ export const buildSalarySheet = (
       });
     });
     rows.sort((a, b) => a.full_name.localeCompare(b.full_name));
+    const groupTimeCard = site_id
+      ? database.payrollTimeCards
+          .filter((tc) => tc.payroll_period_id === period!.id && tc.site_id === site_id)
+          .reduce((n, tc) => n + tc.time_card_hours, 0)
+      : 0;
     sites.push({
       site_id,
       site_name,
       employees: rows.length,
       total_hours: round2(rows.reduce((n, r) => n + r.total_hours, 0)),
       gross_salary: round2(rows.reduce((n, r) => n + r.gross_salary, 0)),
+      time_card_total: site_id && groupTimeCard > 0 ? round2(groupTimeCard) : null,
       rows,
     });
   });
@@ -890,6 +905,7 @@ export const buildSalarySheet = (
         gross_salary: s.gross_salary,
         has_missing_rate: s.has_missing_rate,
         manually_edited: s.manually_edited,
+        time_card_hours: s.site_id ? timeCardOf(s.site_id, pe.employee_id) : null,
         lines: database.payrollLines
           .filter((l) => l.payroll_employee_id === pe.id
             && (l.site_id ?? '__none__') === (s.site_id ?? '__none__'))
@@ -933,6 +949,15 @@ export const buildSalarySheet = (
       qualified_hours: round2(siteRows.reduce((n, s) => n + s.qualified_hours, 0)),
       unrated_hours: pe.unrated_hours,
       unassigned_hours: pe.unassigned_hours,
+      // approved time card hours of the month (null → none entered); drives
+      // the conditional Final Hours / Balance columns on the Payroll page
+      time_card_hours: (() => {
+        const tcs = database.payrollTimeCards.filter(
+          (tc) => tc.payroll_period_id === pe.payroll_period_id
+            && tc.employee_id === pe.employee_id,
+        );
+        return tcs.length > 0 ? round2(tcs.reduce((n, tc) => n + tc.time_card_hours, 0)) : null;
+      })(),
       gross_salary: pe.gross_salary,
       advance: pe.advance,
       deduction: pe.deduction,

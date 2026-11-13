@@ -15,9 +15,24 @@
 //     overwrites the stored trade + assignment history and re-prices the
 //     month, so every linked page (Salary Sheet, Employee Details,
 //     Attendance page, Attendance PDF, …) updates together
-//   • MARK PAID is active whenever the employee HAS a salary this month
-//     (no finalized-period requirement); marking paid turns the employee's
-//     rows green in every Salary Sheet section
+//   • MARK PAID is an INSTANT toggle — no confirmation dialog. Clicking
+//     Mark paid records the payment immediately (name + date, audited); the
+//     button then becomes UNMARK and clicking it reverts instantly (also
+//     audited — the reason defaults to an audit note). Marking requires a
+//     salary this month; marking paid turns the employee's rows green in
+//     every Salary Sheet section
+//   • NATIONALITY column right after Code — Asian / African / Arab /
+//     European / Latin American / Others (the region of the employee's
+//     nationality country)
+//   • TIME CARD — the Time Card button opens a per-site dialog where the
+//     APPROVED timesheet (time card) hours of that site's employees are
+//     entered. The extra Final Hours + Balance columns render ONLY after
+//     time card hours exist (compact layout otherwise):
+//       Final Hours = Σ approved time card hours of the month
+//       Balance = (Final Hours − Total Hours) × effective rate − Net Payable
+//     (effective rate = gross ÷ total hours — the month's blended rate)
+//   • amounts everywhere are PLAIN numbers (no “AED” prefix — the whole
+//     page uses one currency by default)
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
 //     (Σ net of unpaid)
 //   • SEARCH (name / employee ID / trade) plus FILTERS in the sticky bar —
@@ -37,13 +52,14 @@
 //     page → Document Details)
 //   • the AUDIT TRAIL is collapsed behind an expandable icon button; opening
 //     it lists every audit entry, written with employee names & codes
-//   • reverting a payment is super-admin only and audited with a reason
+//   • payments and time card saves are audited (actor + timestamp); reverting
+//     a payment is instant and records an audit reason automatically
 //   • EXCEL button (top bar) opens the export PREVIEW page with the CURRENTLY
 //     FILTERED rows — there the columns can be toggled (all on by default)
 //     before downloading the .xlsx (lib/export-payroll-xlsx.ts)
 //   • column order: AMOUNT comes BEFORE ADVANCE (page table AND the Excel)
 //   • ABSENT DEDUCTION — the first N absences of the month are free, every
-//     absence after those costs AED X (N and X CONFIGURABLE in Trade/Ded
+//     absence after those costs X (N and X CONFIGURABLE in Trade/Ded
 //     Management → Deductions); it is computed when the payroll is
 //     generated (separate from the manual deduction) and shows inside the
 //     Deduction column (red “A” chip). In EDIT MODE it is EDITABLE like a
@@ -65,9 +81,10 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
-  FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock, LockOpen, Pencil, PencilLine,
-  RotateCcw, Scale, Search, StickyNote, Trash2, TriangleAlert, UserX, Users, Wallet, X,
+  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, ClipboardCheck,
+  Clock, CreditCard, Eye, FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock,
+  LockOpen, Pencil, PencilLine, RotateCcw, Scale, Search, StickyNote, Trash2,
+  TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -80,7 +97,6 @@ import {
   HoverCard, HoverCardContent, HoverCardTrigger,
 } from '@/components/ui/hover-card';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Popover, PopoverContent, PopoverTrigger,
 } from '@/components/ui/popover';
@@ -97,14 +113,19 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
 import { dataApi } from '@/lib/data';
-import { payrollExportFileName } from '@/lib/export-payroll-xlsx';
+import {
+  payrollBalanceOf, payrollEffectiveRateOf, payrollExportFileName,
+} from '@/lib/export-payroll-xlsx';
 import { fmtDate, fmtDateTime, fmtTimeAgo, initials } from '@/lib/format';
-import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
+import {
+  NATIONALITY_REGIONS, countriesByRegion, regionShortOfNationality,
+} from '@/lib/nationality-groups';
 import { cn } from '@/lib/utils';
 import {
   type CardType, DEFAULT_DEDUCTION_SETTINGS, type DeductionSettings,
   type EmployeeNote, type PayrollEmployeeVM,
-  type SalarySheetReport, type SiteWithCount, type Trade,
+  type SalarySheetReport, type SalarySheetSiteGroup, type SiteTimeCardEntry,
+  type SiteWithCount, type Trade,
   type BranchWithCount,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
@@ -348,14 +369,14 @@ function CalculationPanel({ e, year, month }: {
         <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground">Total gross salary</span>
           <span className="flex items-center gap-1.5 font-mono text-lg font-bold text-brand">
-            AED {fmtMoney(e.gross_salary)}
+            {fmtMoney(e.gross_salary)}
             {reconciles && <Check size={14} className="text-emerald-500" />}
           </span>
         </div>
         <p className="mt-0.5 text-[10px] text-muted-foreground">
           {reconciles
-            ? `Reconciled — rate lines sum to AED ${fmtMoney(lineSum)} (matches the Salary Sheet).`
-            : `Rate lines sum to AED ${fmtMoney(lineSum)} — check manual edits in the Salary Sheet.`}
+            ? `Reconciled — rate lines sum to ${fmtMoney(lineSum)} (matches the Salary Sheet).`
+            : `Rate lines sum to ${fmtMoney(lineSum)} — check manual edits in the Salary Sheet.`}
         </p>
       </div>
     </div>
@@ -631,40 +652,76 @@ function PaymentMethodCell({ e }: { e: PayrollEmployeeVM }) {
 }
 
 // ---------------------------------------------------------------------------
-// Payment dialog (mark paid — records who and when). Settlement values are
-// edited inline in the table; this dialog only confirms the payment.
+// TIME CARD dialog — enter the APPROVED timesheet (time card) hours of ONE
+// site's employees. Saving is what "adds time card hours of that specific
+// site": afterwards the Payroll table grows the Final Hours + Balance columns
+// (only then — no data keeps the compact layout). Inputs are prefilled with
+// the stored hours; clearing a field removes that employee's entry.
 // ---------------------------------------------------------------------------
-function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
-  employee: PayrollEmployeeVM | null;
+function TimeCardDialog({ open, onOpenChange, periodId, siteGroups, year, month, onSaved }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  periodId: string | null;
+  /** non-idle site groups of this period, ALREADY permission-scoped by the page */
+  siteGroups: SalarySheetSiteGroup[];
+  year: number;
+  month: number;
   onSaved: () => void;
 }) {
-  const [notes, setNotes] = useState('');
+  const [siteId, setSiteId] = useState<string>('');
+  const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
+  const group = useMemo(
+    () => siteGroups.find((g) => g.site_id === siteId) ?? null,
+    [siteGroups, siteId],
+  );
+  const rows = useMemo(() => group?.rows ?? [], [group]);
+
+  // (re)prefill from the stored time card hours whenever the dialog opens or
+  // the picked site changes
   useEffect(() => {
-    if (open && employee) setNotes(employee.notes ?? '');
-  }, [open, employee]);
+    if (!open) return;
+    setSiteId((prev) => (siteGroups.some((g) => g.site_id === prev)
+      ? prev
+      : (siteGroups[0]?.site_id ?? '')));
+  }, [open, siteGroups]);
+  useEffect(() => {
+    const next: Record<string, string> = {};
+    rows.forEach((r) => {
+      next[r.employee_id] = r.time_card_hours != null ? String(r.time_card_hours) : '';
+    });
+    setValues(next);
+  }, [siteId, rows]);
 
-  if (!employee) return null;
+  const filledCount = rows.filter((r) => (values[r.employee_id] ?? '').trim() !== '').length;
 
-  const submit = async (): Promise<void> => {
+  const save = async (): Promise<void> => {
+    if (!periodId || !siteId || saving) return;
+    const entries: SiteTimeCardEntry[] = [];
+    for (const r of rows) {
+      const raw = (values[r.employee_id] ?? '').trim();
+      if (raw === '') {
+        entries.push({ employee_id: r.employee_id, hours: null });
+        continue;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) {
+        toast.error(`Time card hours of ${r.full_name} must be 0 or more`);
+        return;
+      }
+      entries.push({ employee_id: r.employee_id, hours: round2(n) });
+    }
     setSaving(true);
     try {
-      await dataApi.markPayrollPaid(employee.id, {
-        advance: employee.advance,
-        deduction: employee.deduction,
-        notes: notes.trim() || null,
-        paid: true,
-      });
-      toast.success('Marked as paid', {
-        description: `${employee.full_name} — AED ${fmtMoney(employee.net_salary)}. Green in every Salary Sheet section.`,
+      await dataApi.saveSiteTimeCardHours(periodId, siteId, entries);
+      toast.success('Time card hours saved', {
+        description: `${group?.site_name ?? 'Site'} — ${filledCount} employee${filledCount === 1 ? '' : 's'} with hours. Final Hours & Balance now show on the table.`,
       });
       onOpenChange(false);
       onSaved();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to record payment');
+      toast.error(err instanceof Error ? err.message : 'Failed to save the time card hours');
     } finally {
       setSaving(false);
     }
@@ -672,101 +729,95 @@ function PaymentDialog({ employee, open, onOpenChange, onSaved }: {
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!saving) onOpenChange(v); }}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Mark salary paid — {employee.full_name}</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <ClipboardCheck size={16} className="text-brand" />
+            Time card hours — {MONTH_NAMES[month - 1]} {year}
+          </DialogTitle>
           <DialogDescription>
-            Payment is recorded with your name and today&apos;s date. The employee&apos;s rows turn
-            green in every Salary Sheet section. Paid records are protected from ordinary editing.
+            Enter the approved timesheet (time card) hours of a site&apos;s employees. After
+            saving, the table gains the <b>Final Hours</b> and <b>Balance</b> columns —
+            Balance = (Final Hours − Total Hours) × effective rate − Net Payable.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-            <div className="flex justify-between"><span className="text-muted-foreground">Gross salary</span><span className="font-mono">AED {fmtMoney(employee.gross_salary)}</span></div>
-            <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Advance</span><span className="font-mono">AED {fmtMoney(employee.advance)}</span></div>
-            <div className="mt-0.5 flex justify-between"><span className="text-muted-foreground">− Deduction</span><span className="font-mono">AED {fmtMoney(employee.deduction)}</span></div>
-            {(employee.absent_deduction ?? 0) > 0 && (
-              <div className="mt-0.5 flex justify-between" title={`Absent deduction${employee.absent_deduction_edited ? ' — manually set in Edit mode (this value has priority over the rule)' : ' — from the attendance rule (editable in Edit mode)'}`}>
-                <span className="text-red-500">− Absent deduction{employee.absent_deduction_edited ? ' (manual)' : ''}</span>
-                <span className="font-mono text-red-500">AED {fmtMoney(employee.absent_deduction)}</span>
+
+        {siteGroups.length === 0 ? (
+          <p className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
+            No sites with employees this month in the current branch scope.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            <Select value={siteId} onValueChange={setSiteId} disabled={saving}>
+              <SelectTrigger className="h-10 bg-card" aria-label="Site of the time card">
+                <SelectValue placeholder="Select a site…" />
+              </SelectTrigger>
+              <SelectContent>
+                {siteGroups.map((g) => (
+                  <SelectItem key={g.site_id} value={g.site_id!}>
+                    {g.site_name} ({g.employees} employee{g.employees === 1 ? '' : 's'})
+                    {(g.time_card_total ?? 0) > 0 ? ' · time card ✓' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {rows.length > 0 && (
+              <div className="max-h-[46vh] overflow-y-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Employee</TableHead>
+                      <TableHead className="text-right">Site Hours</TableHead>
+                      <TableHead className="w-36 text-right">Time Card Hours</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((r) => (
+                      <TableRow key={r.employee_id}>
+                        <TableCell className="py-2">
+                          <p className="truncate text-sm font-medium">{r.full_name}</p>
+                          <p className="font-mono text-[10px] text-muted-foreground">{r.employee_code}</p>
+                        </TableCell>
+                        <TableCell className="py-2 text-right font-mono text-xs">
+                          {fmtHrs(r.total_hours)} h
+                        </TableCell>
+                        <TableCell className="py-2">
+                          <Input
+                            type="number" min={0} step="0.5" inputMode="decimal" disabled={saving}
+                            placeholder="—"
+                            className="h-8 border-border/70 bg-card text-right font-mono text-xs"
+                            value={values[r.employee_id] ?? ''}
+                            onChange={(ev) => setValues((prev) => ({
+                              ...prev, [r.employee_id]: ev.target.value,
+                            }))}
+                            aria-label={`Time card hours of ${r.full_name}`}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
             )}
-            <div className="mt-1 flex justify-between border-t pt-1 font-semibold">
-              <span>Net salary payable</span><span className="font-mono text-emerald-500">AED {fmtMoney(employee.net_salary)}</span>
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>Remarks</Label>
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional remarks" className="h-11" />
-            <p className="text-[11px] text-muted-foreground">
-              Change the advance / deduction / absent deduction in the table (Edit mode) before confirming if needed.
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Empty field = no entry for that employee (an existing one is removed).
+              {filledCount > 0 && ` ${filledCount} of ${rows.length} employees filled.`}
             </p>
           </div>
-        </div>
+        )}
+
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Button>
-          <Button onClick={submit} disabled={saving} className="brand-gradient font-semibold text-white">
-            {saving ? <Loader2 size={15} className="mr-1 animate-spin" /> : <BadgeCheck size={15} className="mr-1" />}
-            Confirm &amp; Mark Paid
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
+            Cancel
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Unpay dialog (super admin only — audited revert to unpaid)
-// ---------------------------------------------------------------------------
-function UnpayDialog({ employee, open, onOpenChange, onSaved }: {
-  employee: PayrollEmployeeVM | null;
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  onSaved: () => void;
-}) {
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => { if (open) setReason(''); }, [open]);
-  if (!employee) return null;
-
-  const submit = async (): Promise<void> => {
-    if (!reason.trim()) { toast.error('A reason is required to revert a paid salary'); return; }
-    setBusy(true);
-    try {
-      await dataApi.unmarkPayrollPaid(employee.id, reason.trim());
-      toast.success('Reverted to unpaid', {
-        description: `${employee.full_name} — your reason was recorded in the audit log.`,
-      });
-      onOpenChange(false);
-      onSaved();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to revert');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => { if (!busy) onOpenChange(v); }}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Revert to unpaid — {employee.full_name}?</DialogTitle>
-          <DialogDescription>
-            Super admin action — the revert is audited with your name, the reason and a timestamp.
-            The green highlighting disappears from every Salary Sheet section.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2">
-          <Label>Reason *</Label>
-          <Input value={reason} onChange={(e) => setReason(e.target.value)}
-            placeholder="e.g. Payment entered for the wrong employee" className="h-11" />
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>Cancel</Button>
-          <Button onClick={submit} disabled={busy} variant="destructive" className="font-semibold">
-            {busy ? <Loader2 size={15} className="mr-1 animate-spin" /> : <LockOpen size={15} className="mr-1" />}
-            Revert to Unpaid
+          <Button
+            onClick={() => { void save(); }}
+            disabled={saving || siteGroups.length === 0 || !siteId || rows.length === 0}
+            className="brand-gradient font-semibold text-white"
+          >
+            {saving ? <Loader2 size={15} className="mr-1 animate-spin" /> : <ClipboardCheck size={15} className="mr-1" />}
+            Save time card
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -778,7 +829,7 @@ function UnpayDialog({ employee, open, onOpenChange, onSaved }: {
 // Page
 // ---------------------------------------------------------------------------
 export function PayrollPage() {
-  const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'attendance', 'employee', 'trade_rate_history']);
+  const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'payroll_time_card', 'attendance', 'employee', 'trade_rate_history']);
   // branch/site scoping data — powers the BRANCH dropdown in the top row
   // (branch grants change → the dropdown and the scoped rows follow)
   const branchVersion = useRealtimeVersion(['site', 'branch', 'admin_branch', 'admin_site', 'profiles']);
@@ -804,10 +855,11 @@ export function PayrollPage() {
   // each settlement's stored absent_deduction
   const [dedSettings, setDedSettings] = useState<DeductionSettings>(DEFAULT_DEDUCTION_SETTINGS);
 
-  const [payTarget, setPayTarget] = useState<PayrollEmployeeVM | null>(null);
-  const [unpayTarget, setUnpayTarget] = useState<PayrollEmployeeVM | null>(null);
   const [finalizeOpen, setFinalizeOpen] = useState(false);
   const [reopenOpen, setReopenOpen] = useState(false);
+  // per-site APPROVED time card hours dialog (adds the Final Hours + Balance
+  // columns once saved)
+  const [timeCardOpen, setTimeCardOpen] = useState(false);
 
   // ---- edit mode (trade dropdown + inline advance / deduction) -------------
   const [editMode, setEditMode] = useState(false);
@@ -1002,6 +1054,29 @@ export function PayrollPage() {
       ? 'No branch'
       : (branches ?? []).find((b) => b.id === branchFilter)?.name ?? null;
 
+  // ---- TIME CARD ------------------------------------------------------------
+  // The extra Final Hours + Balance columns render ONLY when time card hours
+  // exist in the current scope ("only give that extra columns when time card
+  // hours of that site were added") — the layout stays compact otherwise.
+  const hasTimeCard = useMemo(
+    () => scopedEmployees.some((e) => e.time_card_hours != null),
+    [scopedEmployees],
+  );
+  // non-idle site groups of this period, narrowed to what the viewer may
+  // touch: normal admins → granted-branch + assigned sites; super admin →
+  // the picked branch (or every site when "All branches")
+  const timeCardSites = useMemo<SalarySheetSiteGroup[]>(() => {
+    const groups = (report?.sites ?? []).filter((g) => g.site_id != null && !g.idle);
+    if (allowedSiteIds) {
+      return groups.filter((g) => allowedSiteIds.has(g.site_id!));
+    }
+    if (branchFilter === FILTER_NONE) return [];
+    if (branchFilter !== 'all') {
+      return groups.filter((g) => branchIdOfSite.get(g.site_id!) === branchFilter);
+    }
+    return groups;
+  }, [report, allowedSiteIds, branchFilter, branchIdOfSite]);
+
   // notes grouped per employee (for the sticky-note icons)
   const notesByEmployee = useMemo(() => {
     const map = new Map<string, EmployeeNote[]>();
@@ -1116,6 +1191,9 @@ export function PayrollPage() {
     deductions: round2(filteredEmployees.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0)),
     gross: round2(filteredEmployees.reduce((n, e) => n + e.gross_salary, 0)),
     net: round2(filteredEmployees.reduce((n, e) => n + e.net_salary, 0)),
+    // time-card columns (rendered only when hasTimeCard)
+    finalHours: round2(filteredEmployees.reduce((n, e) => n + (e.time_card_hours ?? 0), 0)),
+    balance: round2(filteredEmployees.reduce((n, e) => n + (payrollBalanceOf(e) ?? 0), 0)),
   }), [filteredEmployees]);
 
   const clearFilters = (): void => {
@@ -1211,8 +1289,8 @@ export function PayrollPage() {
         ...(absentDeduction != null ? { absent_deduction: absentDeduction } : {}),
       });
       toast.success('Settlement saved', {
-        description: `${e.full_name} — advance AED ${fmtMoney(advance)} · deduction AED ${fmtMoney(deduction)}`
-          + (absentDeduction != null ? ` · absent deduction AED ${fmtMoney(absentDeduction)}` : ''),
+        description: `${e.full_name} — advance ${fmtMoney(advance)} · deduction ${fmtMoney(deduction)}`
+          + (absentDeduction != null ? ` · absent deduction ${fmtMoney(absentDeduction)}` : ''),
       });
       load();
     } catch (err) {
@@ -1269,6 +1347,47 @@ export function PayrollPage() {
   };
 
   const toggleEditMode = (): void => setEditMode((o) => !o);
+
+  // ---- INSTANT payment toggle (no confirmation dialogs) --------------------
+  // Mark paid commits the payment immediately (with the current settlement
+  // values); the button becomes Unmark, and unmarking reverts instantly.
+  // Both actions are audited (actor + timestamp + automatic reason).
+  const onMarkPaid = async (e: PayrollEmployeeVM): Promise<void> => {
+    if (busyKey) return;
+    setBusyKey(`pay:${e.id}`);
+    try {
+      await dataApi.markPayrollPaid(e.id, {
+        advance: e.advance,
+        deduction: e.deduction,
+        notes: e.notes,
+        paid: true,
+      });
+      toast.success('Marked as paid', {
+        description: `${e.full_name} — ${fmtMoney(e.net_salary)} (net). Green in every Salary Sheet section.`,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to record payment');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const onUnmarkPaid = async (e: PayrollEmployeeVM): Promise<void> => {
+    if (busyKey) return;
+    setBusyKey(`unpay:${e.id}`);
+    try {
+      await dataApi.unmarkPayrollPaid(e.id);
+      toast.success('Reverted to unpaid', {
+        description: `${e.full_name} — recorded in the audit log.`,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to revert');
+    } finally {
+      setBusyKey(null);
+    }
+  };
 
   // ---- the six filter dropdowns, rendered in TWO places: inline in the
   //      desktop sticky bar (≥ lg) and full-width inside the mobile bottom
@@ -1420,6 +1539,18 @@ export function PayrollPage() {
                 {selectableYears().map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}
               </SelectContent>
             </Select>
+            {report?.exists && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTimeCardOpen(true)}
+                className={cn('h-9 font-medium', hasTimeCard && 'border-brand/40 text-brand')}
+                title="Add / edit the approved time card hours of a site — adds the Final Hours & Balance columns"
+              >
+                <ClipboardCheck size={14} className="mr-1" />
+                Time Card
+              </Button>
+            )}
             {report?.exists && (
               <Button
                 variant="outline"
@@ -1594,9 +1725,9 @@ export function PayrollPage() {
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[
               { icon: <Users size={12} />, label: 'Total employees', value: String(branchScopeActive ? scopedEmployees.length : report.totals.employees), hint: branchScopeActive ? `${scopedPaidCount} paid · ${scopedUnpaidCount} unpaid` : `${report.totals.paid_count} paid · ${report.totals.unpaid_count} unpaid`, tone: 'default' as const },
-              { icon: <Banknote size={12} />, label: 'Total gross salary', value: `AED ${fmtMoney(branchScopeActive ? scopedGross : report.totals.gross_salary)}`, hint: `Adv. ${fmtMoney(branchScopeActive ? scopedAdvances : report.totals.advances)} · Ded. ${fmtMoney(branchScopeActive ? scopedDeductions : report.totals.deductions)}`, tone: 'brand' as const },
-              { icon: <BadgeCheck size={12} />, label: 'Paid salary', value: `AED ${fmtMoney(paidNet)}`, hint: `${branchScopeActive ? scopedPaidCount : report.totals.paid_count} employee${(branchScopeActive ? scopedPaidCount : report.totals.paid_count) === 1 ? '' : 's'} paid (net)`, tone: 'emerald' as const },
-              { icon: <Scale size={12} />, label: 'Balance to pay', value: `AED ${fmtMoney(balanceToPay)}`, hint: `${branchScopeActive ? scopedUnpaidCount : report.totals.unpaid_count} employee${(branchScopeActive ? scopedUnpaidCount : report.totals.unpaid_count) === 1 ? '' : 's'} unpaid (net)`, tone: 'amber' as const },
+              { icon: <Banknote size={12} />, label: 'Total gross salary', value: fmtMoney(branchScopeActive ? scopedGross : report.totals.gross_salary), hint: `Adv. ${fmtMoney(branchScopeActive ? scopedAdvances : report.totals.advances)} · Ded. ${fmtMoney(branchScopeActive ? scopedDeductions : report.totals.deductions)}`, tone: 'brand' as const },
+              { icon: <BadgeCheck size={12} />, label: 'Paid salary', value: fmtMoney(paidNet), hint: `${branchScopeActive ? scopedPaidCount : report.totals.paid_count} employee${(branchScopeActive ? scopedPaidCount : report.totals.paid_count) === 1 ? '' : 's'} paid (net)`, tone: 'emerald' as const },
+              { icon: <Scale size={12} />, label: 'Balance to pay', value: fmtMoney(balanceToPay), hint: `${branchScopeActive ? scopedUnpaidCount : report.totals.unpaid_count} employee${(branchScopeActive ? scopedUnpaidCount : report.totals.unpaid_count) === 1 ? '' : 's'} unpaid (net)`, tone: 'amber' as const },
             ].map((c, i) => (
               <motion.div
                 key={c.label}
@@ -1637,12 +1768,31 @@ export function PayrollPage() {
                     <TableHead className="w-14">Sl No</TableHead>
                     <TableHead className="min-w-56">Employee</TableHead>
                     <TableHead className="min-w-28">Code</TableHead>
+                    <TableHead className="min-w-24" title="Region of the employee's nationality country">Nationality</TableHead>
                     <TableHead className="text-right">Total Hours</TableHead>
+                    {/* time-card columns — ONLY after time card hours were
+                        added for a site (compact layout otherwise) */}
+                    {hasTimeCard && (
+                      <TableHead
+                        className="text-right"
+                        title="Approved time card hours of the month (entered per site via the Time Card button)"
+                      >
+                        Final Hours
+                      </TableHead>
+                    )}
+                    {hasTimeCard && (
+                      <TableHead
+                        className="text-right"
+                        title="(Final Hours − Total Hours) × effective rate − Net Payable — effective rate = gross ÷ total hours"
+                      >
+                        Balance
+                      </TableHead>
+                    )}
                     <TableHead className="min-w-40">Trade</TableHead>
                     <TableHead className="min-w-32">Payment Method</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead className="text-right">Advance</TableHead>
-                    <TableHead className="text-right" title={`Manual deduction + absent deduction (AED ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
+                    <TableHead className="text-right" title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
                     <TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead>
                   </TableRow>
@@ -1655,6 +1805,8 @@ export function PayrollPage() {
                     const paid = e.payment_status === 'paid';
                     const tradeBusy = busyKey === `trade:${e.id}`;
                     const settleBusy = busyKey === `settle:${e.id}`;
+                    const payBusy = busyKey === `pay:${e.id}`;
+                    const unpayBusy = busyKey === `unpay:${e.id}`;
                     // paid employees (and removed ones) keep read-only cells
                     const editable = editMode && !paid && e.status !== 'deleted';
                     const hasSalary = e.gross_salary > 0;
@@ -1703,9 +1855,54 @@ export function PayrollPage() {
                           </div>
                         </TableCell>
                         <TableCell className="font-mono text-xs text-muted-foreground">{e.employee_code}</TableCell>
+                        {/* nationality — the REGION of the nationality country
+                            (Asian / African / Arab / …), tooltip shows the
+                            country itself */}
+                        <TableCell
+                          className="text-xs"
+                          title={e.nationality ?? 'Nationality not set'}
+                        >
+                          {e.nationality
+                            ? <span className="font-medium">{regionShortOfNationality(e.nationality)}</span>
+                            : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
                         <TableCell className="text-right">
                           <HoursCell e={e} year={year} month={month} />
                         </TableCell>
+                        {/* Final Hours — the approved time card hours; shown
+                            only while the time-card columns are active */}
+                        {hasTimeCard && (
+                          <TableCell className="text-right">
+                            {e.time_card_hours != null
+                              ? <span className="font-mono text-sm">{fmtHrs(e.time_card_hours)} h</span>
+                              : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                        )}
+                        {/* Balance = (Final − Total) × effective rate − Net
+                            Payable; tooltip shows the full arithmetic */}
+                        {hasTimeCard && (
+                          <TableCell className="text-right">
+                            {(() => {
+                              const bal = payrollBalanceOf(e);
+                              if (bal == null) {
+                                return <span className="text-muted-foreground">—</span>;
+                              }
+                              const rate = payrollEffectiveRateOf(e);
+                              return (
+                                <span
+                                  className={cn(
+                                    'font-mono text-sm font-semibold',
+                                    bal > 0 ? 'text-amber-600 dark:text-amber-400'
+                                      : bal < 0 ? 'text-rose-500' : 'text-muted-foreground',
+                                  )}
+                                  title={`(${fmtHrs(e.time_card_hours ?? 0)} final − ${fmtHrs(e.total_hours)} total) × ${fmtMoney(rate)} effective rate = ${fmtMoney(round2((e.time_card_hours! - e.total_hours) * rate))} − ${fmtMoney(e.net_salary)} net payable = ${fmtMoney(bal)}`}
+                                >
+                                  {fmtMoney(bal)}
+                                </span>
+                              );
+                            })()}
+                          </TableCell>
+                        )}
                         <TableCell className="text-xs">
                           {editable ? (
                             <span className="inline-flex items-center gap-1.5">
@@ -1739,7 +1936,7 @@ export function PayrollPage() {
                         {/* amount (gross) — BEFORE advance / deduction, same
                             order as the header and the Excel export */}
                         <TableCell className="text-right font-mono text-sm font-semibold">
-                          AED {fmtMoney(e.gross_salary)}
+                          {fmtMoney(e.gross_salary)}
                         </TableCell>
                         <TableCell className="text-right">
                           {editable ? (
@@ -1782,7 +1979,7 @@ export function PayrollPage() {
                                     className="inline-flex items-center gap-1"
                                     title={`Absent deduction — editable, same as the manual deduction${e.absent_deduction_edited
                                       ? ' (currently manually set — priority)'
-                                      : ` (rule: AED ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days})`}`}
+                                      : ` (rule: ${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days})`}`}
                                   >
                                     <span className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500">A</span>
                                     <AdjustInput
@@ -1824,9 +2021,9 @@ export function PayrollPage() {
                               {(e.absent_deduction ?? 0) > 0 && (
                                 <span
                                   className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
-                                  title={`Absent deduction — AED ${fmtMoney(e.absent_deduction)}${e.absent_deduction_edited
+                                  title={`Absent deduction — ${fmtMoney(e.absent_deduction)}${e.absent_deduction_edited
                                     ? ' · manually set in Edit mode (this value has priority over the rule)'
-                                    : ` (AED ${dedSettings.absent_deduction_amount} × chargeable absences, beyond the first ${dedSettings.absent_free_days}) — editable in Edit mode`}`}
+                                    : ` (${dedSettings.absent_deduction_amount} × chargeable absences, beyond the first ${dedSettings.absent_free_days}) — editable in Edit mode`}`}
                                 >
                                   A
                                 </span>
@@ -1844,40 +2041,38 @@ export function PayrollPage() {
                           )}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
-                          AED {fmtMoney(e.net_salary)}
+                          {fmtMoney(e.net_salary)}
                         </TableCell>
                         <TableCell className="text-right">
+                          {/* INSTANT toggle — no confirmation dialogs */}
                           <div className="flex items-center justify-end gap-1.5">
                             {paid ? (
                               <>
                                 <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-500">
                                   <BadgeCheck size={11} /> Paid
                                 </span>
-                                {isSuperAdmin ? (
-                                  <Button
-                                    variant="ghost" size="sm" className="h-7 px-2 text-[11px] text-muted-foreground"
-                                    onClick={() => setUnpayTarget(e)}
-                                    title="Revert to unpaid (audited)"
-                                  >
-                                    <LockOpen size={12} /> Undo
-                                  </Button>
-                                ) : (
-                                  <span className="text-[10px] text-muted-foreground" title="Only a super admin can revert a paid salary">
-                                    locked
-                                  </span>
-                                )}
+                                <Button
+                                  variant="ghost" size="sm" className="h-7 px-2 text-[11px] text-muted-foreground"
+                                  disabled={unpayBusy}
+                                  onClick={() => { void onUnmarkPaid(e); }}
+                                  title="Revert to unpaid (audited)"
+                                >
+                                  {unpayBusy ? <Loader2 size={12} className="animate-spin" /> : <LockOpen size={12} />} Unmark
+                                </Button>
                               </>
                             ) : (
                               <Button
                                 size="sm"
-                                disabled={!hasSalary}
+                                disabled={!hasSalary || payBusy}
                                 title={hasSalary
-                                  ? `Mark the monthly salary paid (net AED ${fmtMoney(e.net_salary)})`
+                                  ? `Mark the monthly salary paid (net ${fmtMoney(e.net_salary)})`
                                   : 'No salary calculated for this employee this month'}
-                                onClick={() => setPayTarget(e)}
+                                onClick={() => { void onMarkPaid(e); }}
                                 className="h-8 brand-gradient px-3 text-xs font-semibold text-white"
                               >
-                                <BadgeCheck size={13} className="mr-1" /> Mark paid
+                                {payBusy
+                                  ? <Loader2 size={13} className="mr-1 animate-spin" />
+                                  : <BadgeCheck size={13} className="mr-1" />} Mark paid
                               </Button>
                             )}
                           </div>
@@ -1888,7 +2083,7 @@ export function PayrollPage() {
                   </AnimatePresence>
                   {filteredEmployees.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">
+                      <TableCell colSpan={hasTimeCard ? 14 : 12} className="py-10 text-center text-sm text-muted-foreground">
                         {scopedEmployees.length === 0 && branchScopeActive
                           ? `No employees worked in ${selectedBranchName ?? 'your branches'} this month.`
                           : employees.length === 0
@@ -1901,18 +2096,24 @@ export function PayrollPage() {
                 {filteredEmployees.length > 0 && (
                   <TableFooter>
                     <TableRow className="font-semibold hover:bg-transparent">
-                      <TableCell colSpan={3} className="text-right text-xs uppercase tracking-wide text-muted-foreground">
+                      <TableCell colSpan={4} className="text-right text-xs uppercase tracking-wide text-muted-foreground">
                         Total — {filteredEmployees.length} employee{filteredEmployees.length === 1 ? '' : 's'}
                         {filtersActive && ` (of ${scopedEmployees.length})`}
                       </TableCell>
                       <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.hours)} h</TableCell>
+                      {hasTimeCard && (
+                        <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.finalHours)} h</TableCell>
+                      )}
+                      {hasTimeCard && (
+                        <TableCell className="text-right font-mono text-sm">{fmtMoney(filteredTotals.balance)}</TableCell>
+                      )}
                       <TableCell />
                       <TableCell />
-                      <TableCell className="text-right font-mono text-sm">AED {fmtMoney(filteredTotals.gross)}</TableCell>
+                      <TableCell className="text-right font-mono text-sm">{fmtMoney(filteredTotals.gross)}</TableCell>
                       <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.advances)}</TableCell>
                       <TableCell className="text-right font-mono text-xs">{fmtMoney(filteredTotals.deductions)}</TableCell>
                       <TableCell className="text-right font-mono text-sm text-emerald-600 dark:text-emerald-400">
-                        AED {fmtMoney(filteredTotals.net)}
+                        {fmtMoney(filteredTotals.net)}
                       </TableCell>
                       <TableCell />
                     </TableRow>
@@ -1922,7 +2123,7 @@ export function PayrollPage() {
             </div>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: AED {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 
@@ -1977,17 +2178,15 @@ export function PayrollPage() {
         </>
       )}
 
-      {/* dialogs */}
-      <PaymentDialog
-        employee={payTarget}
-        open={payTarget !== null}
-        onOpenChange={(v) => { if (!v) setPayTarget(null); }}
-        onSaved={load}
-      />
-      <UnpayDialog
-        employee={unpayTarget}
-        open={unpayTarget !== null}
-        onOpenChange={(v) => { if (!v) setUnpayTarget(null); }}
+      {/* dialogs — payments are INSTANT (no dialogs); the Time Card dialog
+          adds a site's approved time card hours */}
+      <TimeCardDialog
+        open={timeCardOpen}
+        onOpenChange={setTimeCardOpen}
+        periodId={period?.id ?? null}
+        siteGroups={timeCardSites}
+        year={year}
+        month={month}
         onSaved={load}
       />
       <FinalizeDialog report={report} open={finalizeOpen} onOpenChange={setFinalizeOpen} onDone={load} />

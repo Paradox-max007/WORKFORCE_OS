@@ -14,11 +14,26 @@
 // ============================================================================
 
 import type { PayrollEmployeeVM } from '@/lib/types';
+import { regionShortOfNationality } from '@/lib/nationality-groups';
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/** BALANCE = (time card hours − total hours) × effective rate − net payable.
+ *  Effective rate = gross ÷ total hours (the blended rate actually used by
+ *  the month's salary lines — handles mid-month trade / rate changes). */
+export function payrollBalanceOf(e: PayrollEmployeeVM): number | null {
+  if (e.time_card_hours == null) return null;
+  const rate = e.total_hours > 0 ? e.gross_salary / e.total_hours : 0;
+  return round2((e.time_card_hours - e.total_hours) * rate - e.net_salary);
+}
+
+/** The effective hourly rate behind the Balance column (gross ÷ total hours). */
+export function payrollEffectiveRateOf(e: PayrollEmployeeVM): number {
+  return e.total_hours > 0 ? e.gross_salary / e.total_hours : 0;
+}
 
 /** One Excel column — shared by the .xlsx writer and the preview page. */
 export interface PayrollExportColumn {
@@ -37,54 +52,91 @@ export interface PayrollExportColumn {
 }
 
 /** The single source of truth for the exported columns — Amount BEFORE
- *  Advance, exactly like the Payroll table. */
-export const PAYROLL_EXPORT_COLUMNS: PayrollExportColumn[] = [
-  {
-    key: 'name', header: 'Employee Name', width: 26,
-    value: (e) => e.full_name,
-  },
-  {
-    key: 'code', header: 'Code', width: 15,
-    value: (e) => e.employee_code,
-  },
-  {
-    key: 'hours', header: 'Total Hours', width: 12, numeric: true,
-    value: (e) => round2(e.total_hours),
-    total: (rows) => round2(rows.reduce((n, e) => n + e.total_hours, 0)),
-  },
-  {
-    key: 'trade', header: 'Trade', width: 22,
-    value: (e) => e.trade_name ?? '',
-  },
-  {
-    key: 'payment', header: 'Payment Method', width: 17,
-    value: (e) => (e.payment_type === 'card' ? e.card_type ?? 'Card'
-      : e.payment_type === 'cash' ? 'Cash' : ''),
-  },
-  {
-    key: 'amount', header: 'Amount', width: 14, numeric: true, money: true,
-    value: (e) => round2(e.gross_salary),
-    total: (rows) => round2(rows.reduce((n, e) => n + e.gross_salary, 0)),
-  },
-  {
-    key: 'advance', header: 'Advance', width: 12, numeric: true, money: true,
-    value: (e) => round2(e.advance),
-    total: (rows) => round2(rows.reduce((n, e) => n + e.advance, 0)),
-  },
-  {
-    key: 'deduction', header: 'Deduction', width: 12, numeric: true, money: true,
-    // manual deduction + the AUTOMATIC absent deduction (absences beyond
-    // the first 2 × AED 25) — exactly what the Payroll table shows, so
-    // gross − advance − deduction − … reconciles with Net Payable
-    value: (e) => round2(e.deduction + (e.absent_deduction ?? 0)),
-    total: (rows) => round2(rows.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0)),
-  },
-  {
-    key: 'net', header: 'Net Payable', width: 14, numeric: true, money: true,
-    value: (e) => round2(e.net_salary),
-    total: (rows) => round2(rows.reduce((n, e) => n + e.net_salary, 0)),
-  },
-];
+ *  Advance, exactly like the Payroll table. NATIONALITY sits right after
+ *  Code; the time-card columns (Final Hours next to Total Hours, Balance
+ *  after Net Payable) are included ONLY when time card hours exist —
+ *  "only give that extra columns when time card hours were added".
+ *  The Payroll page passes hasTimeCard; the preview derives it from rows. */
+export function buildPayrollExportColumns(hasTimeCard: boolean): PayrollExportColumn[] {
+  const columns: PayrollExportColumn[] = [
+    {
+      key: 'name', header: 'Employee Name', width: 26,
+      value: (e) => e.full_name,
+    },
+    {
+      key: 'code', header: 'Code', width: 15,
+      value: (e) => e.employee_code,
+    },
+    {
+      key: 'nationality', header: 'Nationality', width: 14,
+      value: (e) => regionShortOfNationality(e.nationality),
+    },
+    {
+      key: 'hours', header: 'Total Hours', width: 12, numeric: true,
+      value: (e) => round2(e.total_hours),
+      total: (rows) => round2(rows.reduce((n, e) => n + e.total_hours, 0)),
+    },
+  ];
+  if (hasTimeCard) {
+    columns.push(
+      {
+        key: 'final_hours', header: 'Final Hours', width: 12, numeric: true,
+        // approved time card hours ('' → nothing entered, unlike 0 which
+        // would read as "the client recorded zero hours")
+        value: (e) => (e.time_card_hours != null ? round2(e.time_card_hours) : ''),
+        total: (rows) => round2(rows.reduce((n, e) => n + (e.time_card_hours ?? 0), 0)),
+      },
+      {
+        key: 'balance', header: 'Balance', width: 13, numeric: true, money: true,
+        value: (e) => {
+          const bal = payrollBalanceOf(e);
+          return bal != null ? round2(bal) : '';
+        },
+        total: (rows) => round2(rows.reduce((n, e) => n + (payrollBalanceOf(e) ?? 0), 0)),
+      },
+    );
+  }
+  columns.push(
+    {
+      key: 'trade', header: 'Trade', width: 22,
+      value: (e) => e.trade_name ?? '',
+    },
+    {
+      key: 'payment', header: 'Payment Method', width: 17,
+      value: (e) => (e.payment_type === 'card' ? e.card_type ?? 'Card'
+        : e.payment_type === 'cash' ? 'Cash' : ''),
+    },
+    {
+      key: 'amount', header: 'Amount', width: 14, numeric: true, money: true,
+      value: (e) => round2(e.gross_salary),
+      total: (rows) => round2(rows.reduce((n, e) => n + e.gross_salary, 0)),
+    },
+    {
+      key: 'advance', header: 'Advance', width: 12, numeric: true, money: true,
+      value: (e) => round2(e.advance),
+      total: (rows) => round2(rows.reduce((n, e) => n + e.advance, 0)),
+    },
+    {
+      key: 'deduction', header: 'Deduction', width: 12, numeric: true, money: true,
+      // manual deduction + the AUTOMATIC absent deduction — exactly what the
+      // Payroll table shows, so gross − advance − deduction − … reconciles
+      // with Net Payable
+      value: (e) => round2(e.deduction + (e.absent_deduction ?? 0)),
+      total: (rows) => round2(rows.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0)),
+    },
+    {
+      key: 'net', header: 'Net Payable', width: 14, numeric: true, money: true,
+      value: (e) => round2(e.net_salary),
+      total: (rows) => round2(rows.reduce((n, e) => n + e.net_salary, 0)),
+    },
+  );
+  return columns;
+}
+
+/** Columns WITHOUT the time-card pair (legacy shape — use
+ *  buildPayrollExportColumns(rows.some(e => e.time_card_hours != null)) to
+ *  match the live Payroll table). */
+export const PAYROLL_EXPORT_COLUMNS: PayrollExportColumn[] = buildPayrollExportColumns(false);
 
 /** Excel sheet name, e.g. "Payroll Nov 2026" (≤ 31 chars, always safe). */
 export function payrollExportSheetName(year: number, month: number): string {

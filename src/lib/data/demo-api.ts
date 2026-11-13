@@ -43,6 +43,7 @@ import {
   type SharedSheetSubmitMeta,
   type SharedSheetSubmitResult,
   type Site,
+  type SiteTimeCardEntry,
   type SiteTransfer,
   type SiteWithCount,
   type Trade,
@@ -2039,14 +2040,12 @@ export const demoApi = {
     saveAndEmit(['payroll_period', 'payroll_employee']);
   },
 
-  /** Revert a payment — super admin only, reason mandatory, audited
-   *  (mirrors unmark_employee_salary_paid RPC). */
-  async unmarkPayrollPaid(payrollEmployeeId: string, reason: string): Promise<void> {
+  /** Revert a payment — INSTANT toggle on the Payroll page (no confirmation
+   *  dialog). Reason optional (defaults to an audit note); permission mirrors
+   *  marking paid — still audited (mirrors the relaxed
+   *  unmark_employee_salary_paid RPC in 20261113c). */
+  async unmarkPayrollPaid(payrollEmployeeId: string, reason?: string): Promise<void> {
     const me = currentProfile();
-    if (me?.role !== 'super_admin') {
-      throw new Error('Only a super admin can revert a paid salary');
-    }
-    if (!reason.trim()) throw new Error('A reason is required to revert a paid salary');
     const pe = db.payrollEmployees.find((x) => x.id === payrollEmployeeId);
     if (!pe) throw new Error('Payroll employee not found');
     if (pe.payment_status !== 'paid') throw new Error('This salary is not marked paid');
@@ -2057,11 +2056,78 @@ export const demoApi = {
     const unpaidEmp = db.employees.find((x) => x.id === pe.employee_id);
     db.payrollAudit.push({
       id: uid(), period_id: period?.id ?? null, trade_id: null, action: 'unpayment',
-      actor_id: me.id, actor_name: me.name,
-      details: `${unpaidEmp ? `${unpaidEmp.full_name} (${unpaidEmp.employee_code})` : 'Unknown employee'} reverted to unpaid — reason: ${reason.trim()}`,
+      actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+      details: `${unpaidEmp ? `${unpaidEmp.full_name} (${unpaidEmp.employee_code})` : 'Unknown employee'} reverted to unpaid — reason: ${reason?.trim() || 'Unmarked from the Payroll page'}`,
       created_at: nowISO(),
     });
     saveAndEmit(['payroll_period', 'payroll_employee']);
+  },
+
+  /** Bulk-save ONE site's approved TIME CARD hours (mirrors the
+   *  save_site_time_card_hours RPC in 20261113c_payroll_time_card.sql).
+   *  Entries with hours null/undefined are removed. */
+  async saveSiteTimeCardHours(
+    payrollPeriodId: string,
+    siteId: string,
+    entries: SiteTimeCardEntry[],
+  ): Promise<void> {
+    const me = currentProfile();
+    const period = db.payrollPeriods.find((p) => p.id === payrollPeriodId);
+    if (!period) throw new Error('Payroll period not found');
+    const site = db.sites.find((s) => s.id === siteId);
+    if (!site) throw new Error('Site not found');
+
+    let saved = 0;
+    let cleared = 0;
+    entries.forEach((en) => {
+      const pe = db.payrollEmployees.find(
+        (x) => x.payroll_period_id === payrollPeriodId && x.employee_id === en.employee_id,
+      );
+      if (!pe) throw new Error('Employee is not part of this payroll period');
+      if (en.hours == null) {
+        const before = db.payrollTimeCards.length;
+        db.payrollTimeCards = db.payrollTimeCards.filter(
+          (tc) => !(tc.payroll_period_id === payrollPeriodId
+            && tc.site_id === siteId && tc.employee_id === en.employee_id),
+        );
+        if (db.payrollTimeCards.length !== before) cleared += 1;
+        return;
+      }
+      if (!Number.isFinite(en.hours) || en.hours < 0) {
+        throw new Error('Time card hours must be 0 or more');
+      }
+      const existing = db.payrollTimeCards.find(
+        (tc) => tc.payroll_period_id === payrollPeriodId
+          && tc.site_id === siteId && tc.employee_id === en.employee_id,
+      );
+      const hours = round2(en.hours);
+      if (existing) {
+        existing.time_card_hours = hours;
+        existing.updated_at = nowISO();
+        existing.updated_by = me?.id ?? null;
+      } else {
+        db.payrollTimeCards.push({
+          id: uid(),
+          payroll_period_id: payrollPeriodId,
+          site_id: siteId,
+          employee_id: en.employee_id,
+          time_card_hours: hours,
+          updated_at: nowISO(),
+          updated_by: me?.id ?? null,
+        });
+      }
+      saved += 1;
+    });
+
+    if (saved > 0 || cleared > 0) {
+      db.payrollAudit.push({
+        id: uid(), period_id: payrollPeriodId, trade_id: null, action: 'time_card',
+        actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+        details: `Time card hours for ${site.name} — ${saved} saved, ${cleared} cleared`,
+        created_at: nowISO(),
+      });
+    }
+    saveAndEmit(['payroll_time_card']);
   },
 
   // ---- realtime ------------------------------------------------------------------------------

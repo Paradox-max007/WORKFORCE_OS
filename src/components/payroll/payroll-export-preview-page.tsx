@@ -27,7 +27,7 @@ import { EmptyState } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
-  PAYROLL_EXPORT_COLUMNS, exportPayrollToXlsx, payrollExportSheetName,
+  buildPayrollExportColumns, exportPayrollToXlsx, payrollExportSheetName,
   type PayrollExportColumn,
 } from '@/lib/export-payroll-xlsx';
 import { cn } from '@/lib/utils';
@@ -63,13 +63,21 @@ export function PayrollExportPreviewPage() {
   const preview = useAppStore((s) => s.payrollExportPreview);
   const navigateTo = useAppStore((s) => s.navigateTo);
   const [downloading, setDownloading] = useState(false);
+  // the SAME column list as the live Payroll table — the time-card pair
+  // (Final Hours + Balance) is included only when time card hours exist
+  const allColumns = useMemo<PayrollExportColumn[]>(
+    () => buildPayrollExportColumns(
+      (preview?.rows ?? []).some((e) => e.time_card_hours != null),
+    ),
+    [preview],
+  );
   // every column selected by default — deselect the unwanted ones
   const [selected, setSelected] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(PAYROLL_EXPORT_COLUMNS.map((c) => [c.key, true])));
+    Object.fromEntries(allColumns.map((c) => [c.key, true])));
 
   const columns = useMemo(
-    () => PAYROLL_EXPORT_COLUMNS.filter((c) => selected[c.key]),
-    [selected],
+    () => allColumns.filter((c) => selected[c.key]),
+    [allColumns, selected],
   );
 
   const toggleColumn = (key: string): void => {
@@ -117,7 +125,7 @@ export function PayrollExportPreviewPage() {
   const { rows, year, month, fileName, filters, totalCount } = preview;
   const sheetName = payrollExportSheetName(year, month);
   const selectedCount = columns.length;
-  const allSelected = selectedCount === PAYROLL_EXPORT_COLUMNS.length;
+  const allSelected = selectedCount === allColumns.length;
 
   // the TOTAL row — label in the first selected column, sums under the rest
   const totalCells = columns.map((c, i) =>
@@ -145,7 +153,7 @@ export function PayrollExportPreviewPage() {
               <Table2 size={13} /> {rows.length} of {totalCount} employee{totalCount === 1 ? '' : 's'}
             </span>
             <span aria-hidden>·</span>
-            <span>{selectedCount} of {PAYROLL_EXPORT_COLUMNS.length} columns</span>
+            <span>{selectedCount} of {allColumns.length} columns</span>
             <span aria-hidden>·</span>
             <span className="truncate font-mono text-xs" title={fileName}>{fileName}</span>
           </p>
@@ -197,13 +205,13 @@ export function PayrollExportPreviewPage() {
             Columns in the Excel
           </p>
           <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-bold tabular-nums">
-            {selectedCount}/{PAYROLL_EXPORT_COLUMNS.length}
+            {selectedCount}/{allColumns.length}
           </span>
           <button
             type="button"
             onClick={() => setSelected((prev) => {
               const next: Record<string, boolean> = {};
-              PAYROLL_EXPORT_COLUMNS.forEach((c) => { next[c.key] = !allSelected; });
+              allColumns.forEach((c) => { next[c.key] = !allSelected; });
               return { ...prev, ...next };
             })}
             className="rounded-full border border-border/60 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-brand/40 hover:text-brand"
@@ -212,7 +220,7 @@ export function PayrollExportPreviewPage() {
           </button>
         </div>
         <div className="mt-2.5 flex flex-wrap gap-2">
-          {PAYROLL_EXPORT_COLUMNS.map((c, i) => {
+          {allColumns.map((c, i) => {
             const on = !!selected[c.key];
             return (
               <label

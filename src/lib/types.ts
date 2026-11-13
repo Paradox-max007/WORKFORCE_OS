@@ -615,7 +615,16 @@ export interface PayrollEmployeeSiteVM {
   manually_edited?: boolean;
   /** true → Idle Employees placeholder row (no real site row behind it) */
   synthetic?: boolean;
+  /** approved time card hours at THIS site (null → not entered); present on
+   * the Salary Sheet site-group rows and the Payroll e.sites[] rows */
+  time_card_hours?: number | null;
   lines: PayrollSalaryLineVM[];
+}
+
+/** One entry of a site's time card — hours null → remove the entry */
+export interface SiteTimeCardEntry {
+  employee_id: string;
+  hours: number | null;
 }
 
 /** Employee × month consolidated settlement (advance/deduction/net once) */
@@ -647,6 +656,10 @@ export interface PayrollEmployeeVM {
   unrated_hours: number;
   /** hours without any trade assigned */
   unassigned_hours: number;
+  /** approved TIME CARD hours of the month (Σ per-site entries, entered in
+   * the Payroll page's Time Card dialog) — null → nothing entered yet; the
+   * Final Hours + Balance columns render only when present */
+  time_card_hours: number | null;
   gross_salary: number;
   advance: number;
   deduction: number;
@@ -694,6 +707,8 @@ export interface SalarySheetSiteGroup {
   employees: number;
   total_hours: number;
   gross_salary: number;
+  /** Σ approved time card hours of this site's employees (null → none) */
+  time_card_total?: number | null;
   /** true → the trailing "Idle Employees" group (no current site / unassigned hours) */
   idle?: boolean;
   rows: (PayrollEmployeeSiteVM & {
@@ -794,6 +809,7 @@ export type RealtimeTable =
   | 'employee_salary_assignment'
   | 'payroll_period'
   | 'payroll_employee'
+  | 'payroll_time_card'
   | 'deduction_settings'
   | 'attendance_share_link';
 

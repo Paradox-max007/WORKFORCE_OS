@@ -31,6 +31,23 @@ import {
 import type { AppView } from '@/store/app-store';
 import type { MenuPermissionMap } from '@/lib/types';
 
+/** Permission-only keys — stored in the SAME menu_permission table and set
+ *  with the same set_menu_permission RPC, but NOT rendered as sidebar menus.
+ *  They fine-tune a page the admin can already open (e.g. the Employees page
+ *  scope) and render as extra toggles inside the Manage Permissions dialog. */
+export const EXTRA_PERMISSIONS = [
+  {
+    key: 'employees_all_branches',
+    label: 'All Branches (Employees)',
+    hint: "Employees page lists every branch's employees, not only the granted branches",
+  },
+] as const satisfies readonly { key: string; label: string; hint: string }[];
+
+export type ExtraPermissionKey = (typeof EXTRA_PERMISSIONS)[number]['key'];
+
+/** Every toggleable permission key: sidebar menus + permission-only extras. */
+export type PermissionKey = MenuKey | ExtraPermissionKey;
+
 export interface MenuDef {
   /** sidebar view id (must exist in AppView) */
   id: AppView;
@@ -121,10 +138,12 @@ export const MENU_BY_ID = Object.fromEntries(MENUS.map((m) => [m.id, m])) as Rec
 /** Menus every admin can always reach (shown as "Always available"). */
 export const ALWAYS_ON_MENUS = MENUS.filter((m) => !m.managed && m.defaultOn);
 
-/** Default permission map for an admin with no explicit rows (defaultOn flags). */
+/** Default permission map for an admin with no explicit rows (defaultOn flags,
+ *  plus every permission-only extra defaulting to off). */
 export function defaultPermissionMap(): MenuPermissionMap {
-  const map = {} as Record<MenuKey, boolean>;
+  const map = {} as Record<PermissionKey, boolean>;
   MENU_KEYS.forEach((k) => { map[k] = MENU_BY_ID[k].defaultOn; });
+  EXTRA_PERMISSIONS.forEach((p) => { map[p.key] = false; });
   return map;
 }
 

@@ -310,8 +310,12 @@ export interface UniformEntry {
   renewal_date: string;
 }
 
+import type { PermissionKey } from './menus';
+
+/** Per-admin permission map: every sidebar menu key plus the permission-only
+ *  extras (EXTRA_PERMISSIONS in lib/menus.ts — e.g. employees_all_branches). */
 export type MenuPermissionMap = {
-  [K in MenuKey]: boolean;
+  [K in PermissionKey]: boolean;
 };
 
 // ============================================================================
@@ -969,3 +973,4 @@ export const ATTENDANCE_STATUSES: {
 
 // MENU_KEYS / MenuKey now live in lib/menus.ts (auto-synced with the sidebar).
 export { MENU_KEYS } from './menus';
+export type { PermissionKey, ExtraPermissionKey } from './menus';

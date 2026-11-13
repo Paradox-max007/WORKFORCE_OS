@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import {
-  ArrowLeft, Building2, Clock, CreditCard, Crown, HeartPulse, IdCard,
+  ArrowLeft, Building2, Clock, CreditCard, Crown, GitBranch, HeartPulse, IdCard,
   ImagePlus, Loader2, Plus, Save, Tent, UserRound, Wrench,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -35,7 +35,7 @@ import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  EXPERIENCE_TIERS, SALARY_ROLES, type CampWithCount, type CardType, type Company,
+  EXPERIENCE_TIERS, SALARY_ROLES, type BranchWithCount, type CampWithCount, type CardType, type Company,
   type DocumentStatus, type EmployeeInput, type EmployeeVM, type ExperienceTier,
   type PaymentType, type SalaryRole, type SiteWithCount, type Trade, type TradeRateInput,
 } from '@/lib/types';
@@ -250,6 +250,12 @@ export function EmployeeFormPage() {
   const [saving, setSaving] = useState(false);
   const [allEmployees, setAllEmployees] = useState<EmployeeVM[]>([]);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  // branch-wise assignment — super admins pick ANY branch (then only its sites
+  // are offered); normal admins are limited to THEIR granted branches, so an
+  // employee they add always lands in their assigned branch
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  const [branchSel, setBranchSel] = useState<string>('all');
+  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(null);
   const [camps, setCamps] = useState<CampWithCount[] | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [newSiteName, setNewSiteName] = useState<string | null>(null);
@@ -275,13 +281,16 @@ export function EmployeeFormPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps, trs, cmps, cards] = await Promise.all([
+        const [emps, sts, cps, trs, cmps, cards, brs] = await Promise.all([
           dataApi.listEmployees(),
           dataApi.listSites(),
           dataApi.listCamps(),
           dataApi.listTrades().catch(() => []),
           dataApi.listCompanies().catch(() => [] as Company[]),
           dataApi.listCardTypes().catch(() => [] as CardType[]),
+          // branches: every branch for super admins, only the GRANTED ones for
+          // normal admins
+          dataApi.listBranches().catch(() => [] as BranchWithCount[]),
         ]);
         if (cancelled) return;
         setAllEmployees(emps);
@@ -290,12 +299,36 @@ export function EmployeeFormPage() {
         setTrades(trs);
         setCompanies(cmps);
         setCardTypes(cards);
+        setBranches(brs);
+        // normal admins: a NEW employee defaults to their first granted branch,
+        // and their directly assigned sites (Site Access) join the scope
+        if (!isSuperAdmin) {
+          if (!isEdit) setBranchSel(brs[0]?.id ?? 'all');
+          try {
+            const ids = await dataApi.getSiteAssignments((user as { id: string }).id);
+            if (!cancelled) setAssignedSiteIds(new Set(ids));
+          } catch {
+            if (!cancelled) setAssignedSiteIds(new Set());
+          }
+        }
         if (isEdit && employeeId) {
           const emp = emps.find((e) => e.id === employeeId);
           if (!emp) {
             toast.error('Employee not found');
             navigateToEmployees();
             return;
+          }
+          // preselect the branch that owns the employee's current site (super
+          // admin); a normal admin starts from their own granted branches
+          const empBranch = sts.find((s) => s.id === emp.current_site_id)?.branch_id ?? null;
+          if (isSuperAdmin) {
+            setBranchSel(empBranch ?? 'all');
+          } else {
+            setBranchSel(
+              empBranch && brs.some((b) => b.id === empBranch)
+                ? empBranch
+                : brs[0]?.id ?? 'all',
+            );
           }
           setExistingCode(emp.employee_code);
           setOpeningHours(emp.opening_hours ? String(emp.opening_hours) : '');
@@ -342,6 +375,37 @@ export function EmployeeFormPage() {
   const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
   const activeTrades = useMemo(() => trades.filter((t) => t.is_active), [trades]);
 
+  // EFFECTIVE site scope for normal admins: the sites of their granted
+  // branches PLUS any directly assigned sites (Admin Management → Site
+  // Access). null = unrestricted (super admin). A normal admin can therefore
+  // only place employees inside their own branch.
+  const effectiveSiteIds = useMemo<Set<string> | null>(() => {
+    if (isSuperAdmin) return null;
+    const set = new Set(assignedSiteIds ?? []);
+    const granted = new Set((branches ?? []).map((b) => b.id));
+    (sites ?? []).forEach((s) => {
+      if (s.branch_id && granted.has(s.branch_id)) set.add(s.id);
+    });
+    return set;
+  }, [isSuperAdmin, assignedSiteIds, branches, sites]);
+
+  // sites offered in the form — narrowed by the branch pick and by the
+  // admin's effective scope; the employee's current/lead sites always stay
+  // selectable while editing (never silently drop a stored value)
+  const branchSiteOptions = useMemo(() => {
+    let list = activeSites;
+    if (branchSel !== 'all') list = list.filter((s) => (s.branch_id ?? null) === branchSel);
+    if (effectiveSiteIds) list = list.filter((s) => effectiveSiteIds.has(s.id));
+    const keep = (id: string | null) => {
+      if (!id || list.some((s) => s.id === id)) return;
+      const found = (sites ?? []).find((s) => s.id === id);
+      if (found) list = [found, ...list];
+    };
+    keep(form.current_site_id);
+    keep(form.team_leader_site_id);
+    return list;
+  }, [activeSites, branchSel, effectiveSiteIds, sites, form.current_site_id, form.team_leader_site_id]);
+
   // ---- navigation ---------------------------------------------------------------
   const goBack = () => {
     if (returnTo === 'employee_details' && employeeId) navigateToEmployeeDetails(employeeId);
@@ -357,7 +421,6 @@ export function EmployeeFormPage() {
     setNewSiteName(null);
     setForm((f) => ({ ...f, current_site_id: v === 'none' ? null : v }));
   };
-
   // ---- inline new company (companies live in their own table) ----------------
   const pickCompany = (v: string) => {
     if (v === '__add_new') {
@@ -388,7 +451,12 @@ export function EmployeeFormPage() {
     if (!newSiteName?.trim()) return;
     setAddingSite(true);
     try {
-      const site = await dataApi.createSite(newSiteName.trim(), null, null, null);
+      // a branch is selected → the new site joins that branch, so a normal
+      // admin's inline sites stay inside their own branch
+      const site = await dataApi.createSite(
+        newSiteName.trim(), null, null, null,
+        branchSel !== 'all' ? branchSel : null,
+      );
       toast.success('Site created', { description: site.name });
       setForm((f) => ({ ...f, current_site_id: site.id }));
       setNewSiteName(null);
@@ -764,12 +832,39 @@ export function EmployeeFormPage() {
                 <p className="text-[11px] text-muted-foreground">Companies are managed in their own list — use “Add New” to create one on the fly.</p>
               </div>
               <div className="space-y-2">
+                <Label className="flex items-center gap-1.5">
+                  <GitBranch size={13} className="text-brand" /> Branch
+                </Label>
+                <Select
+                  value={branchSel}
+                  onValueChange={setBranchSel}
+                  disabled={!isSuperAdmin && (branches ?? []).length === 0}
+                >
+                  <SelectTrigger className="h-11 bg-card" aria-label="Branch"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {isSuperAdmin && <SelectItem value="all">All branches</SelectItem>}
+                    {(branches ?? []).map((b) => (
+                      <SelectItem key={b.id} value={b.id}>
+                        {b.name}{!b.is_active ? ' (inactive)' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  {isSuperAdmin
+                    ? 'Pick a branch to narrow the site list — the employee joins the branch of the site you select.'
+                    : (branches ?? []).length > 0
+                      ? 'Employees you add are placed in your assigned branches.'
+                      : 'No branch access yet — pick from your directly assigned sites below.'}
+                </p>
+              </div>
+              <div className="space-y-2">
                 <Label>Current Working Site</Label>
                 <Select value={form.current_site_id ?? 'none'} onValueChange={pickSite}>
                   <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">No site assigned (Idle)</SelectItem>
-                    {activeSites.map((s) => (
+                    {branchSiteOptions.map((s) => (
                       <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
                     ))}
                     <SelectItem value="__add_new" className="text-brand">+ Add New Site…</SelectItem>
@@ -889,7 +984,7 @@ export function EmployeeFormPage() {
                     <SelectTrigger className="h-11 bg-card"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="none">No specific site</SelectItem>
-                      {activeSites.map((s) => (
+                      {branchSiteOptions.map((s) => (
                         <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
                       ))}
                     </SelectContent>

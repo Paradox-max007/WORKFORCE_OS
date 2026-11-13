@@ -13,7 +13,7 @@ import { motion } from 'framer-motion';
 import {
   Building2, Calendar, Crown, Eye, EyeOff, GitBranch,
   KeyRound, Loader2, Lock, Mail, Pencil, Plus, Search, Shield,
-  Trash2, User, X,
+  Trash2, User, Users, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState } from 'react';
@@ -41,9 +41,9 @@ import {
 import { dataApi } from '@/lib/data';
 import { fmtDate, initials } from '@/lib/format';
 import {
-  ALWAYS_ON_MENUS, MENU_BY_ID, MENU_KEYS, defaultPermissionMap,
+  ALWAYS_ON_MENUS, EXTRA_PERMISSIONS, MENU_BY_ID, MENU_KEYS, defaultPermissionMap,
 } from '@/lib/menus';
-import type { BranchWithCount, MenuKey, MenuPermissionMap, Profile, Role, SiteWithCount } from '@/lib/types';
+import type { BranchWithCount, MenuKey, MenuPermissionMap, PermissionKey, Profile, Role, SiteWithCount } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -204,7 +204,7 @@ export function AdminPage() {
   };
 
   // Keep the "Access" column in sync when toggles fire in the permissions dialog
-  const handlePermChanged = (profileId: string, key: MenuKey, allowed: boolean) => {
+  const handlePermChanged = (profileId: string, key: PermissionKey, allowed: boolean) => {
     setPermCache((prev) => ({
       ...prev,
       [profileId]: { ...(prev[profileId] ?? EMPTY_PERMS), [key]: allowed },
@@ -1255,12 +1255,12 @@ function PermissionsDialog({
   /** every branch (super admin sees all) — the per-branch grant/revoke list */
   branches: BranchWithCount[] | null;
   onClose: () => void;
-  onChanged: (profileId: string, key: MenuKey, allowed: boolean) => void;
+  onChanged: (profileId: string, key: PermissionKey, allowed: boolean) => void;
   onBranchesChanged: (profileId: string, branchIds: string[]) => void;
 }) {
   const open = profile !== null;
   const [perms, setPerms] = useState<MenuPermissionMap | null>(null);
-  const [savingKey, setSavingKey] = useState<MenuKey | null>(null);
+  const [savingKey, setSavingKey] = useState<PermissionKey | null>(null);
   // branch grants embedded under the "Branches" menu row
   const [branchAssigned, setBranchAssigned] = useState<Set<string> | null>(null);
   const [savingBranchId, setSavingBranchId] = useState<string | null>(null);
@@ -1293,10 +1293,16 @@ function PermissionsDialog({
     return () => { cancelled = true; };
   }, [profile]);
 
-  // Toggle a single menu — optimistic, instantly saved, reverted on failure
-  const toggle = async (key: MenuKey, allowed: boolean) => {
+  // Toggle a single menu (or a permission-only extra) — optimistic, instantly
+  // saved, reverted on failure
+  const toggle = async (key: PermissionKey, allowed: boolean) => {
     if (!profile || !perms) return;
-    const meta = MENU_META[key];
+    const meta =
+      (MENU_META as Record<string, { label: string; hint: string; icon: LucideIcon }>)[key]
+      ?? {
+        label: EXTRA_PERMISSIONS.find((p) => p.key === key)?.label ?? key,
+        hint: '',
+      };
     const previous = perms[key];
     setSavingKey(key);
     setPerms({ ...perms, [key]: allowed });
@@ -1455,6 +1461,38 @@ function PermissionsDialog({
                     />
                   </div>
                 </motion.div>
+
+                {/* ---- all-branches employees grant embedded under the Employees
+                    menu row — by default a normal admin only sees the employees
+                    of the branches granted above; this switch widens the
+                    Employees page to every branch. */}
+                {key === 'employees' && perms !== null && (
+                  <div className="ml-5 mr-1 mb-1.5 overflow-hidden rounded-lg border border-brand/20 bg-brand/[0.03]">
+                    <div className="flex items-center justify-between gap-3 border-b border-brand/15 bg-brand/[0.05] px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-brand">
+                          <Users size={11} aria-hidden /> All-branches view
+                        </p>
+                        <p className="mt-0.5 text-[11px] leading-tight text-muted-foreground">
+                          By default <span className="font-medium text-foreground">{profile?.name}</span> only sees
+                          employees of the granted branches — flip this on to list every branch&apos;s employees.
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2 pl-2">
+                        {savingKey === 'employees_all_branches' && (
+                          <Loader2 size={13} className="animate-spin text-muted-foreground" aria-hidden />
+                        )}
+                        <Switch
+                          checked={perms.employees_all_branches === true}
+                          disabled={savingKey === 'employees_all_branches'}
+                          onCheckedChange={(v) => { void toggle('employees_all_branches', v === true); }}
+                          aria-label="Grant viewing of all branches' employees"
+                          className="data-[state=checked]:bg-brand [&_[data-slot=switch-thumb]]:bg-white!"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* ---- branch grants embedded under the Branches menu row ----
                     Toggling a branch here instantly grants / revokes this

@@ -1514,8 +1514,9 @@ export function AttendancePage() {
                 )}
               </SelectContent>
             </Select>
-            {/* View by Supervisors — who marks which site (drill-down:
-                supervisor → their sites → click a site to show only it) */}
+            {/* View by Supervisors — SUPER ADMIN ONLY (who marks which site;
+                drill-down: supervisor → their sites → click a site to show it) */}
+            {isSuperAdmin && (
             <Popover
               open={supOpen}
               onOpenChange={(o) => {
@@ -1657,6 +1658,7 @@ export function AttendancePage() {
                 </div>
               </PopoverContent>
             </Popover>
+            )}
             <Button
               variant="outline"
               className="h-10 gap-1.5"

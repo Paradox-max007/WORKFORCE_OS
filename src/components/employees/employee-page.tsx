@@ -6,7 +6,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Crown, FileSpreadsheet, Loader2, MapPin, Pencil, Plus, Search, Tent, Trash2,
+  Building2, Crown, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil, Plus, Search, Tent, Trash2,
   UserRound, UserX, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -24,7 +24,7 @@ import { initials } from '@/lib/format';
 import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
 import { employeeExportFileName } from '@/lib/export-xlsx';
 import { cn } from '@/lib/utils';
-import type { CampWithCount, CardType, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { BranchWithCount, CampWithCount, CardType, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -39,6 +39,7 @@ export function EmployeePage() {
 
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
   const [camps, setCamps] = useState<CampWithCount[] | null>(null);
   const [cardTypes, setCardTypes] = useState<CardType[]>([]);
   const [search, setSearch] = useState('');
@@ -48,6 +49,12 @@ export function EmployeePage() {
   const [countryFilter, setCountryFilter] = useState('all');
   const [campFilter, setCampFilter] = useState('all');
   const [payFilter, setPayFilter] = useState('all');
+  // branch-wise separation — super admins pick a branch from the top row;
+  // normal admins are scoped to their granted branches (or everything with
+  // the employees_all_branches permission)
+  const [branchFilter, setBranchFilter] = useState('all');
+  const [siteFilter, setSiteFilter] = useState('all');
+  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(null);
   const [exporting, setExporting] = useState(false);
   const [page, setPage] = useState(1);
   const PER_PAGE = 20;
@@ -75,11 +82,14 @@ export function EmployeePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps, cards] = await Promise.all([
+        const [emps, sts, cps, cards, brs] = await Promise.all([
           dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps(),
           dataApi.listCardTypes().catch(() => [] as CardType[]),
+          // branches: every branch for super admins, only the GRANTED branches
+          // for normal admins (used for the scoping below)
+          dataApi.listBranches().catch(() => [] as BranchWithCount[]),
         ]);
-        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); setCardTypes(cards); }
+        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); setCardTypes(cards); setBranches(brs); }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
       }
@@ -88,8 +98,46 @@ export function EmployeePage() {
 
   }, [realtimeVersion]);
 
+  // normal admins: their directly assigned sites (Site Access) — joins the
+  // granted-branch sites to form the effective scope below
+  useEffect(() => {
+    if (user?.role === 'super_admin') { setAssignedSiteIds(null); return; }
+    if (!user) return;
+    let cancelled = false;
+    dataApi.getSiteAssignments(user.id)
+      .then((ids) => { if (!cancelled) setAssignedSiteIds(new Set(ids)); })
+      .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
+    return () => { cancelled = true; };
+  }, [user, realtimeVersion]);
+
   const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
   const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
+
+  const isSuperAdmin = user?.role === 'super_admin';
+  // super admins always see everything; normal admins only with the explicit
+  // employees_all_branches grant (Admin Management → Employees → All-branches view)
+  const menuPermissions = useAuthStore((s) => s.menuPermissions);
+  const viewAllBranches = isSuperAdmin || menuPermissions?.employees_all_branches === true;
+
+  // site id → owning branch id (an employee's branch = their site's branch)
+  const branchIdOfSite = useMemo(
+    () => new Map((sites ?? []).map((s) => [s.id, s.branch_id ?? null] as const)),
+    [sites],
+  );
+
+  // EFFECTIVE employee scope for normal admins without the all-branches grant:
+  // the sites of their granted branches (listBranches is already scoped to
+  // them) PLUS any directly assigned sites (Admin Management → Site Access).
+  // null = unrestricted (super admin / all-branches grant).
+  const effectiveSiteIds = useMemo<Set<string> | null>(() => {
+    if (viewAllBranches) return null;
+    const set = new Set(assignedSiteIds ?? []);
+    const grantedBranchIds = new Set((branches ?? []).map((b) => b.id));
+    (sites ?? []).forEach((s) => {
+      if (s.branch_id && grantedBranchIds.has(s.branch_id)) set.add(s.id);
+    });
+    return set;
+  }, [viewAllBranches, assignedSiteIds, branches, sites]);
 
   // countries present in the directory, grouped by region (Africans, Asians, …)
   const regionCountries = useMemo(
@@ -119,6 +167,16 @@ export function EmployeePage() {
     const q = debouncedSearch.toLowerCase().trim();
     const region = regionFilter === 'all' ? null : NATIONALITY_REGIONS.find((r) => r.key === regionFilter) ?? null;
     return list.filter((e) => {
+      // branch scope — normal admins (without the all-branches grant) only see
+      // employees working at one of their effective sites
+      if (effectiveSiteIds && (!e.current_site_id || !effectiveSiteIds.has(e.current_site_id))) return false;
+      // super-admin Branch dropdown
+      if (branchFilter !== 'all') {
+        const b = e.current_site_id ? branchIdOfSite.get(e.current_site_id) : null;
+        if (b !== branchFilter) return false;
+      }
+      // site filter (works for every admin, combined with all other filters)
+      if (siteFilter !== 'all' && e.current_site_id !== siteFilter) return false;
       if (statusFilter === 'active' && e.status !== 'active') return false;
       if (statusFilter === 'working' && (e.status !== 'active' || !e.current_site_id)) return false;
       if (statusFilter === 'idle' && (e.status !== 'active' || e.current_site_id)) return false;
@@ -150,7 +208,7 @@ export function EmployeePage() {
       }
       return true;
     });
-  }, [employees, debouncedSearch, statusFilter, regionFilter, countryFilter, campFilter, payFilter]);
+  }, [employees, debouncedSearch, statusFilter, regionFilter, countryFilter, campFilter, payFilter, effectiveSiteIds, branchFilter, siteFilter, branchIdOfSite]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
   const safePage = Math.min(page, totalPages);
@@ -163,10 +221,33 @@ export function EmployeePage() {
 
   const campOptions = useMemo(() => (camps ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)), [camps]);
 
+  // sites offered in the Site filter — normal admins (no all-branches grant)
+  // only get their effective sites; super admins get the selected branch's
+  // sites (or every site when "All branches" is selected)
+  const siteFilterOptions = useMemo(() => {
+    let list = activeSites;
+    if (effectiveSiteIds) list = list.filter((s) => effectiveSiteIds.has(s.id));
+    else if (branchFilter !== 'all') list = list.filter((s) => (s.branch_id ?? null) === branchFilter);
+    return list.slice().sort((a, b) => a.name.localeCompare(b.name));
+  }, [activeSites, effectiveSiteIds, branchFilter]);
+
+  // switching the branch makes a foreign site selection meaningless — drop it
+  const changeBranchFilter = (v: string) => {
+    setBranchFilter(v);
+    if (siteFilter !== 'all' && !siteFilterOptions.some((s) => s.id === siteFilter)) setSiteFilter('all');
+    setPage(1);
+  };
+
   /** filename chips mirror the active filters so exports are self-describing */
   const exportChips = (): string[] => {
     const chips: string[] = [];
     if (debouncedSearch.trim()) chips.push(`Search-${debouncedSearch.trim()}`);
+    if (branchFilter !== 'all') {
+      chips.push(`Branch-${(branches ?? []).find((b) => b.id === branchFilter)?.name ?? 'Branch'}`);
+    }
+    if (siteFilter !== 'all') {
+      chips.push(`Site-${(sites ?? []).find((s) => s.id === siteFilter)?.name ?? 'Site'}`);
+    }
     if (statusFilter !== 'all') chips.push(`Status-${statusFilter.replace(/_/g, ' ')}`);
     if (regionFilter === '__others__') chips.push('Nationality-Others');
     else if (regionFilter !== 'all') {
@@ -226,8 +307,7 @@ export function EmployeePage() {
     }
   };
 
-  const isSuperAdmin = user?.role === 'super_admin';
-  const loading = !employees || !sites;
+  const loading = !employees || !sites || (!isSuperAdmin && assignedSiteIds === null && !viewAllBranches);
 
   return (
     <div className="mx-auto max-w-[1600px]">
@@ -260,6 +340,30 @@ export function EmployeePage() {
           table (same behaviour as the Payroll page) */}
       <div className="sticky top-16 z-30 mb-4 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
         <div className="flex flex-wrap items-center gap-2">
+        {/* BRANCH dropdown — SUPER ADMIN ONLY: All branches + every available
+            branch; the list (and the Site options) follow the selection */}
+        {isSuperAdmin && (
+          <Select value={branchFilter} onValueChange={changeBranchFilter}>
+            <SelectTrigger
+              className="h-10 w-44 bg-card"
+              aria-label="Filter employees by branch"
+              title="Show only the selected branch's employees"
+            >
+              <div className="flex min-w-0 items-center gap-1.5">
+                <GitBranch size={14} className="shrink-0 text-brand" />
+                <SelectValue />
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Branches</SelectItem>
+              {(branches ?? []).map((b) => (
+                <SelectItem key={b.id} value={b.id}>
+                  {b.name}{!b.is_active ? ' (inactive)' : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
         <div className="relative min-w-56 flex-1 sm:max-w-xs">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -332,8 +436,26 @@ export function EmployeePage() {
             <SelectItem value="__none__">No camp assigned</SelectItem>
           </SelectContent>
         </Select>
-        {(search || statusFilter !== 'all' || regionFilter !== 'all' || countryFilter !== 'all' || campFilter !== 'all' || payFilter !== 'all') && (
-          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setStatusFilter('all'); setRegionFilter('all'); setCountryFilter('all'); setCampFilter('all'); setPayFilter('all'); setPage(1); }}>
+        {/* SITE filter — selecting a site lists that site's employees on top
+            of every other active filter */}
+        <Select value={siteFilter} onValueChange={(v) => { setSiteFilter(v); setPage(1); }}>
+          <SelectTrigger className="h-10 w-44 bg-card" aria-label="Filter employees by site">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <MapPin size={13} className="shrink-0 text-muted-foreground" />
+              <SelectValue />
+            </div>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Sites</SelectItem>
+            {siteFilterOptions.map((s) => (
+              <SelectItem key={s.id} value={s.id}>
+                {s.name} ({s.employee_count})
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {(search || branchFilter !== 'all' || siteFilter !== 'all' || statusFilter !== 'all' || regionFilter !== 'all' || countryFilter !== 'all' || campFilter !== 'all' || payFilter !== 'all') && (
+          <Button variant="outline" size="sm" onClick={() => { setSearch(''); setBranchFilter('all'); setSiteFilter('all'); setStatusFilter('all'); setRegionFilter('all'); setCountryFilter('all'); setCampFilter('all'); setPayFilter('all'); setPage(1); }}>
             <X size={14} className="mr-1" /> Reset
           </Button>
         )}
@@ -347,7 +469,13 @@ export function EmployeePage() {
         <EmptyState
           icon={<UserRound size={22} />}
           title="No employees found"
-          description={search || statusFilter !== 'all' ? 'Try adjusting your filters.' : 'Add your first employee to get started.'}
+          description={
+            !viewAllBranches && effectiveSiteIds !== null && effectiveSiteIds.size === 0
+              ? 'You have no branch or site access yet — ask a super admin to grant your branches (Admin Management → Manage Permissions → Branch access).'
+              : search || statusFilter !== 'all' || branchFilter !== 'all' || siteFilter !== 'all'
+                ? 'Try adjusting your filters.'
+                : 'Add your first employee to get started.'
+          }
           action={
             !search && statusFilter === 'all' ? (
               <Button onClick={openAdd} variant="outline"><Plus size={15} className="mr-1.5" /> Add Employee</Button>

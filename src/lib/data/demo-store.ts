@@ -21,6 +21,7 @@ import {
   type LeaveRequest,
   type MenuKey,
   type Notification,
+  type PermissionKey,
   type Profile,
   type SalaryRole,
   type SharedSheetSnapshot,
@@ -157,7 +158,7 @@ export interface DemoDB {
   leaveRequests: LeaveRequest[];
   cancellationRequests: CancellationRequest[];
   uniforms: UniformEntry[];
-  menuPermissions: { profile_id: string; menu_key: MenuKey; allowed: boolean }[];
+  menuPermissions: { profile_id: string; menu_key: PermissionKey; allowed: boolean }[];
   siteAssignments: { profile_id: string; site_id: string }[];
   /** branches (regional site groups) + which branches each admin may access */
   branches: Branch[];

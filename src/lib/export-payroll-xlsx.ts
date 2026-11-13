@@ -37,10 +37,14 @@ export function payrollNetPayableOf(e: PayrollEmployeeVM): number {
 
 /** BALANCE = net payable − time card extra
  *  (extra = (final hours − total hours) × rate, per the user's formula).
- *  null → no time card entered for the employee. */
+ *  No difference (extra = 0) → the balance is 0: the net salary amount is
+ *  NOT repeated in the Balance column — a balance only displays when the
+ *  time card actually differs. null → no time card entered. */
 export function payrollBalanceOf(e: PayrollEmployeeVM): number | null {
   if (e.time_card_hours == null) return null;
-  return round2(payrollNetPayableOf(e) - (e.time_card_amount ?? 0));
+  const extra = e.time_card_amount ?? 0;
+  if (extra === 0) return 0;
+  return round2(payrollNetPayableOf(e) - extra);
 }
 
 /** The effective hourly rate behind the Balance column (gross ÷ total hours). */

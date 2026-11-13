@@ -37,7 +37,8 @@
 //       Final Hours = Σ approved time card hours of the month
 //       extra = Σ per-site (Final − site hours) × rate
 //       Net payable = attendance net + max(extra, 0)
-//       Balance = net payable − extra
+//       Balance = net payable − extra — 0 while the difference is 0 (the
+//       amount only shows when the time card actually differs)
 //   • amounts everywhere are PLAIN numbers (no “AED” prefix — the whole
 //     page uses one currency by default)
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
@@ -1643,7 +1644,7 @@ export function PayrollPage() {
                     {hasTimeCard && (
                       <TableHead
                         className="text-right"
-                        title="(Final Hours − Total Hours) × effective rate − Net Payable — effective rate = gross ÷ total hours"
+                        title="(Final Hours − Total Hours) × effective rate − Net Payable — effective rate = gross ÷ total hours; 0 while the difference is 0 (shown only when the time card differs)"
                       >
                         Balance
                       </TableHead>
@@ -1739,8 +1740,10 @@ export function PayrollPage() {
                           </TableCell>
                         )}
                         {/* Balance = net payable − time card extra
-                            (extra = (Final − Total) × rate); tooltip shows
-                            the full arithmetic */}
+                            (extra = (Final − Total) × rate). A ZERO difference
+                            shows a plain muted 0 — the amount only displays
+                            when the time card actually differs; the tooltip
+                            shows the full arithmetic */}
                         {hasTimeCard && (
                           <TableCell className="text-right">
                             {(() => {
@@ -1749,6 +1752,16 @@ export function PayrollPage() {
                                 return <span className="text-muted-foreground">—</span>;
                               }
                               const extra = payrollTimeCardExtraOf(e);
+                              if (extra === 0) {
+                                return (
+                                  <span
+                                    className="font-mono text-sm text-muted-foreground"
+                                    title="Time card matches attendance — no difference, no balance"
+                                  >
+                                    {fmtMoney(0)}
+                                  </span>
+                                );
+                              }
                               return (
                                 <span
                                   className={cn(

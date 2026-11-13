@@ -38,7 +38,9 @@
 //       extra = Σ per-site (Final − site hours) × rate
 //       Net payable = attendance net + max(extra, 0)
 //       Balance = net payable − extra — 0 while the difference is 0 (the
-//       amount only shows when the time card actually differs)
+//       amount only shows when the time card actually differs); when it
+//       differs, the cell shows the FULL CALCULATION the same way:
+//       1,220.00 − 60.00 = 1,160.00 (a negative extra appears as +|extra|)
 //   • amounts everywhere are PLAIN numbers (no “AED” prefix — the whole
 //     page uses one currency by default)
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
@@ -1644,7 +1646,7 @@ export function PayrollPage() {
                     {hasTimeCard && (
                       <TableHead
                         className="text-right"
-                        title="(Final Hours − Total Hours) × effective rate − Net Payable — effective rate = gross ÷ total hours; 0 while the difference is 0 (shown only when the time card differs)"
+                        title="Net Payable − time card amount ((Final Hours − Total Hours) × rate) — 0 while the difference is 0 (the amount only shows when the time card actually differs); the calculation renders inline in the cell"
                       >
                         Balance
                       </TableHead>
@@ -1742,8 +1744,11 @@ export function PayrollPage() {
                         {/* Balance = net payable − time card extra
                             (extra = (Final − Total) × rate). A ZERO difference
                             shows a plain muted 0 — the amount only displays
-                            when the time card actually differs; the tooltip
-                            shows the full arithmetic */}
+                            when the time card actually differs; when it
+                            differs the FULL ARITHMETIC renders inline above
+                            the value (same style as Net Payable). A negative
+                            extra is subtracted as a PLUS (−(−x) = +x — it is
+                            the amount recovered next month) */}
                         {hasTimeCard && (
                           <TableCell className="text-right">
                             {(() => {
@@ -1762,17 +1767,37 @@ export function PayrollPage() {
                                   </span>
                                 );
                               }
+                              const operand = Math.abs(extra); // |extra| — shown with the effective sign
                               return (
-                                <span
-                                  className={cn(
-                                    'font-mono text-sm font-semibold',
-                                    bal > 0 ? 'text-amber-600 dark:text-amber-400'
-                                      : bal < 0 ? 'text-rose-500' : 'text-muted-foreground',
-                                  )}
+                                <div
+                                  className="flex flex-col items-end leading-tight"
                                   title={`net payable ${fmtMoney(payrollNetPayableOf(e))} − time card amount ${fmtMoney(extra)} = ${fmtMoney(bal)}`}
                                 >
-                                  {fmtMoney(bal)}
-                                </span>
+                                  <span className="font-mono text-[11px] text-muted-foreground">
+                                    {fmtMoney(payrollNetPayableOf(e))}{' '}
+                                    <span aria-hidden>{extra > 0 ? '−' : '+'}</span>{' '}
+                                    <span
+                                      className={cn(
+                                        'font-semibold',
+                                        extra > 0
+                                          ? 'text-amber-600 dark:text-amber-400'
+                                          : 'text-rose-500',
+                                      )}
+                                    >
+                                      {fmtMoney(operand)}
+                                    </span>{' '}
+                                    <span aria-hidden>=</span>
+                                  </span>
+                                  <span
+                                    className={cn(
+                                      'font-mono text-sm font-semibold',
+                                      bal > 0 ? 'text-amber-600 dark:text-amber-400'
+                                        : bal < 0 ? 'text-rose-500' : 'text-muted-foreground',
+                                    )}
+                                  >
+                                    {fmtMoney(bal)}
+                                  </span>
+                                </div>
                               );
                             })()}
                           </TableCell>

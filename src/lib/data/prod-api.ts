@@ -172,7 +172,19 @@ export const prodApi = {
 
   async signIn(email: string, password: string): Promise<Profile> {
     const { error } = await sb().auth.signInWithPassword({ email, password });
-    if (error) throw new Error(error.message);
+    if (error) {
+      // GoTrue 500 "Database error querying schema" = the account's auth row
+      // has NULL in a column Auth scans as a non-nullable string (typical
+      // for SQL-seeded logins). Point the admin at the one-file fix.
+      if (/database error querying schema/i.test(error.message)) {
+        throw new Error(
+          "This account's login record is damaged (a known Supabase issue for SQL-seeded accounts). " +
+            'Run supabase/migrations/20261113b_auth_user_null_backfill.sql in the Supabase SQL editor to repair all accounts at once, ' +
+            'or ask a super admin to reset this password from Admin Management (it auto-repairs the account).',
+        );
+      }
+      throw new Error(error.message);
+    }
     const profile = await this.getSessionProfile();
     if (!profile) throw new Error('Signed in but no profile found — did you run the schema.sql migration?');
     if (profile.role === 'pending') {

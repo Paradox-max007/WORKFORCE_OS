@@ -57,7 +57,7 @@ declare
   v_employee_id uuid;
   v_hours numeric;
   v_pe public.payroll_employee;
-  v_emp public.employee;
+  v_emp record;
   v_site_name text;
   v_actor text;
   v_saved int := 0;
@@ -206,10 +206,8 @@ begin
     returning * into v_next_period;
 
     if v_next_period.status = 'finalized' then
-      raise exception (
-        'The % payroll is already finalized — reopen it before changing time card carryovers',
-        v_next_month_name
-      );
+      raise exception 'The % payroll is already finalized — reopen it before changing time card carryovers',
+        v_next_month_name;
     end if;
 
     v_note := '[Time card ' || v_month_name || '] time card ' || v_tc_hours::text

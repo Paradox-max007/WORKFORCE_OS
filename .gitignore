@@ -72,3 +72,7 @@ scripts/pgdata_att_free_text/
 scripts/pgdata_share_links/
 scripts/pgdata_paper_share/
 scripts/pgdata_share_dedup/
+
+# local test postgres clusters + agent tool artifacts
+scripts/pgdata_*/
+tool-results/

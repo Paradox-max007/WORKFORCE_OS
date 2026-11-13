@@ -6,10 +6,10 @@
 
 import { motion } from 'framer-motion';
 import {
-  Building2, CalendarDays, CheckCircle2, Clock, Crown, Eye, MapPin,
+  Building2, CalendarDays, CheckCircle2, Clock, Crown, Eye, GitBranch, MapPin,
   UserX, Users, XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -22,8 +22,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState, SectionTitle, StatCard } from '@/components/shared/primitives';
 import { dataApi } from '@/lib/data';
 import { cn } from '@/lib/utils';
-import type { Attendance, EmployeeVM, MonthlySummaryRow, SiteWithCount } from '@/lib/types';
+import type { Attendance, BranchWithCount, EmployeeVM, MonthlySummaryRow, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
+import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -75,6 +76,8 @@ interface DayOption {
 export function DashboardPage() {
   const navigateTo = useAppStore((s) => s.navigateTo);
   const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
+  const user = useAuthStore((s) => s.user);
+  const menuPermissions = useAuthStore((s) => s.menuPermissions);
   const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site']);
 
   const now = new Date();
@@ -90,6 +93,14 @@ export function DashboardPage() {
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [attendance, setAttendance] = useState<Attendance[] | null>(null);
   const [summary, setSummary] = useState<MonthlySummaryRow[] | null>(null);
+  /** branches offered in the header dropdown — every branch for super admins,
+   *  only the granted branches for normal admins (listBranches is scoped) */
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  /** Branch-wise view: "all" shows every branch the admin may see; a specific
+   *  branch scopes EVERY metric on this page to that branch's sites. */
+  const [branchFilter, setBranchFilter] = useState('all');
+  /** normal admins: their directly assigned sites (Admin Management → Site Access) */
+  const [assignedSiteIds, setAssignedSiteIds] = useState<Set<string> | null>(null);
 
   const monthStr = `${year}-${String(month + 1).padStart(2, '0')}`;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -98,17 +109,19 @@ export function DashboardPage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [emps, sts, sum] = await Promise.all([
+      const [emps, sts, sum, brs] = await Promise.all([
         dataApi.listEmployees(),
         dataApi.listSites(),
         // 48 months of per-status counts — covers every year the header
         // picker offers (now-2 … now+1) for the year drill-down view
         dataApi.getMonthlyAttendanceSummary(48),
+        dataApi.listBranches().catch(() => [] as BranchWithCount[]),
       ]);
       if (!cancelled) {
         setEmployees(emps);
         setSites(sts);
         setSummary(sum);
+        setBranches(brs);
       }
     })().catch(() => undefined);
     return () => { cancelled = true; };
@@ -122,6 +135,18 @@ export function DashboardPage() {
       .catch(() => { if (!cancelled) setAttendance([]); });
     return () => { cancelled = true; };
   }, [monthStr, realtimeVersion]);
+
+  // normal admins: their directly assigned sites join the granted-branch
+  // sites to form the effective dashboard scope (super admins skip this)
+  useEffect(() => {
+    if (user?.role === 'super_admin') { setAssignedSiteIds(null); return; }
+    if (!user) return;
+    let cancelled = false;
+    dataApi.getSiteAssignments(user.id)
+      .then((ids) => { if (!cancelled) setAssignedSiteIds(new Set(ids)); })
+      .catch(() => { if (!cancelled) setAssignedSiteIds(new Set()); });
+    return () => { cancelled = true; };
+  }, [user, realtimeVersion]);
 
   // ---- day options ----------------------------------------------------------
   const dayOptions: DayOption[] = useMemo(() => {
@@ -146,9 +171,77 @@ export function DashboardPage() {
   const effectiveDay = Math.min(day, daysInMonth);
   const selectedDate = `${monthStr}-${String(effectiveDay).padStart(2, '0')}`;
 
+  // ---- branch scope ------------------------------------------------------------
+  const isSuperAdmin = user?.role === 'super_admin';
+  // super admins (and normal admins with the employees_all_branches grant)
+  // see everything; other normal admins are scoped to their granted branches
+  // + directly assigned sites — the same rule as the Employees page
+  const viewAllBranches = isSuperAdmin || menuPermissions?.employees_all_branches === true;
+
+  const effectiveSiteIds = useMemo<Set<string> | null>(() => {
+    if (viewAllBranches) return null;
+    const set = new Set(assignedSiteIds ?? []);
+    const grantedBranchIds = new Set((branches ?? []).map((b) => b.id));
+    (sites ?? []).forEach((s) => {
+      if (s.branch_id && grantedBranchIds.has(s.branch_id)) set.add(s.id);
+    });
+    return set;
+  }, [viewAllBranches, assignedSiteIds, branches, sites]);
+
+  // a specific branch selection narrows the scope to that branch's sites
+  const branchSiteIds = useMemo(() => (
+    branchFilter === 'all'
+      ? null
+      : new Set((sites ?? []).filter((s) => (s.branch_id ?? null) === branchFilter).map((s) => s.id))
+  ), [branchFilter, sites]);
+
+  // FINAL site scope — null = unrestricted (All Branches for an unrestricted admin)
+  const scopeSiteIds = useMemo<Set<string> | null>(() => {
+    if (branchSiteIds && effectiveSiteIds) {
+      return new Set([...branchSiteIds].filter((id) => effectiveSiteIds.has(id)));
+    }
+    return branchSiteIds ?? effectiveSiteIds;
+  }, [branchSiteIds, effectiveSiteIds]);
+
+  // ---- year-view records for branch-scoped dashboards ---------------------------
+  // The 48-month summary is pre-aggregated (no per-employee rows), so when a
+  // scope is active the year chart aggregates the selected year's monthly
+  // records client-side instead. Cached per month; cleared on data changes.
+  const yearCacheRef = useRef(new Map<string, Attendance[]>());
+  const [yearRecords, setYearRecords] = useState<Attendance[] | null>(null);
+
+  // declared BEFORE the loader so a data change clears the cache first
+  useEffect(() => { yearCacheRef.current.clear(); }, [realtimeVersion]);
+
+  useEffect(() => {
+    if (!scopeSiteIds) { setYearRecords(null); return; }
+    let cancelled = false;
+    (async () => {
+      const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);
+      const cache = yearCacheRef.current;
+      const missing = months.filter((m) => !cache.has(m));
+      if (missing.length > 0) {
+        const results = await Promise.all(
+          missing.map((m) => dataApi.getMonthAttendance(m).catch(() => [] as Attendance[])),
+        );
+        missing.forEach((m, i) => cache.set(m, results[i]));
+      }
+      if (cancelled) return;
+      setYearRecords(months.flatMap((m) => cache.get(m) ?? []));
+    })();
+    return () => { cancelled = true; };
+  }, [scopeSiteIds, year, realtimeVersion]);
+
   // ---- derived metrics --------------------------------------------------------
-  const activeEmployees = employees ?? [];
-  const dayRecords = (attendance ?? []).filter((a) => a.date === selectedDate);
+  // every metric below flows through the branch-scoped employee list
+  const activeEmployees = useMemo(() => {
+    const list = employees ?? [];
+    if (!scopeSiteIds) return list;
+    return list.filter((e) => e.current_site_id && scopeSiteIds.has(e.current_site_id));
+  }, [employees, scopeSiteIds]);
+  const scopedEmpIds = useMemo(() => new Set(activeEmployees.map((e) => e.id)), [activeEmployees]);
+
+  const dayRecords = (attendance ?? []).filter((a) => a.date === selectedDate && scopedEmpIds.has(a.employee_id));
   const countBy = (status: string) => dayRecords.filter((a) => a.status === status).length;
 
   const idleEmployees = activeEmployees.filter((e) => e.status === 'active' && !e.current_site_id);
@@ -156,9 +249,32 @@ export function DashboardPage() {
   const pendingEmployees = activeEmployees.filter((e) => e.status === 'pending_deletion');
 
   // ---- drillable Monthly Attendance chart data --------------------------------
-  // YEAR: 12 calendar months of the selected year (Jan–Dec buckets from the
-  // 48-month summary). Clicking a month bar zooms into that month.
+  // YEAR: 12 calendar months of the selected year (Jan–Dec buckets). When a
+  // branch scope is active the buckets aggregate the year's records for the
+  // scoped employees (the 48-month summary has no per-employee rows);
+  // otherwise the pre-aggregated summary is used. Clicking a month bar zooms
+  // into that month.
   const yearChartData = useMemo(() => {
+    const months = Array.from({ length: 12 }, (_, i) => ({
+      month: `${year}-${String(i + 1).padStart(2, '0')}`,
+      label: MONTH_NAMES[i].slice(0, 3),
+    }));
+    if (scopeSiteIds) {
+      const buckets = new Map<number, { present: number; absent: number }>();
+      (yearRecords ?? []).forEach((a) => {
+        if (a.status !== 'present' && a.status !== 'absent') return;
+        if (!scopedEmpIds.has(a.employee_id)) return;
+        const m = parseInt(a.date.slice(5, 7), 10);
+        const b = buckets.get(m) ?? { present: 0, absent: 0 };
+        b[a.status] += 1;
+        buckets.set(m, b);
+      });
+      return months.map((mm, i) => ({
+        ...mm,
+        present: buckets.get(i + 1)?.present ?? 0,
+        absent: buckets.get(i + 1)?.absent ?? 0,
+      }));
+    }
     const buckets = new Map<number, { present: number; absent: number }>();
     (summary ?? []).forEach((row) => {
       const [y, m] = row.month.split('-').map((v) => parseInt(v, 10));
@@ -167,13 +283,12 @@ export function DashboardPage() {
       if (row.status === 'present' || row.status === 'absent') b[row.status] = row.count;
       buckets.set(m, b);
     });
-    return Array.from({ length: 12 }, (_, i) => ({
-      month: `${year}-${String(i + 1).padStart(2, '0')}`,
-      label: MONTH_NAMES[i].slice(0, 3),
+    return months.map((mm, i) => ({
+      ...mm,
       present: buckets.get(i + 1)?.present ?? 0,
       absent: buckets.get(i + 1)?.absent ?? 0,
     }));
-  }, [summary, year]);
+  }, [scopeSiteIds, yearRecords, scopedEmpIds, summary, year]);
 
   // MONTH (default): one stacked bar per day, day 1 → last day (28/29/30/31),
   // aggregated from the month's attendance records already loaded for the
@@ -182,6 +297,7 @@ export function DashboardPage() {
     const byDay = new Map<number, { present: number; absent: number }>();
     (attendance ?? []).forEach((a) => {
       if (a.status !== 'present' && a.status !== 'absent') return;
+      if (!scopedEmpIds.has(a.employee_id)) return;
       const d = parseInt(a.date.slice(8), 10);
       const b = byDay.get(d) ?? { present: 0, absent: 0 };
       b[a.status] += 1;
@@ -193,7 +309,7 @@ export function DashboardPage() {
       present: byDay.get(i + 1)?.present ?? 0,
       absent: byDay.get(i + 1)?.absent ?? 0,
     }));
-  }, [attendance, daysInMonth, monthStr]);
+  }, [attendance, daysInMonth, monthStr, scopedEmpIds]);
 
   // DAY: the selected day's record — one stacked bar per site. The site is the
   // employee's current site, the same snapshot the site-wise breakdown card
@@ -204,6 +320,7 @@ export function DashboardPage() {
     const bySite = new Map<string, { present: number; absent: number }>();
     (attendance ?? []).forEach((a) => {
       if (a.date !== selectedDate || (a.status !== 'present' && a.status !== 'absent')) return;
+      if (!scopedEmpIds.has(a.employee_id)) return;
       const sid = empSite.get(a.employee_id) ?? 'none';
       const b = bySite.get(sid) ?? { present: 0, absent: 0 };
       b[a.status] += 1;
@@ -216,7 +333,7 @@ export function DashboardPage() {
         absent: counts.absent,
       }))
       .sort((a, b) => (b.present + b.absent) - (a.present + a.absent));
-  }, [attendance, selectedDate, sites, employees]);
+  }, [attendance, selectedDate, sites, employees, scopedEmpIds]);
 
   const chartData = level === 'year' ? yearChartData : level === 'month' ? monthChartData : dayChartData;
   const chartHasData = chartData.some((d) => d.present > 0 || d.absent > 0);
@@ -243,11 +360,11 @@ export function DashboardPage() {
     { name: 'Pending Deletion', value: pendingEmployees.length, color: '#71717a' },
   ].filter((d) => d.value > 0);
 
-  // site breakdown (active sites with employees only)
+  // site breakdown (active sites with employees only — follows the branch scope)
   const siteBreakdown = useMemo(() => {
     if (!sites) return null;
     return sites
-      .filter((s) => s.is_active)
+      .filter((s) => s.is_active && (!scopeSiteIds || scopeSiteIds.has(s.id)))
       .map((s) => {
         const emps = activeEmployees.filter((e) => e.current_site_id === s.id);
         return {
@@ -260,13 +377,20 @@ export function DashboardPage() {
       })
       .filter((row) => row.total > 0)
       .sort((a, b) => b.total - a.total);
-  }, [sites, activeEmployees]);
+  }, [sites, activeEmployees, scopeSiteIds]);
 
   const yearOptions = [now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
-  const loading = !employees || !attendance || !sites || !summary;
-  const subtitle = dayRecords.length
+  // normal admins: also wait for the site assignments; a branch-scoped view
+  // also waits for its 12 months of year records
+  const loading = !employees || !attendance || !sites || !summary
+    || (!viewAllBranches && assignedSiteIds === null)
+    || (scopeSiteIds !== null && yearRecords === null);
+  const branchName = branchFilter !== 'all'
+    ? (branches ?? []).find((b) => b.id === branchFilter)?.name ?? null
+    : null;
+  const subtitle = `${branchName ? `${branchName} · ` : ''}${dayRecords.length
     ? `${MONTH_NAMES[month]} ${effectiveDay}, ${year}`
-    : `${MONTH_NAMES[month]} ${year}`;
+    : `${MONTH_NAMES[month]} ${year}`}`;
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -281,6 +405,29 @@ export function DashboardPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {/* Branch scope — every metric on the page follows this selection:
+              a specific branch shows that branch's data, All Branches shows
+              everything the admin may see */}
+          <Select value={branchFilter} onValueChange={(v) => setBranchFilter(v)}>
+            <SelectTrigger
+              className="h-10 w-44 bg-card"
+              aria-label="Filter dashboard by branch"
+              title="Show only the selected branch's data"
+            >
+              <div className="flex min-w-0 items-center gap-1.5">
+                <GitBranch size={14} className="shrink-0 text-brand" />
+                <SelectValue />
+              </div>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Branches</SelectItem>
+              {(branches ?? []).map((b) => (
+                <SelectItem key={b.id} value={b.id}>
+                  {b.name}{!b.is_active ? ' (inactive)' : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Select value={selectedDate} onValueChange={(v) => setDay(parseInt(v.slice(8), 10))}>
             <SelectTrigger className="h-10 w-40 bg-card"><CalendarDays className="mr-2 size-4 text-brand" /><SelectValue /></SelectTrigger>
             <SelectContent className="max-h-72">
@@ -490,7 +637,11 @@ export function DashboardPage() {
         className="card-glow rounded-xl border bg-card p-5"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <SectionTitle icon={<Building2 size={15} />} title="Site-wise Employee Breakdown" sub="Active sites only" />
+          <SectionTitle
+            icon={<Building2 size={15} />}
+            title="Site-wise Employee Breakdown"
+            sub={branchName ? `${branchName} · active sites only` : 'Active sites only'}
+          />
           <Button variant="outline" size="sm" onClick={() => navigateTo('sites')}>
             View Sites <Eye size={14} className="ml-1.5" />
           </Button>

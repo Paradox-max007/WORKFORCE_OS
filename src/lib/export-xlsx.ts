@@ -33,6 +33,7 @@ export const EMPLOYEE_EXPORT_COLUMNS: ExportColumn[] = [
   { key: 'nationality', header: 'Nationality', width: 18, value: (e) => e.nationality ?? '' },
   { key: 'position', header: 'Trade / Position', width: 20, value: (e) => e.position ?? '' },
   { key: 'company', header: 'Company', width: 18, value: (e) => e.company_name ?? '' },
+  { key: 'branch', header: 'Branch', width: 18, value: (e) => e.branch_name ?? '' },
   { key: 'site', header: 'Work Site', width: 26, value: (e) => e.site_name ?? 'Unassigned (Idle)' },
   { key: 'camp', header: 'Camp', width: 24, value: (e) => e.camp_name ?? '' },
   { key: 'block', header: 'Block', width: 8, value: (e) => e.camp_block ?? '' },

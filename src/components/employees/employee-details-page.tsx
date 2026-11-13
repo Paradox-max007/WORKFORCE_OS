@@ -18,7 +18,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import {
-  AnimatedCounter, EmptyState, EmployeeStatusBadge, RatingStars, SectionTitle,
+  AnimatedCounter, BranchBadge, EmptyState, EmployeeStatusBadge, RatingStars, SectionTitle,
   SiteBadge, SkeletonRows,
 } from '@/components/shared/primitives';
 import { Button } from '@/components/ui/button';
@@ -427,6 +427,7 @@ function PrintHeaderBlock({ emp, points }: { emp: EmployeeVM; points: MonthPoint
         </div>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 border-t border-zinc-200 pt-2 text-[11px] leading-relaxed text-zinc-800 sm:grid-cols-3">
+        <p><span className="font-semibold text-zinc-500">Branch:</span> {emp.branch_name ?? '—'}</p>
         <p><span className="font-semibold text-zinc-500">Site:</span> {emp.site_name ?? 'No Site Assigned'}</p>
         <p><span className="font-semibold text-zinc-500">Camp:</span> {emp.camp_name ?? '—'}{emp.camp_name ? ` (Block ${emp.camp_block ?? '—'}, Room ${emp.camp_room ?? '—'})` : ''}</p>
         <p><span className="font-semibold text-zinc-500">Nationality:</span> {emp.nationality ?? '—'}</p>
@@ -550,7 +551,8 @@ function ShareDialogContent({ emp, onPreviewChange }: {
     setSimpleBusy(true);
     try {
       downloadEmployeeCv(emp);
-      window.open(`https://wa.me/?text=${encodeURIComponent('Employee details attached')}`, '_blank');
+      const branchPart = emp.branch_name ? ` — ${emp.branch_name} Branch` : '';
+      window.open(`https://wa.me/?text=${encodeURIComponent(`CV for ${emp.full_name} (${emp.employee_code})${branchPart} — PDF attached.`)}`, '_blank');
       toast.success('CV downloaded — WhatsApp opened');
     } finally {
       setSimpleBusy(false);
@@ -582,7 +584,8 @@ function ShareDialogContent({ emp, onPreviewChange }: {
   const sharePreview = async () => {
     setWaBusy(true);
     const summary = previewMonths ? describeMonths(previewMonths.map((p) => p.point)) : '';
-    const waUrl = `https://wa.me/?text=${encodeURIComponent(`Track record for ${emp.full_name} (${emp.employee_code}) — ${summary}. PDF attached.`)}`;
+    const branchPart = emp.branch_name ? ` — ${emp.branch_name} Branch` : '';
+    const waUrl = `https://wa.me/?text=${encodeURIComponent(`Track record for ${emp.full_name} (${emp.employee_code})${branchPart} — ${summary}. PDF attached.`)}`;
     // opened synchronously inside the click so popup blockers allow it
     const win = window.open('', '_blank');
     const ok = await exportPreview();
@@ -1201,6 +1204,7 @@ export function EmployeeDetailsPage() {
                 {[emp.position ?? 'Team Member', emp.company_name, emp.nationality].filter(Boolean).join(' · ')}
               </p>
               <div className="mt-2 flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                <BranchBadge name={emp.branch_name} detailed />
                 <SiteBadge name={emp.site_name} />
                 {emp.camp_name ? (
                   <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
@@ -1319,6 +1323,7 @@ export function EmployeeDetailsPage() {
           } />
           <InfoRow label="Join Date" value={fmtDate(emp.join_date)} />
           <InfoRow label="Company" value={emp.company_name ?? '—'} />
+          <InfoRow label="Branch" value={<BranchBadge name={emp.branch_name} detailed />} />
           <InfoRow label="Site" value={<SiteBadge name={emp.site_name} />} />
           <InfoRow
             label="Accommodation"

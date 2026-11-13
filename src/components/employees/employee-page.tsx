@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { EmptyState, EmployeeStatusBadge, RatingStars, SiteBadge, SkeletonRows } from '@/components/shared/primitives';
+import { EmptyState, BranchBadge, EmployeeStatusBadge, RatingStars, SiteBadge, SkeletonRows } from '@/components/shared/primitives';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -319,7 +319,32 @@ export function EmployeePage() {
             {filtered.length} employee{filtered.length !== 1 ? 's' : ''} · full HR profiles, documents and ratings
           </p>
         </motion.div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* BRANCH dropdown — SUPER ADMIN ONLY, lives next to Export Excel:
+              All branches + every available branch; the list (and the Site
+              options in the filter bar) follow the selection */}
+          {isSuperAdmin && (
+            <Select value={branchFilter} onValueChange={changeBranchFilter}>
+              <SelectTrigger
+                className="h-10 w-44 bg-card"
+                aria-label="Filter employees by branch"
+                title="Show only the selected branch's employees"
+              >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <GitBranch size={14} className="shrink-0 text-brand" />
+                  <SelectValue />
+                </div>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Branches</SelectItem>
+                {(branches ?? []).map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name}{!b.is_active ? ' (inactive)' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Button
             variant="outline"
             onClick={exportToExcel}
@@ -340,30 +365,6 @@ export function EmployeePage() {
           table (same behaviour as the Payroll page) */}
       <div className="sticky top-16 z-30 mb-4 rounded-xl border border-border/60 bg-background/90 px-3 py-2.5 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
         <div className="flex flex-wrap items-center gap-2">
-        {/* BRANCH dropdown — SUPER ADMIN ONLY: All branches + every available
-            branch; the list (and the Site options) follow the selection */}
-        {isSuperAdmin && (
-          <Select value={branchFilter} onValueChange={changeBranchFilter}>
-            <SelectTrigger
-              className="h-10 w-44 bg-card"
-              aria-label="Filter employees by branch"
-              title="Show only the selected branch's employees"
-            >
-              <div className="flex min-w-0 items-center gap-1.5">
-                <GitBranch size={14} className="shrink-0 text-brand" />
-                <SelectValue />
-              </div>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Branches</SelectItem>
-              {(branches ?? []).map((b) => (
-                <SelectItem key={b.id} value={b.id}>
-                  {b.name}{!b.is_active ? ' (inactive)' : ''}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
         <div className="relative min-w-56 flex-1 sm:max-w-xs">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -437,13 +438,10 @@ export function EmployeePage() {
           </SelectContent>
         </Select>
         {/* SITE filter — selecting a site lists that site's employees on top
-            of every other active filter */}
+            of every other active filter (no icon — matches the other filters) */}
         <Select value={siteFilter} onValueChange={(v) => { setSiteFilter(v); setPage(1); }}>
           <SelectTrigger className="h-10 w-44 bg-card" aria-label="Filter employees by site">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <MapPin size={13} className="shrink-0 text-muted-foreground" />
-              <SelectValue />
-            </div>
+            <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Sites</SelectItem>
@@ -493,6 +491,7 @@ export function EmployeePage() {
                   <th className="px-4 py-3 font-medium">ID</th>
                   <th className="px-4 py-3 font-medium">Nationality</th>
                   <th className="px-4 py-3 font-medium">Position</th>
+                  <th className="px-4 py-3 font-medium">Branch</th>
                   <th className="px-4 py-3 font-medium">Site</th>
                   <th className="px-4 py-3 font-medium">Rating</th>
                   <th className="px-4 py-3 font-medium">Status</th>
@@ -551,6 +550,15 @@ export function EmployeePage() {
                         )}
                       </td>
                       <td className="px-4 py-3">{emp.position ?? '—'}</td>
+                      <td className="px-4 py-3">
+                        {emp.branch_name ? (
+                          <span className="inline-flex items-center gap-1" title="Owner branch of the current site">
+                            <Building2 size={12} className="text-brand" />{emp.branch_name}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         {emp.site_name ? (
                           <span className="inline-flex items-center gap-1"><MapPin size={12} className="text-emerald-500" />{emp.site_name}</span>
@@ -614,6 +622,7 @@ export function EmployeePage() {
                   </div>
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
+                      <BranchBadge name={emp.branch_name} />
                       {emp.site_name ? <SiteBadge name={emp.site_name} /> : <SiteBadge name={null} />}
                       {emp.nationality && (
                         <span className="inline-flex items-center rounded-full border border-border bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-foreground/70">

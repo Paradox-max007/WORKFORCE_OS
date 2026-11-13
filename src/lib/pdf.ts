@@ -96,6 +96,7 @@ export function generateEmployeeCvPdf(emp: EmployeeVM, asCv: boolean): jsPDF {
   kvRow('Position', emp.position);
   kvRow('Company', emp.company_name);
   kvRow('Join Date', emp.join_date);
+  kvRow('Branch', emp.branch_name);
   kvRow('Current Site', emp.site_name ?? 'Not Assigned');
   kvRow('Accommodation', emp.camp_name
     ? `${emp.camp_name}${emp.camp_block ? ` — Block ${emp.camp_block}` : ''}${emp.camp_room ? `, Room ${emp.camp_room}` : ''}`
@@ -133,7 +134,8 @@ export function downloadEmployeeCv(emp: EmployeeVM): void {
 
 export function shareEmployeeCvViaWhatsApp(emp: EmployeeVM): void {
   generateEmployeeCvPdf(emp, true).save(employeeCvFilename(emp));
-  window.open('https://wa.me/?text=Employee+details+attached', '_blank');
+  const branchPart = emp.branch_name ? ` — ${emp.branch_name} Branch` : '';
+  window.open(`https://wa.me/?text=${encodeURIComponent(`CV for ${emp.full_name} (${emp.employee_code})${branchPart} — PDF attached.`)}`, '_blank');
 }
 
 // ---------------------------------------------------------------------------

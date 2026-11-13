@@ -5,7 +5,7 @@
 // ============================================================================
 
 import { motion, useInView, useMotionValue, useSpring } from 'framer-motion';
-import { Star, StarHalf } from 'lucide-react';
+import { Building2, Star, StarHalf } from 'lucide-react';
 import { useEffect, useRef, type ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 
@@ -88,6 +88,23 @@ export function SiteBadge({ name }: { name: string | null }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-500">
       {name}
+    </span>
+  );
+}
+
+/** Branch pill (violet) — the owner branch of an employee's current site.
+ *  Renders nothing when the employee has no branch (idle / unassigned site). */
+export function BranchBadge({ name, detailed = false }: { name: string | null; detailed?: boolean }) {
+  if (!name) {
+    return detailed ? (
+      <span className="inline-flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+        <Building2 size={11} className="inline" aria-hidden="true" /> No branch
+      </span>
+    ) : null;
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2 py-0.5 text-[11px] font-medium text-brand">
+      <Building2 size={11} className="inline" aria-hidden="true" /> {name}
     </span>
   );
 }

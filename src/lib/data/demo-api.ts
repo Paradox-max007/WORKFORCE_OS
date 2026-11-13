@@ -118,6 +118,11 @@ const notifySuperAdmins = (title: string, message: string, type: Notification['t
 const attachEmployeeVM = (e: Employee): EmployeeVM => ({
   ...e,
   site_name: e.current_site_id ? db.sites.find((s) => s.id === e.current_site_id)?.name ?? null : null,
+  // owner branch of the current site (null = idle or site without a branch)
+  branch_name: (() => {
+    const site = e.current_site_id ? db.sites.find((s) => s.id === e.current_site_id) : undefined;
+    return site?.branch_id ? db.branches.find((b) => b.id === site.branch_id)?.name ?? null : null;
+  })(),
   leader_site_name: e.team_leader_site_id ? db.sites.find((s) => s.id === e.team_leader_site_id)?.name ?? null : null,
   camp_name: e.camp_id ? db.camps.find((c) => c.id === e.camp_id)?.name ?? null : null,
   trade_name: e.trade_id ? db.trades.find((t) => t.id === e.trade_id)?.name ?? null : null,

@@ -547,6 +547,7 @@ export const prodApi = {
     return {
       ...(updated as unknown as EmployeeVM),
       site_name: null,
+      branch_name: null,
       leader_site_name: null,
       camp_name: null,
       card_type_name: null,
@@ -587,6 +588,7 @@ export const prodApi = {
     return {
       ...(updated as unknown as EmployeeVM),
       site_name: null,
+      branch_name: null,
       leader_site_name: null,
       camp_name: null,
     };
@@ -594,18 +596,20 @@ export const prodApi = {
 
   // ---- employees ---------------------------------------------------------------
   async listEmployees(): Promise<EmployeeVM[]> {
+    // site → owning branch (branch_name) comes along via the nested embed
     const { data, error } = await sb().from('employee')
-      .select('*, site:current_site_id(name), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name), card_type:card_type_id(name)')
+      .select('*, site:current_site_id(name, branch:branch_id(name)), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name), card_type:card_type_id(name)')
       .neq('status', 'deleted')
       .order('created_at');
     assertOk(error);
     return ((data ?? []) as unknown as {
-      site: { name: string } | null; leader_site: { name: string } | null; camp: { name: string } | null;
+      site: { name: string; branch: { name: string } | null } | null; leader_site: { name: string } | null; camp: { name: string } | null;
       trade: { name: string } | null; card_type: { name: string } | null;
       [k: string]: unknown;
     }[]).map((row) => ({
       ...(row as unknown as EmployeeVM),
       site_name: row.site?.name ?? null,
+      branch_name: row.site?.branch?.name ?? null,
       leader_site_name: row.leader_site?.name ?? null,
       camp_name: row.camp?.name ?? null,
       trade_name: row.trade?.name ?? null,
@@ -677,6 +681,7 @@ export const prodApi = {
     return {
       ...(created as unknown as EmployeeVM),
       site_name: null,
+      branch_name: null,
       leader_site_name: null,
     };
   },
@@ -691,6 +696,7 @@ export const prodApi = {
     return {
       ...(updated as unknown as EmployeeVM),
       site_name: null,
+      branch_name: null,
       leader_site_name: null,
     };
   },

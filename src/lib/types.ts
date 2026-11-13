@@ -156,6 +156,8 @@ export interface Employee {
 
 export interface EmployeeVM extends Employee {
   site_name: string | null;
+  /** owner branch of the employee's current site (null = idle / no branch) */
+  branch_name: string | null;
   leader_site_name: string | null;
   camp_name: string | null;
   trade_name: string | null;

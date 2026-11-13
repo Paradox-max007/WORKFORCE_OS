@@ -340,8 +340,18 @@ export function AdvanceBookPage() {
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell className="text-right font-mono text-sm font-semibold">
-                      {fmtMoney(r.amount)}
+                    <TableCell className="text-right">
+                      <span className="flex flex-col items-end gap-1">
+                        <span className="font-mono text-sm font-semibold">{fmtMoney(r.amount)}</span>
+                        {r.from_time_card && (
+                          <span
+                            className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-sky-600 dark:text-sky-400"
+                            title="Born from a TIME-CARD carryover — the attendance salary exceeded the approved time card hours, so the difference is recovered from the cut month"
+                          >
+                            Time card
+                          </span>
+                        )}
+                      </span>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">{fmtDate(r.given_date)}</TableCell>
                     <TableCell>

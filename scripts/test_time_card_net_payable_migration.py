@@ -10,11 +10,16 @@ format string follows the level directly. The file was fixed to
     raise exception '...', v_next_month_name;
 and this script verifies the corrected migration end to end:
 
-  CHAIN   shim → full schema → seed admins → 20261113c → FIXED 20261113d
+  CHAIN   shim → full schema → seed admins → 20261113c → FIXED 20261113d →
+          20261113e → 20261113f (the carryover now goes through the
+          Advance Book — see test_carryover_book_migration.py for the deep
+          coverage)
   ID      the migration re-runs cleanly (idempotency)
-  T1      negative time-card difference → carryover into NEXT month's advance
-          + note + carryover_applied tracking + audit row
-  T2      re-saving adjusts the DELTA only (advance rebalanced, one note line)
+  T1      negative time-card difference → a normal ADVANCE BOOK record
+          (amount 104, cut = the very next month, note, from_time_card)
+          + carryover_applied tracking + audit row + the Nov period
+  T2      re-saving updates the record (104 → 130); generating Nov folds it
+          into that month's Advance column (advance 130 / applied 130)
   T3      next period finalized → the (fixed) RAISE EXCEPTION fires and the
           whole save rolls back
   T4      get_salary_sheet v4 exposes time_card_hours / time_card_amount on
@@ -90,6 +95,10 @@ for name, files in [
      [os.path.join(MIG, '20261113d_time_card_net_payable.sql')]),
     ('re-run 20261113d (idempotency)',
      [os.path.join(MIG, '20261113d_time_card_net_payable.sql')]),
+    ('run 20261113e (advance book)',
+     [os.path.join(MIG, '20261113e_advance_book.sql')]),
+    ('run 20261113f (carryover → advance book)',
+     [os.path.join(MIG, '20261113f_time_card_carryover_book.sql')]),
 ]:
     ok, r = run(files)
     step(name, ok, r.stderr[-3000:])
@@ -158,14 +167,15 @@ step('fixture sanity — 2 employees, 260 gross each', ok, r.stderr[-1500:])
 
 # ---------------------------------------------------------------------------
 # T1 — negative difference: time card 12 h vs attendance 20 h
-#      extra = (12 − 20) × 13 = −104 → 104 carried to the Nov 2026 advance
+#      extra = (12 − 20) × 13 = −104 → an advance book record of 104 with
+#      the DEFAULT CUT MONTH = the very next month (Nov 2026)
 # ---------------------------------------------------------------------------
 ok, r = run(sql=f"""
 set app.current_uid = '{SUPER}';
 do $$
 declare
   v_period uuid; v_site uuid; v_emp uuid; v_next uuid;
-  v_adv numeric; v_notes text; v_applied numeric; n int;
+  v_rec public.advance_record; v_applied numeric; n int;
 begin
   select p.id into v_period from public.payroll_period p where p.year = 2026 and p.month = 10;
   select s.id into v_site from public.site s where s.name = 'Time Card Tower';
@@ -177,13 +187,16 @@ begin
   select p.id into v_next from public.payroll_period p where p.year = 2026 and p.month = 11;
   if v_next is null then raise exception 'FAIL T1: Nov 2026 payroll period was not created'; end if;
 
-  select pe.advance, pe.notes into v_adv, v_notes
-  from public.payroll_employee pe
-  where pe.payroll_period_id = v_next and pe.employee_id = v_emp;
-  if v_adv is null then raise exception 'FAIL T1: no Nov 2026 payroll_employee row for Ada'; end if;
-  if v_adv <> 104 then raise exception 'FAIL T1: Nov advance=% (expected 104)', v_adv; end if;
-  if v_notes is null or v_notes not like '[Time card Oct 2026] time card 12.00 h vs attendance 20.00 h%'
-    then raise exception 'FAIL T1: carryover note = "%"', v_notes; end if;
+  select * into v_rec from public.advance_record
+  where employee_id = v_emp and source_period_id = v_period;
+  if v_rec.id is null then raise exception 'FAIL T1: no advance book record for Ada'; end if;
+  if v_rec.amount <> 104 or v_rec.cut_year <> 2026 or v_rec.cut_month <> 11 then
+    raise exception 'FAIL T1: record amount=% cut=%/% (expected 104 / 2026-11)',
+      v_rec.amount, v_rec.cut_year, v_rec.cut_month;
+  end if;
+  if v_rec.note is null or v_rec.note not like '[Time card Oct 2026] time card 12.00 h vs attendance 20.00 h%'
+    or v_rec.note not like '%cutting from Nov 2026%'
+    then raise exception 'FAIL T1: carryover note = "%"', v_rec.note; end if;
 
   select tc.carryover_applied into v_applied from public.payroll_time_card tc
   where tc.payroll_period_id = v_period and tc.employee_id = v_emp;
@@ -196,19 +209,19 @@ begin
   if n < 1 then raise exception 'FAIL T1: no time_card_carryover audit row'; end if;
 end $$;
 """)
-step('T1 negative difference carries 104 to the Nov 2026 advance (+note, tracking, audit)',
+step('T1 negative difference → advance book record 104 cut Nov 2026 (+note, tracking, audit)',
      ok, r.stderr[-2000:])
 
 # ---------------------------------------------------------------------------
-# T2 — re-save with 10 h: needed = |(10 − 20) × 13| = 130, already applied 104
-#      → only the delta (+26) is added: advance 104 → 130, ONE note line
+# T2 — re-save with 10 h: needed = |(10 − 20) × 13| = 130 → the record is
+#      updated to 130; generating Nov folds it into the Advance column
 # ---------------------------------------------------------------------------
 ok, r = run(sql=f"""
 set app.current_uid = '{SUPER}';
 do $$
 declare
   v_period uuid; v_site uuid; v_emp uuid; v_next uuid;
-  v_adv numeric; v_notes text; v_applied numeric; v_cnt int;
+  v_rec public.advance_record; v_applied numeric; v_adv numeric; v_book numeric;
 begin
   select p.id into v_period from public.payroll_period p where p.year = 2026 and p.month = 10;
   select s.id into v_site from public.site s where s.name = 'Time Card Tower';
@@ -217,27 +230,31 @@ begin
   perform public.save_site_time_card_hours(v_period, v_site,
     jsonb_build_array(jsonb_build_object('employee_id', v_emp, 'hours', '10')));
 
-  -- the Nov period is (re)used by the save — look it up AFTER the call
-  select p.id into v_next from public.payroll_period p where p.year = 2026 and p.month = 11;
-
-  select pe.advance, pe.notes into v_adv, v_notes
-  from public.payroll_employee pe
-  where pe.payroll_period_id = v_next and pe.employee_id = v_emp;
-  if v_adv <> 130 then raise exception 'FAIL T2: Nov advance=% (expected 130)', v_adv; end if;
-  if v_notes is null or v_notes not like '[Time card Oct 2026] time card 10.00 h vs attendance 20.00 h%'
-    then raise exception 'FAIL T2: carryover note = "%"', v_notes; end if;
-  v_cnt := (length(v_notes) - length(replace(v_notes, '[Time card Oct 2026]', '')))
-           / length('[Time card Oct 2026]');
-  if v_cnt <> 1 then raise exception 'FAIL T2: % carryover note lines (expected 1)', v_cnt; end if;
+  select * into v_rec from public.advance_record
+  where employee_id = v_emp and source_period_id = v_period;
+  if v_rec.amount <> 130 then raise exception 'FAIL T2: record amount=% (expected 130)', v_rec.amount; end if;
+  if v_rec.note is null or v_rec.note not like '[Time card Oct 2026] time card 10.00 h vs attendance 20.00 h%'
+    then raise exception 'FAIL T2: carryover note = "%"', v_rec.note; end if;
 
   select tc.carryover_applied into v_applied from public.payroll_time_card tc
   where tc.payroll_period_id = v_period and tc.employee_id = v_emp;
   if v_applied <> 130 then
     raise exception 'FAIL T2: carryover_applied=% (expected 130)', v_applied;
   end if;
+
+  -- generating the next month folds the record into its Advance column
+  perform public.generate_payroll_period(2026, 11);
+  select p.id into v_next from public.payroll_period p where p.year = 2026 and p.month = 11;
+  select pe.advance, pe.advance_book_applied into v_adv, v_book
+  from public.payroll_employee pe
+  where pe.payroll_period_id = v_next and pe.employee_id = v_emp;
+  if v_adv <> 130 or v_book <> 130 then
+    raise exception 'FAIL T2: Nov advance=% applied=% (expected 130/130)', v_adv, v_book;
+  end if;
 end $$;
 """)
-step('T2 re-save adjusts the delta only (advance 104 → 130, one note line)', ok, r.stderr[-2000:])
+step('T2 re-save updates the record to 130; generating Nov folds it in (130 / 130)',
+     ok, r.stderr[-2000:])
 
 # ---------------------------------------------------------------------------
 # T3 — next month finalized → the FIXED raise exception must fire and the
@@ -272,7 +289,7 @@ set app.current_uid = '{SUPER}';
 do $$
 declare
   v_period uuid; v_emp uuid; v_next uuid;
-  v_h numeric; v_applied numeric; v_adv numeric;
+  v_h numeric; v_applied numeric; v_adv numeric; v_amt numeric;
 begin
   select p.id into v_period from public.payroll_period p where p.year = 2026 and p.month = 10;
   select e.id into v_emp from public.employee e where e.full_name = 'Ada Negative';
@@ -285,6 +302,12 @@ begin
     raise exception 'FAIL T3: entry hours=% applied=% (expected 10 / 130 — full rollback)', v_h, v_applied;
   end if;
 
+  select amount into v_amt from public.advance_record
+  where employee_id = v_emp and source_period_id = v_period;
+  if v_amt is null or v_amt <> 130 then
+    raise exception 'FAIL T3: record amount=% (expected 130 — rollback)', v_amt;
+  end if;
+
   select pe.advance into v_adv from public.payroll_employee pe
   where pe.payroll_period_id = v_next and pe.employee_id = v_emp;
   if v_adv is null or v_adv <> 130 then
@@ -292,7 +315,7 @@ begin
   end if;
 end $$;
 """)
-step('T3c failed save rolled back completely (entry + advance untouched)', ok, r.stderr[-1500:])
+step('T3c failed save rolled back completely (entry + record + advance untouched)', ok, r.stderr[-1500:])
 
 # ---------------------------------------------------------------------------
 # T4 — positive difference: Cy time card 24 h vs attendance 20 h → +52 shows
@@ -312,11 +335,16 @@ begin
   perform public.save_site_time_card_hours(v_period, v_site,
     jsonb_build_array(jsonb_build_object('employee_id', v_emp, 'hours', '24')));
 
-  -- positive difference → no carryover row for Cy in Nov
+  -- positive difference → no carryover record for Cy (the Nov row may
+  -- exist from the T2 generation — what matters is the advance stays 0)
+  select count(*) into n from public.advance_record
+  where employee_id = v_emp and source_period_id = v_period;
+  if n <> 0 then raise exception 'FAIL T4: positive difference must not create an advance book record'; end if;
   select count(*) into n from public.payroll_employee pe
   join public.payroll_period p on p.id = pe.payroll_period_id
-  where p.year = 2026 and p.month = 11 and pe.employee_id = v_emp;
-  if n <> 0 then raise exception 'FAIL T4: positive difference must not create a carryover row'; end if;
+  where p.year = 2026 and p.month = 11 and pe.employee_id = v_emp
+    and pe.advance <> 0;
+  if n <> 0 then raise exception 'FAIL T4: positive difference must not touch the Nov advance'; end if;
 
   sheet := public.get_salary_sheet(2026, 10);
 

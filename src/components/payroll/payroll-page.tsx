@@ -50,12 +50,13 @@
 //       amount only shows when the time card actually differs); when it
 //       differs, the cell shows the FULL CALCULATION the same way:
 //       1,220 − 60 = 1,160.00 (a negative extra appears as +|extra|)
-//   • FIT-TO-SCREEN table — table-fixed with capped column widths in view
-//     mode (long content ellipsizes instead of stretching the table) and
-//     uniform compact column padding (consistent spacing between ALL
-//     columns), so the whole table stays visible without scrolling
-//     left/right; the inline calculations render small (10px, compact
-//     numbers) above their values
+//   • FIT-TO-SCREEN table — table-fixed with PERCENTAGE widths on EVERY
+//     column in view mode (each set summing to 100%): the table fills its
+//     container and the space is shared across all columns (long content
+//     ellipsizes instead of stretching the table) with uniform compact
+//     column padding (consistent spacing between ALL columns), so the whole
+//     table stays visible without scrolling left/right; the inline
+//     calculations render small (10px, compact numbers) above their values
 //   • amounts everywhere are PLAIN numbers (no “AED” prefix — the whole
 //     page uses one currency by default)
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
@@ -1274,6 +1275,15 @@ export function PayrollPage() {
     [scopedEmployees],
   );
 
+  // FIT-TO-SCREEN column widths — VIEW MODE gives EVERY column a PERCENTAGE
+  // of the table width (two sets: with / without the time-card columns, each
+  // summing to 100%), so the table fills its container and the space is
+  // shared across ALL columns — no single column swallows the leftover width
+  // (that squeezed the data to the two sides with an empty middle). EDIT
+  // MODE sizes to content (table-auto) so the inline inputs keep their room.
+  const cw = (withTc: string, noTc: string): string =>
+    (editMode ? '' : hasTimeCard ? withTc : noTc);
+
   // notes grouped per employee (for the sticky-note icons)
   const notesByEmployee = useMemo(() => {
     const map = new Map<string, EmployeeNote[]>();
@@ -1947,57 +1957,58 @@ export function PayrollPage() {
 
           {/* consolidated table — ONE row per employee, settlement always
               visible. FIT-TO-SCREEN layout (no horizontal scrolling):
-              • VIEW MODE → table-fixed: the table is exactly as wide as its
-                container, every column has a capped width and long content
-                ELLIPSIZES instead of stretching the table. The Employee
-                column (the only one without a width) absorbs the remainder —
-                consistent spacing at every screen size. Only below ~940px
-                does the built-in container scroll (phones).
+              • VIEW MODE → table-fixed + PERCENTAGE widths on EVERY column
+                (see cw below): the table is exactly as wide as its container
+                and the width is SHARED by all columns — the data fills the
+                full table (no two-sided squeeze with an empty middle), long
+                content ellipsizes. Only below ~940px does the built-in
+                container scroll (phones).
               • EDIT MODE → table-auto with a wider min-width so the inline
                 inputs (trade dropdown, advance/deduction) keep their room —
                 the container may scroll slightly WHILE EDITING only.
-              • uniform px-2 column padding everywhere (consistent gaps). */}
+              • uniform column padding (px-1.5 in view mode — consistent
+                gaps and room for the data itself; px-2 while editing). */}
           <section className="card-glow overflow-hidden rounded-xl border bg-card">
             <Table
               className={cn(
-                '[&_td]:px-2 [&_th]:px-2 [&_td]:py-2.5 [&_th]:h-9',
+                '[&_td]:py-2.5 [&_th]:h-9',
                 editMode
-                  ? 'min-w-[1060px]'
-                  : 'table-fixed w-full min-w-[940px] [&_td]:overflow-hidden [&_td]:text-ellipsis [&_th]:overflow-hidden',
+                  ? 'min-w-[1060px] [&_td]:px-2 [&_th]:px-2'
+                  : 'table-fixed w-full min-w-[940px] [&_td]:px-1.5 [&_th]:px-1.5 [&_td]:overflow-hidden [&_td]:text-ellipsis [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[11px] [&_th]:h-auto [&_th]:py-1.5 [&_th]:whitespace-normal',
               )}
             >
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-8">Sl No</TableHead>
-                  <TableHead title="Employee — name, code and quick notes">Employee</TableHead>
-                  <TableHead className="w-14">Code</TableHead>
-                  <TableHead className="w-16" title="Region of the employee's nationality country">Nationality</TableHead>
-                    <TableHead className="w-[60px] text-right">Total Hours</TableHead>
+                  <TableHead className={cw('w-[3.5%]', 'w-[4%]')} title="Serial number">No.</TableHead>
+                  <TableHead className={cw('w-[10%]', 'w-[18%]')} title="Employee — name, code and quick notes">Employee</TableHead>
+                  <TableHead className={cw('w-[9%]', 'w-[10.5%]')}>Code</TableHead>
+                  <TableHead className={cw('w-[5.5%]', 'w-[6%]')} title="Region of the employee's nationality country">Region</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[6.5%]'))} title="Total attendance hours of the month">Hrs</TableHead>
                     {/* time-card columns — ONLY after time card hours were
                         added for a site (compact layout otherwise) */}
                     {hasTimeCard && (
                       <TableHead
-                        className="w-[56px] text-right"
-                        title="Approved time card hours of the month (entered per site via the Time Card button)"
+                        className="w-[6.5%] text-right"
+                        title="Approved final time card hours of the month (entered per site via the Time Card button)"
                       >
-                        Final Hours
+                        Final
                       </TableHead>
                     )}
                     {hasTimeCard && (
                       <TableHead
-                        className="w-[88px] text-right"
+                        className="w-[8%] text-right"
                         title="Net Payable − time card amount ((Final Hours − Total Hours) × rate) — 0 while the difference is 0 (the amount only shows when the time card actually differs); the calculation renders inline in the cell"
                       >
                         Balance
                       </TableHead>
                     )}
-                    <TableHead className="w-[84px]">Trade</TableHead>
-                    <TableHead className="w-[84px]" title="Payment method — cash, or the card type">Payment</TableHead>
-                    <TableHead className="w-[68px] text-right">Amount</TableHead>
-                    <TableHead className="w-[80px] text-right">Advance</TableHead>
-                    <TableHead className="w-[80px] text-right" title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
-                    <TableHead className="w-[84px] text-right">Net Payable</TableHead>
-                    <TableHead className="w-[88px] text-right">Paid</TableHead>
+                    <TableHead className={cw('w-[5%]', 'w-[7%]')}>Trade</TableHead>
+                    <TableHead className={cw('w-[6.5%]', 'w-[7%]')} title="Payment method — cash, or the card type">Payment</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[7.5%]', 'w-[8.5%]'))}>Amount</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8%]'))}>Advance</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8%]'))} title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8.5%]'))}>Net Payable</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8%]'))}>Paid</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -2350,11 +2361,11 @@ export function PayrollPage() {
                                   ? `Mark the monthly salary paid (net ${fmtMoney(e.net_salary)})`
                                   : 'No salary calculated for this employee this month'}
                                 onClick={() => { void onMarkPaid(e); }}
-                                className="h-7 px-2.5 text-[11px] font-semibold text-white brand-gradient"
+                                className="h-7 px-2 text-[10px] font-semibold text-white brand-gradient"
                               >
                                 {payBusy
-                                  ? <Loader2 size={12} className="mr-1 animate-spin" />
-                                  : <BadgeCheck size={12} className="mr-1" />} Mark paid
+                                  ? <Loader2 size={11} className="animate-spin" />
+                                  : 'Mark paid'}
                               </Button>
                             )}
                           </div>
@@ -2404,7 +2415,7 @@ export function PayrollPage() {
             </Table>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) a Total Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) an Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 

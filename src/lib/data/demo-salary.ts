@@ -734,6 +734,8 @@ export const buildAdvanceBook = (database: DemoDB): AdvanceBookReport => {
         cut_year: r.cut_year,
         cut_month: r.cut_month,
         note: r.note,
+        /** born from a time-card carryover (one record per source period) */
+        from_time_card: r.source_period_id != null,
         cleared,
         cleared_at: cleared ? pe?.paid_at ?? null : null,
         applied: r.applied_amount > 0,

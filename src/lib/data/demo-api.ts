@@ -2077,6 +2077,7 @@ export const demoApi = {
         cut_month: input.cut_month,
         applied_amount: 0,
         note,
+        source_period_id: null,
         created_by: me?.id ?? null,
         created_at: nowISO(),
         updated_at: nowISO(),
@@ -2247,13 +2248,17 @@ export const demoApi = {
       });
     }
 
-    // ---- CARRYOVER — a NEGATIVE total difference is deducted from the NEXT
-    //      month's salary by adding |extra| to the advance there (idempotent:
-    //      only the DELTA between needed and already-applied is adjusted) ---
+    // ---- CARRYOVER — a NEGATIVE total difference is recovered from the NEXT
+    //      month's salary. It is stored as a NORMAL ADVANCE BOOK RECORD
+    //      (source = this period, DEFAULT CUT = the very next month, note =
+    //      the calculation) and syncAdvanceBookPeriod folds it into the cut
+    //      month's Advance column. Idempotent: the record is matched by
+    //      (source period, employee) — re-saving only updates amount + note;
+    //      a cut month the user RESCHEDULED to a later month is preserved ---
     const nextY = period.month === 12 ? period.year + 1 : period.year;
     const nextM = period.month === 12 ? 1 : period.month + 1;
-    const monthName = MONTH_NAMES[period.month - 1];
-    const nextMonthName = `${MONTH_NAMES[nextM - 1]} ${nextY}`;
+    const monthName = MONTH_NAMES[period.month - 1].slice(0, 3);   // 'Oct' — same short form as the SQL side
+    const nextMonthName = `${MONTH_NAMES[nextM - 1].slice(0, 3)} ${nextY}`;
     const affectedIds = [...new Set(entries.map((en) => en.employee_id))];
 
     affectedIds.forEach((employeeId) => {
@@ -2281,101 +2286,114 @@ export const demoApi = {
       });
       extra = round2(extra);
       const needed = extra < 0 ? round2(-extra) : 0;
-      const applied = round2(tcs.reduce((n, tc) => n + (tc.carryover_applied ?? 0), 0));
-      const delta = round2(needed - applied);
-      if (delta === 0) return;
 
-      // ensure NEXT month's payroll period exists (draft)
-      let nextPeriod = db.payrollPeriods.find((p) => p.year === nextY && p.month === nextM);
-      if (!nextPeriod) {
-        nextPeriod = {
-          id: uid(), year: nextY, month: nextM, status: 'draft',
-          created_by: me?.id ?? null, finalized_by: null, finalized_at: null,
-          created_at: nowISO(),
-        };
-        db.payrollPeriods.push(nextPeriod);
-      }
-      if (nextPeriod.status === 'finalized') {
-        throw new Error(
-          `The ${nextMonthName} payroll is already finalized — reopen it before changing time card carryovers`,
-        );
-      }
-
-      const marker = `[Time card ${monthName} ${period.year}]`;
-      const note = `${marker} time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → ${needed} added to advance`;
-
-      let nextPe = db.payrollEmployees.find(
-        (x) => x.payroll_period_id === nextPeriod!.id && x.employee_id === employeeId,
+      // the carryover record of THIS source period + employee (if any)
+      const rec = db.advanceRecords.find(
+        (r) => r.source_period_id === payrollPeriodId && r.employee_id === employeeId,
       );
-      let actual = 0;
-      if (!nextPe) {
-        if (delta > 0) {
-          nextPe = {
-            id: uid(),
-            payroll_period_id: nextPeriod.id,
-            employee_id: employeeId,
-            opening_lifetime_hours: 0,
-            closing_lifetime_hours: 0,
-            total_hours: 0,
-            unrated_hours: 0,
-            unassigned_hours: 0,
-            gross_salary: 0,
-            advance: delta,
-            advance_book_applied: 0,
-            deduction: 0,
-            absent_deduction: 0,
-            absent_deduction_edited: false,
-            net_salary: round2(-delta),
-            payment_status: 'unpaid',
-            paid_at: null,
-            paid_by: null,
-            notes: note,
-            trade_id_snapshot: null,
-            salary_role_snapshot: 'standard',
-            manually_edited: false,
-          };
-          db.payrollEmployees.push(nextPe);
-          actual = delta;
+      // nothing to carry over and no record → done
+      if (needed === 0 && !rec) return;
+      // idempotent no-op: the record already says exactly this
+      if (rec && rec.amount === needed && rec.cut_year === nextY && rec.cut_month === nextM) return;
+
+      // a CLEARED record (its cut month's salary was paid with it folded in)
+      // is history — the time card cannot rewrite a paid salary
+      if (rec && rec.applied_amount > 0) {
+        const cutPeriod = db.payrollPeriods.find(
+          (p) => p.year === rec.cut_year && p.month === rec.cut_month);
+        const cutRow = cutPeriod
+          ? db.payrollEmployees.find(
+              (x) => x.payroll_period_id === cutPeriod.id && x.employee_id === employeeId)
+          : undefined;
+        if (cutRow?.payment_status === 'paid') {
+          throw new Error(
+            `The carryover advance was already cleared — the ${MONTH_NAMES[rec.cut_month - 1]} ${rec.cut_year} salary was paid. Add a new advance record instead.`,
+          );
         }
-      } else {
-        const newAdvance = Math.max(0, round2(nextPe.advance + delta));
-        actual = round2(newAdvance - nextPe.advance);
-        const stripped = (nextPe.notes ?? '')
-          .split('\n')
-          .filter((line) => !line.startsWith(marker))
-          .join('\n')
-          .trim();
-        nextPe.notes = needed > 0
-          ? (stripped ? `${stripped}\n` : '') + note
-          : (stripped || null);
-        nextPe.advance = newAdvance;
-        nextPe.net_salary = round2(
-          nextPe.gross_salary - newAdvance - nextPe.deduction - (nextPe.absent_deduction ?? 0),
-        );
       }
 
-      // rebalance the tracking so Σ carryover_applied = applied so far
-      tcs.forEach((tc) => { tc.carryover_applied = 0; });
-      if (tcs.length > 0 && applied + actual !== 0) {
-        tcs[0].carryover_applied = round2(applied + actual);
-      }
+      const emp = db.employees.find((x) => x.id === employeeId);
+      const who = emp ? `${emp.full_name} (${emp.employee_code})` : 'Unknown employee';
 
-      if (actual !== 0) {
-        const emp = db.employees.find((x) => x.id === employeeId);
+      if (needed === 0) {
+        // the time card now matches the attendance → remove the record
+        const cutY = rec!.cut_year;
+        const cutM = rec!.cut_month;
+        const removedAmount = rec!.amount;
+        db.advanceRecords = db.advanceRecords.filter((r) => r.id !== rec!.id);
+        syncAdvanceBookPeriod(db, cutY, cutM);
         db.payrollAudit.push({
           id: uid(), period_id: payrollPeriodId, trade_id: null, action: 'time_card_carryover',
           actor_id: me?.id ?? null, actor_name: me?.name ?? null,
-          details: `${emp ? `${emp.full_name} (${emp.employee_code})` : 'Unknown employee'} — time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → ${
-            actual > 0
-              ? `${actual} added to the ${nextMonthName} advance`
-              : `carryover reduced by ${round2(-actual)} (${nextMonthName} advance)`
-          }`,
+          details: `${who} — time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → matches, carryover record of ${removedAmount} removed from the advance book`,
+          created_at: nowISO(),
+        });
+      } else {
+        // the FINAL cut month: the DEFAULT is the very next month; a record
+        // the user RESCHEDULED to a later month keeps its cut
+        let cutY = nextY;
+        let cutM = nextM;
+        if (rec && (rec.cut_year !== nextY || rec.cut_month !== nextM)) {
+          cutY = rec.cut_year;
+          cutM = rec.cut_month;
+        } else {
+          // ensure NEXT month's payroll period exists (draft) so the record
+          // and the advance become visible the moment that month is opened
+          const nextPeriod = db.payrollPeriods.find((p) => p.year === nextY && p.month === nextM);
+          if (!nextPeriod) {
+            db.payrollPeriods.push({
+              id: uid(), year: nextY, month: nextM, status: 'draft',
+              created_by: me?.id ?? null, finalized_by: null, finalized_at: null,
+              created_at: nowISO(),
+            });
+          } else if (nextPeriod.status === 'finalized') {
+            throw new Error(
+              `The ${nextMonthName} payroll is already finalized — reopen it before changing time card carryovers`,
+            );
+          }
+        }
+        const cutName = `${MONTH_NAMES[cutM - 1].slice(0, 3)} ${cutY}`;
+        const note = `[Time card ${monthName} ${period.year}] time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → ${needed} cutting from ${cutName}`;
+
+        if (!rec) {
+          db.advanceRecords.push({
+            id: uid(),
+            employee_id: employeeId,
+            amount: needed,
+            given_date: new Date().toISOString().slice(0, 10),
+            cut_year: cutY,
+            cut_month: cutM,
+            applied_amount: 0,
+            note,
+            source_period_id: payrollPeriodId,
+            created_by: me?.id ?? null,
+            created_at: nowISO(),
+            updated_at: nowISO(),
+          });
+        } else {
+          rec.amount = needed;
+          rec.note = note;
+          rec.applied_amount = 0;
+          rec.updated_at = nowISO();
+        }
+        syncAdvanceBookPeriod(db, cutY, cutM);
+        db.payrollAudit.push({
+          id: uid(), period_id: payrollPeriodId, trade_id: null, action: 'time_card_carryover',
+          actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+          details: `${who} — time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → ${needed} advance book record cutting from ${cutName}`,
           created_at: nowISO(),
         });
       }
+
+      // rebalance the internal tracking so Σ carryover_applied = the scheduled
+      // carryover (the advance_record is the source of truth)
+      tcs.forEach((tc) => { tc.carryover_applied = 0; });
+      if (tcs.length > 0 && needed !== 0) {
+        tcs[0].carryover_applied = needed;
+      }
     });
 
-    saveAndEmit(['payroll_time_card', 'payroll_period', 'payroll_employee']);
+    saveAndEmit(['payroll_time_card', 'payroll_period', 'payroll_employee', 'advance_record']);
   },
 
   // ---- realtime ------------------------------------------------------------------------------

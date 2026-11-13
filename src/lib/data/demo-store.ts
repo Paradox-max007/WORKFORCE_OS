@@ -169,7 +169,9 @@ export interface DemoPayrollTimeCard {
 
 /** One advance ledger row (mirrors the advance_record table). Status is
  *  DERIVED at read time: cleared = the cut month's payroll row is PAID and
- *  the record was folded into it (applied_amount > 0). */
+ *  the record was folded into it (applied_amount > 0). source_period_id
+ *  links a record to the payroll period whose TIME CARD produced it (a
+ *  carryover advance; null → a normal, manually added record). */
 export interface DemoAdvanceRecord {
   id: string;
   employee_id: string;
@@ -180,6 +182,8 @@ export interface DemoAdvanceRecord {
   /** how much of this record is currently inside the cut month's advance */
   applied_amount: number;
   note: string | null;
+  /** set → born from a time-card carryover (one record per source period) */
+  source_period_id: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -842,6 +846,9 @@ function loadDB(): DemoDB {
         });
         // advance ledger shipped without a version bump — heal to []
         if (!parsed.advanceRecords) parsed.advanceRecords = [];
+        parsed.advanceRecords?.forEach((r) => {
+          if (r.source_period_id === undefined) r.source_period_id = null;
+        });
         parsed.payrollEmployees?.forEach((pe) => {
           if (pe.advance_book_applied == null) pe.advance_book_applied = 0;
         });

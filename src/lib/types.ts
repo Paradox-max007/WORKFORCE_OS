@@ -795,6 +795,10 @@ export interface AdvanceRecordVM {
   cut_year: number;
   cut_month: number;
   note: string | null;
+  /** true → born from a time-card carryover (source = a payroll period's
+   *  time card), not added by hand; optional until the 20261113f migration
+   *  has run (older prod data omits it) */
+  from_time_card?: boolean;
   cleared: boolean;
   cleared_at: string | null;
   /** true → the amount is currently inside the cut month's Advance column */

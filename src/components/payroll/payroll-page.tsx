@@ -1279,8 +1279,11 @@ export function PayrollPage() {
   // of the table width (two sets: with / without the time-card columns, each
   // summing to 100%), so the table fills its container and the space is
   // shared across ALL columns — no single column swallows the leftover width
-  // (that squeezed the data to the two sides with an empty middle). EDIT
-  // MODE sizes to content (table-auto) so the inline inputs keep their room.
+  // (that squeezed the data to the two sides with an empty middle). The
+  // split favours the WIDE columns (Employee name, Net Payable, Balance with
+  // their inline arithmetic) and starves the compact numeric ones (Hrs,
+  // Final, Advance, Deduction) that only hold short values. EDIT MODE sizes
+  // to content (table-auto) so the inline inputs keep their room.
   const cw = (withTc: string, noTc: string): string =>
     (editMode ? '' : hasTimeCard ? withTc : noTc);
 
@@ -1956,13 +1959,16 @@ export function PayrollPage() {
           </div>
 
           {/* consolidated table — ONE row per employee, settlement always
-              visible. FIT-TO-SCREEN layout (no horizontal scrolling):
+              visible. FIT-TO-SCREEN layout:
               • VIEW MODE → table-fixed + PERCENTAGE widths on EVERY column
                 (see cw below): the table is exactly as wide as its container
                 and the width is SHARED by all columns — the data fills the
                 full table (no two-sided squeeze with an empty middle), long
-                content ellipsizes. Only below ~940px does the built-in
-                container scroll (phones).
+                content ellipsizes. The table keeps a per-layout MIN-WIDTH
+                (1150px with the time-card columns, 1000px without) so on
+                SMALLER SCREENS it simply OVERFLOWS its container and scrolls
+                horizontally instead of squeezing the columns into unreadable
+                slivers (the built-in table container is overflow-x-auto).
               • EDIT MODE → table-auto with a wider min-width so the inline
                 inputs (trade dropdown, advance/deduction) keep their room —
                 the container may scroll slightly WHILE EDITING only.
@@ -1974,21 +1980,31 @@ export function PayrollPage() {
                 '[&_td]:py-2.5 [&_th]:h-9',
                 editMode
                   ? 'min-w-[1060px] [&_td]:px-2 [&_th]:px-2'
-                  : 'table-fixed w-full min-w-[940px] [&_td]:px-1.5 [&_th]:px-1.5 [&_td]:overflow-hidden [&_td]:text-ellipsis [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[11px] [&_th]:h-auto [&_th]:py-1.5 [&_th]:whitespace-normal',
+                  : cn(
+                      'table-fixed w-full',
+                      hasTimeCard ? 'min-w-[1150px]' : 'min-w-[1000px]',
+                      '[&_td]:px-1.5 [&_th]:px-1.5 [&_td]:overflow-hidden [&_td]:text-ellipsis [&_th]:overflow-hidden [&_th]:text-ellipsis [&_th]:text-[11px] [&_th]:h-auto [&_th]:py-1.5 [&_th]:whitespace-normal',
+                    ),
               )}
             >
               <TableHeader>
                 <TableRow>
-                  <TableHead className={cw('w-[3.5%]', 'w-[4%]')} title="Serial number">No.</TableHead>
-                  <TableHead className={cw('w-[10%]', 'w-[18%]')} title="Employee — name, code and quick notes">Employee</TableHead>
-                  <TableHead className={cw('w-[9%]', 'w-[10.5%]')}>Code</TableHead>
-                  <TableHead className={cw('w-[5.5%]', 'w-[6%]')} title="Region of the employee's nationality country">Region</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[6.5%]'))} title="Total attendance hours of the month">Hrs</TableHead>
+                  {/* widths — VIEW MODE percentage sets (see cw below), each
+                      summing to 100%: the name / Net Payable / Balance columns
+                      get the room they need (long names + the inline
+                      arithmetic lines), while the compact numeric columns
+                      (Hrs, Final, Advance, Deduction) only keep what their
+                      content actually needs. */}
+                  <TableHead className={cw('w-[3%]', 'w-[3.5%]')} title="Serial number">No.</TableHead>
+                  <TableHead className={cw('w-[15.5%]', 'w-[21%]')} title="Employee — name, code and quick notes">Employee</TableHead>
+                  <TableHead className={cw('w-[7%]', 'w-[9.5%]')}>Code</TableHead>
+                  <TableHead className={cw('w-[5%]', 'w-[6%]')} title="Region of the employee's nationality country">Region</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[5%]', 'w-[5.5%]'))} title="Total attendance hours of the month">Hrs</TableHead>
                     {/* time-card columns — ONLY after time card hours were
                         added for a site (compact layout otherwise) */}
                     {hasTimeCard && (
                       <TableHead
-                        className="w-[6.5%] text-right"
+                        className="w-[5%] text-right"
                         title="Approved final time card hours of the month (entered per site via the Time Card button)"
                       >
                         Final
@@ -1996,19 +2012,19 @@ export function PayrollPage() {
                     )}
                     {hasTimeCard && (
                       <TableHead
-                        className="w-[8%] text-right"
+                        className="w-[10%] text-right"
                         title="Net Payable − time card amount ((Final Hours − Total Hours) × rate) — 0 while the difference is 0 (the amount only shows when the time card actually differs); the calculation renders inline in the cell"
                       >
                         Balance
                       </TableHead>
                     )}
-                    <TableHead className={cw('w-[5%]', 'w-[7%]')}>Trade</TableHead>
+                    <TableHead className={cw('w-[5%]', 'w-[6%]')}>Trade</TableHead>
                     <TableHead className={cw('w-[6.5%]', 'w-[7%]')} title="Payment method — cash, or the card type">Payment</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[7.5%]', 'w-[8.5%]'))}>Amount</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8%]'))}>Advance</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8%]'))} title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8.5%]'))}>Net Payable</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8%]'))}>Paid</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[7.5%]', 'w-[9%]'))}>Amount</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[7%]'))}>Advance</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[7%]'))} title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[9.5%]', 'w-[10%]'))}>Net Payable</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8.5%]'))}>Paid</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -2393,9 +2409,9 @@ export function PayrollPage() {
                         Total — {filteredEmployees.length} employee{filteredEmployees.length === 1 ? '' : 's'}
                         {filtersActive && ` (of ${scopedEmployees.length})`}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.hours)} h</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{fmtHrs(filteredTotals.hours)} h</TableCell>
                       {hasTimeCard && (
-                        <TableCell className="text-right font-mono text-sm">{fmtHrs(filteredTotals.finalHours)} h</TableCell>
+                        <TableCell className="text-right font-mono text-xs">{fmtHrs(filteredTotals.finalHours)} h</TableCell>
                       )}
                       {hasTimeCard && (
                         <TableCell className="text-right font-mono text-sm">{fmtMoney(filteredTotals.balance)}</TableCell>

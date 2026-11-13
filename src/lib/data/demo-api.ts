@@ -94,6 +94,9 @@ type VM = Record<string, unknown>;
 
 const clampRating = (v: number): number => Math.round(Math.max(0, Math.min(5, v)) * 10) / 10;
 
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
 const stripPassword = (p: (typeof db.profiles)[number]): Profile => {
   const { password: _pw, ...rest } = p;
   return rest;
@@ -2064,8 +2067,9 @@ export const demoApi = {
   },
 
   /** Bulk-save ONE site's approved TIME CARD hours (mirrors the
-   *  save_site_time_card_hours RPC in 20261113c_payroll_time_card.sql).
-   *  Entries with hours null/undefined are removed. */
+   *  save_site_time_card_hours RPC in 20261113d). Entries with hours
+   *  null/undefined are removed. A NEGATIVE total difference (time card <
+   *  attendance) is carried to the NEXT month's advance with a note. */
   async saveSiteTimeCardHours(
     payrollPeriodId: string,
     siteId: string,
@@ -2112,6 +2116,7 @@ export const demoApi = {
           site_id: siteId,
           employee_id: en.employee_id,
           time_card_hours: hours,
+          carryover_applied: 0,
           updated_at: nowISO(),
           updated_by: me?.id ?? null,
         });
@@ -2127,7 +2132,135 @@ export const demoApi = {
         created_at: nowISO(),
       });
     }
-    saveAndEmit(['payroll_time_card']);
+
+    // ---- CARRYOVER — a NEGATIVE total difference is deducted from the NEXT
+    //      month's salary by adding |extra| to the advance there (idempotent:
+    //      only the DELTA between needed and already-applied is adjusted) ---
+    const nextY = period.month === 12 ? period.year + 1 : period.year;
+    const nextM = period.month === 12 ? 1 : period.month + 1;
+    const monthName = MONTH_NAMES[period.month - 1];
+    const nextMonthName = `${MONTH_NAMES[nextM - 1]} ${nextY}`;
+    const affectedIds = [...new Set(entries.map((en) => en.employee_id))];
+
+    affectedIds.forEach((employeeId) => {
+      const pe = db.payrollEmployees.find(
+        (x) => x.payroll_period_id === payrollPeriodId && x.employee_id === employeeId,
+      );
+      if (!pe) return;
+      const tcs = db.payrollTimeCards.filter(
+        (tc) => tc.payroll_period_id === payrollPeriodId && tc.employee_id === employeeId,
+      );
+
+      // total difference across ALL of the employee's entries this period
+      let extra = 0;
+      let tcHours = 0;
+      tcs.forEach((tc) => {
+        const siteRow = db.payrollSites.find(
+          (s) => s.payroll_employee_id === pe.id && s.site_id === tc.site_id,
+        );
+        const siteHours = siteRow?.total_hours ?? 0;
+        const rate = siteHours > 0
+          ? (siteRow?.gross_salary ?? 0) / siteHours
+          : (pe.total_hours > 0 ? pe.gross_salary / pe.total_hours : 0);
+        extra += (tc.time_card_hours - siteHours) * rate;
+        tcHours += tc.time_card_hours;
+      });
+      extra = round2(extra);
+      const needed = extra < 0 ? round2(-extra) : 0;
+      const applied = round2(tcs.reduce((n, tc) => n + (tc.carryover_applied ?? 0), 0));
+      const delta = round2(needed - applied);
+      if (delta === 0) return;
+
+      // ensure NEXT month's payroll period exists (draft)
+      let nextPeriod = db.payrollPeriods.find((p) => p.year === nextY && p.month === nextM);
+      if (!nextPeriod) {
+        nextPeriod = {
+          id: uid(), year: nextY, month: nextM, status: 'draft',
+          created_by: me?.id ?? null, finalized_by: null, finalized_at: null,
+          created_at: nowISO(),
+        };
+        db.payrollPeriods.push(nextPeriod);
+      }
+      if (nextPeriod.status === 'finalized') {
+        throw new Error(
+          `The ${nextMonthName} payroll is already finalized — reopen it before changing time card carryovers`,
+        );
+      }
+
+      const marker = `[Time card ${monthName} ${period.year}]`;
+      const note = `${marker} time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → ${needed} added to advance`;
+
+      let nextPe = db.payrollEmployees.find(
+        (x) => x.payroll_period_id === nextPeriod!.id && x.employee_id === employeeId,
+      );
+      let actual = 0;
+      if (!nextPe) {
+        if (delta > 0) {
+          nextPe = {
+            id: uid(),
+            payroll_period_id: nextPeriod.id,
+            employee_id: employeeId,
+            opening_lifetime_hours: 0,
+            closing_lifetime_hours: 0,
+            total_hours: 0,
+            unrated_hours: 0,
+            unassigned_hours: 0,
+            gross_salary: 0,
+            advance: delta,
+            deduction: 0,
+            absent_deduction: 0,
+            absent_deduction_edited: false,
+            net_salary: round2(-delta),
+            payment_status: 'unpaid',
+            paid_at: null,
+            paid_by: null,
+            notes: note,
+            trade_id_snapshot: null,
+            salary_role_snapshot: 'standard',
+            manually_edited: false,
+          };
+          db.payrollEmployees.push(nextPe);
+          actual = delta;
+        }
+      } else {
+        const newAdvance = Math.max(0, round2(nextPe.advance + delta));
+        actual = round2(newAdvance - nextPe.advance);
+        const stripped = (nextPe.notes ?? '')
+          .split('\n')
+          .filter((line) => !line.startsWith(marker))
+          .join('\n')
+          .trim();
+        nextPe.notes = needed > 0
+          ? (stripped ? `${stripped}\n` : '') + note
+          : (stripped || null);
+        nextPe.advance = newAdvance;
+        nextPe.net_salary = round2(
+          nextPe.gross_salary - newAdvance - nextPe.deduction - (nextPe.absent_deduction ?? 0),
+        );
+      }
+
+      // rebalance the tracking so Σ carryover_applied = applied so far
+      tcs.forEach((tc) => { tc.carryover_applied = 0; });
+      if (tcs.length > 0 && applied + actual !== 0) {
+        tcs[0].carryover_applied = round2(applied + actual);
+      }
+
+      if (actual !== 0) {
+        const emp = db.employees.find((x) => x.id === employeeId);
+        db.payrollAudit.push({
+          id: uid(), period_id: payrollPeriodId, trade_id: null, action: 'time_card_carryover',
+          actor_id: me?.id ?? null, actor_name: me?.name ?? null,
+          details: `${emp ? `${emp.full_name} (${emp.employee_code})` : 'Unknown employee'} — time card ${round2(tcHours)} h vs attendance ${pe.total_hours} h → ${
+            actual > 0
+              ? `${actual} added to the ${nextMonthName} advance`
+              : `carryover reduced by ${round2(-actual)} (${nextMonthName} advance)`
+          }`,
+          created_at: nowISO(),
+        });
+      }
+    });
+
+    saveAndEmit(['payroll_time_card', 'payroll_period', 'payroll_employee']);
   },
 
   // ---- realtime ------------------------------------------------------------------------------

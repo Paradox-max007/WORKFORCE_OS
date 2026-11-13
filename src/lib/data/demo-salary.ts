@@ -38,7 +38,7 @@ import {
   ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE,
   SALARY_THRESHOLD_HOURS, SALARY_THRESHOLD_MONTHS,
 } from '@/lib/types';
-import type { DemoDB } from './demo-store';
+import type { DemoDB, DemoPayrollEmployee } from './demo-store';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
 // ---------------------------------------------------------------------------
@@ -730,13 +730,33 @@ export const buildSalarySheet = (
   });
 
   const sites: SalarySheetSiteGroup[] = [];
-  // approved time card hours (period × site × employee) — one lookup map
+  // approved time card hours (period × site × employee) — lookups + the
+  // per-site difference amount (time card − attendance hours) × rate
   const timeCardOf = (siteId: string, employeeId: string): number | null => {
     const tc = database.payrollTimeCards.find(
       (x) => x.payroll_period_id === period!.id
         && x.site_id === siteId && x.employee_id === employeeId,
     );
     return tc ? tc.time_card_hours : null;
+  };
+  /** rate for a site row: site gross ÷ site hours, falling back to the
+   *  employee's blended rate when the site has no hours */
+  const timeCardRateOf = (
+    siteHours: number, siteGross: number, empHours: number, empGross: number,
+  ): number => {
+    if (siteHours > 0) return siteGross / siteHours;
+    if (empHours > 0) return empGross / empHours;
+    return 0;
+  };
+  const timeCardAmountOf = (siteId: string, employeeId: string, pe: DemoPayrollEmployee): number | null => {
+    const tcHours = timeCardOf(siteId, employeeId);
+    if (tcHours == null) return null;
+    const siteRow = database.payrollSites.find(
+      (s) => s.payroll_employee_id === pe.id && s.site_id === siteId,
+    );
+    const siteHours = siteRow?.total_hours ?? 0;
+    const rate = timeCardRateOf(siteHours, siteRow?.gross_salary ?? 0, pe.total_hours, pe.gross_salary);
+    return round2((tcHours - siteHours) * rate);
   };
   siteKeys.forEach(({ site_id, site_name }) => {
     const rows: SalarySheetSiteGroup['rows'] = [];
@@ -770,6 +790,7 @@ export const buildSalarySheet = (
         has_missing_rate: siteRow.has_missing_rate,
         manually_edited: siteRow.manually_edited,
         time_card_hours: site_id ? timeCardOf(site_id, pe.employee_id) : null,
+        time_card_amount: site_id ? timeCardAmountOf(site_id, pe.employee_id, pe) : null,
         lines,
         employee_id: pe.employee_id,
         full_name: emp?.full_name ?? 'Unknown',
@@ -783,10 +804,12 @@ export const buildSalarySheet = (
       });
     });
     rows.sort((a, b) => a.full_name.localeCompare(b.full_name));
-    const groupTimeCard = site_id
-      ? database.payrollTimeCards
-          .filter((tc) => tc.payroll_period_id === period!.id && tc.site_id === site_id)
-          .reduce((n, tc) => n + tc.time_card_hours, 0)
+    const groupTimeCards = site_id
+      ? database.payrollTimeCards.filter((tc) => tc.payroll_period_id === period!.id && tc.site_id === site_id)
+      : [];
+    const groupTimeCard = groupTimeCards.reduce((n, tc) => n + tc.time_card_hours, 0);
+    const groupTimeCardAmount = site_id
+      ? pes.reduce((n, pe) => n + (timeCardAmountOf(site_id, pe.employee_id, pe) ?? 0), 0)
       : 0;
     sites.push({
       site_id,
@@ -795,6 +818,7 @@ export const buildSalarySheet = (
       total_hours: round2(rows.reduce((n, r) => n + r.total_hours, 0)),
       gross_salary: round2(rows.reduce((n, r) => n + r.gross_salary, 0)),
       time_card_total: site_id && groupTimeCard > 0 ? round2(groupTimeCard) : null,
+      time_card_amount_total: site_id && groupTimeCards.length > 0 ? round2(groupTimeCardAmount) : null,
       rows,
     });
   });
@@ -906,6 +930,7 @@ export const buildSalarySheet = (
         has_missing_rate: s.has_missing_rate,
         manually_edited: s.manually_edited,
         time_card_hours: s.site_id ? timeCardOf(s.site_id, pe.employee_id) : null,
+        time_card_amount: s.site_id ? timeCardAmountOf(s.site_id, pe.employee_id, pe) : null,
         lines: database.payrollLines
           .filter((l) => l.payroll_employee_id === pe.id
             && (l.site_id ?? '__none__') === (s.site_id ?? '__none__'))
@@ -950,13 +975,24 @@ export const buildSalarySheet = (
       unrated_hours: pe.unrated_hours,
       unassigned_hours: pe.unassigned_hours,
       // approved time card hours of the month (null → none entered); drives
-      // the conditional Final Hours / Balance columns on the Payroll page
+      // the conditional Final Hours / Balance columns on the Payroll page.
+      // time_card_amount = Σ per-site (time card − attendance) × rate — the
+      // difference added to the net payable (positive) or carried to next
+      // month's advance (negative)
       time_card_hours: (() => {
         const tcs = database.payrollTimeCards.filter(
           (tc) => tc.payroll_period_id === pe.payroll_period_id
             && tc.employee_id === pe.employee_id,
         );
         return tcs.length > 0 ? round2(tcs.reduce((n, tc) => n + tc.time_card_hours, 0)) : null;
+      })(),
+      time_card_amount: (() => {
+        const tcs = database.payrollTimeCards.filter(
+          (tc) => tc.payroll_period_id === pe.payroll_period_id
+            && tc.employee_id === pe.employee_id,
+        );
+        if (tcs.length === 0) return null;
+        return round2(tcs.reduce((n, tc) => n + (timeCardAmountOf(tc.site_id, tc.employee_id, pe) ?? 0), 0));
       })(),
       gross_salary: pe.gross_salary,
       advance: pe.advance,

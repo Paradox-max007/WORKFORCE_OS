@@ -21,13 +21,26 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
-/** BALANCE = (time card hours − total hours) × effective rate − net payable.
- *  Effective rate = gross ÷ total hours (the blended rate actually used by
- *  the month's salary lines — handles mid-month trade / rate changes). */
+/** The time card EXTRA of an employee — Σ per-site (time card − attendance
+ *  hours) × rate; 0 when nothing was entered. POSITIVE extra is added to the
+ *  net payable; NEGATIVE extra is carried to the next month's advance. */
+export function payrollTimeCardExtraOf(e: PayrollEmployeeVM): number {
+  return e.time_card_amount ?? 0;
+}
+
+/** The NET PAYABLE actually due this month = attendance net + the POSITIVE
+ *  time card extra (negative extras are recovered next month via the
+ *  advance, never deducted twice). */
+export function payrollNetPayableOf(e: PayrollEmployeeVM): number {
+  return round2(e.net_salary + Math.max(e.time_card_amount ?? 0, 0));
+}
+
+/** BALANCE = net payable − time card extra
+ *  (extra = (final hours − total hours) × rate, per the user's formula).
+ *  null → no time card entered for the employee. */
 export function payrollBalanceOf(e: PayrollEmployeeVM): number | null {
   if (e.time_card_hours == null) return null;
-  const rate = e.total_hours > 0 ? e.gross_salary / e.total_hours : 0;
-  return round2((e.time_card_hours - e.total_hours) * rate - e.net_salary);
+  return round2(payrollNetPayableOf(e) - (e.time_card_amount ?? 0));
 }
 
 /** The effective hourly rate behind the Balance column (gross ÷ total hours). */
@@ -126,8 +139,9 @@ export function buildPayrollExportColumns(hasTimeCard: boolean): PayrollExportCo
     },
     {
       key: 'net', header: 'Net Payable', width: 14, numeric: true, money: true,
-      value: (e) => round2(e.net_salary),
-      total: (rows) => round2(rows.reduce((n, e) => n + e.net_salary, 0)),
+      // attendance net + the POSITIVE time card extra (what is actually due)
+      value: (e) => payrollNetPayableOf(e),
+      total: (rows) => round2(rows.reduce((n, e) => n + payrollNetPayableOf(e), 0)),
     },
   );
   return columns;

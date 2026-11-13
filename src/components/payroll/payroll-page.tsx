@@ -24,13 +24,20 @@
 //   • NATIONALITY column right after Code — Asian / African / Arab /
 //     European / Latin American / Others (the region of the employee's
 //     nationality country)
-//   • TIME CARD — the Time Card button opens a per-site dialog where the
-//     APPROVED timesheet (time card) hours of that site's employees are
-//     entered. The extra Final Hours + Balance columns render ONLY after
-//     time card hours exist (compact layout otherwise):
+//   • TIME CARD — entered per site on the SALARY SHEET page (each site
+//     section has its own Time Card button). Its effect shows HERE: the extra
+//     Final Hours + Balance columns render ONLY after time card hours exist
+//     (compact layout otherwise), and the NET PAYABLE includes the positive
+//     time card difference, shown as the full calculation:
+//       1,160.00 (from attendance) + 60.00 (time card) = 1,220.00
+//     A NEGATIVE difference is NOT deducted this month — it is carried to the
+//     NEXT month's salary (added to that employee's advance there, with a
+//     note carrying the time card + attendance hours details; the note is
+//     visible as a tooltip on the Advance cell).
 //       Final Hours = Σ approved time card hours of the month
-//       Balance = (Final Hours − Total Hours) × effective rate − Net Payable
-//     (effective rate = gross ÷ total hours — the month's blended rate)
+//       extra = Σ per-site (Final − site hours) × rate
+//       Net payable = attendance net + max(extra, 0)
+//       Balance = net payable − extra
 //   • amounts everywhere are PLAIN numbers (no “AED” prefix — the whole
 //     page uses one currency by default)
 //   • cards at the top: Paid salary (Σ net of paid) and Balance to pay
@@ -81,8 +88,8 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, ClipboardCheck,
-  Clock, CreditCard, Eye, FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock,
+  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
+  FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock,
   LockOpen, Pencil, PencilLine, RotateCcw, Scale, Search, StickyNote, Trash2,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
@@ -115,6 +122,7 @@ import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-d
 import { dataApi } from '@/lib/data';
 import {
   payrollBalanceOf, payrollEffectiveRateOf, payrollExportFileName,
+  payrollNetPayableOf, payrollTimeCardExtraOf,
 } from '@/lib/export-payroll-xlsx';
 import { fmtDate, fmtDateTime, fmtTimeAgo, initials } from '@/lib/format';
 import {
@@ -124,8 +132,7 @@ import { cn } from '@/lib/utils';
 import {
   type CardType, DEFAULT_DEDUCTION_SETTINGS, type DeductionSettings,
   type EmployeeNote, type PayrollEmployeeVM,
-  type SalarySheetReport, type SalarySheetSiteGroup, type SiteTimeCardEntry,
-  type SiteWithCount, type Trade,
+  type SalarySheetReport, type SiteWithCount, type Trade,
   type BranchWithCount,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
@@ -271,6 +278,59 @@ function CalculationPanel({ e, year, month }: {
           {' '}<span className="font-mono text-foreground">{fmtHrs(e.qualified_hours)} h</span> qualified
         </p>
       </div>
+
+      {/* time card — the approved hours per site and the difference that
+          flows into the net payable (or next month's advance) */}
+      {e.time_card_hours != null && (
+        <div>
+          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Time card — final {fmtHrs(e.time_card_hours)} h
+          </p>
+          <div className="overflow-hidden rounded-lg border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Site</TableHead>
+                  <TableHead className="text-right">Attendance</TableHead>
+                  <TableHead className="text-right">Time card</TableHead>
+                  <TableHead className="text-right">Rate</TableHead>
+                  <TableHead className="text-right">Difference</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {e.sites.filter((s) => s.time_card_hours != null).map((s, i) => (
+                  <TableRow key={`${s.site_id ?? 'none'}-${i}`}>
+                    <TableCell className="py-1.5">{s.site_name}</TableCell>
+                    <TableCell className="py-1.5 text-right font-mono">{fmtHrs(s.total_hours)} h</TableCell>
+                    <TableCell className="py-1.5 text-right font-mono">{fmtHrs(s.time_card_hours!)} h</TableCell>
+                    <TableCell className="py-1.5 text-right font-mono text-muted-foreground">
+                      {fmtMoney(s.total_hours > 0 ? s.gross_salary / s.total_hours : payrollEffectiveRateOf(e))}
+                    </TableCell>
+                    <TableCell className={cn(
+                      'py-1.5 text-right font-mono font-semibold',
+                      (s.time_card_amount ?? 0) > 0 && 'text-amber-600 dark:text-amber-400',
+                      (s.time_card_amount ?? 0) < 0 && 'text-rose-500',
+                    )}>
+                      {fmtMoney(s.time_card_amount ?? 0)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                <TableRow>
+                  <TableCell className="py-1.5 font-semibold">Net payable effect</TableCell>
+                  <TableCell colSpan={3} className="py-1.5 text-right font-mono text-muted-foreground">
+                    {(e.time_card_amount ?? 0) >= 0
+                      ? `${fmtMoney(e.net_salary)} + ${fmtMoney(e.time_card_amount ?? 0)}`
+                      : `${fmtMoney(e.net_salary)} (− ${fmtMoney(-(e.time_card_amount ?? 0))} → next month's advance)`}
+                  </TableCell>
+                  <TableCell className="py-1.5 text-right font-mono font-semibold">
+                    {fmtMoney(payrollNetPayableOf(e))}
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </div>
+        </div>
+      )}
 
       {/* site distribution */}
       <div>
@@ -652,180 +712,6 @@ function PaymentMethodCell({ e }: { e: PayrollEmployeeVM }) {
 }
 
 // ---------------------------------------------------------------------------
-// TIME CARD dialog — enter the APPROVED timesheet (time card) hours of ONE
-// site's employees. Saving is what "adds time card hours of that specific
-// site": afterwards the Payroll table grows the Final Hours + Balance columns
-// (only then — no data keeps the compact layout). Inputs are prefilled with
-// the stored hours; clearing a field removes that employee's entry.
-// ---------------------------------------------------------------------------
-function TimeCardDialog({ open, onOpenChange, periodId, siteGroups, year, month, onSaved }: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  periodId: string | null;
-  /** non-idle site groups of this period, ALREADY permission-scoped by the page */
-  siteGroups: SalarySheetSiteGroup[];
-  year: number;
-  month: number;
-  onSaved: () => void;
-}) {
-  const [siteId, setSiteId] = useState<string>('');
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
-
-  const group = useMemo(
-    () => siteGroups.find((g) => g.site_id === siteId) ?? null,
-    [siteGroups, siteId],
-  );
-  const rows = useMemo(() => group?.rows ?? [], [group]);
-
-  // (re)prefill from the stored time card hours whenever the dialog opens or
-  // the picked site changes
-  useEffect(() => {
-    if (!open) return;
-    setSiteId((prev) => (siteGroups.some((g) => g.site_id === prev)
-      ? prev
-      : (siteGroups[0]?.site_id ?? '')));
-  }, [open, siteGroups]);
-  useEffect(() => {
-    const next: Record<string, string> = {};
-    rows.forEach((r) => {
-      next[r.employee_id] = r.time_card_hours != null ? String(r.time_card_hours) : '';
-    });
-    setValues(next);
-  }, [siteId, rows]);
-
-  const filledCount = rows.filter((r) => (values[r.employee_id] ?? '').trim() !== '').length;
-
-  const save = async (): Promise<void> => {
-    if (!periodId || !siteId || saving) return;
-    const entries: SiteTimeCardEntry[] = [];
-    for (const r of rows) {
-      const raw = (values[r.employee_id] ?? '').trim();
-      if (raw === '') {
-        entries.push({ employee_id: r.employee_id, hours: null });
-        continue;
-      }
-      const n = Number(raw);
-      if (!Number.isFinite(n) || n < 0) {
-        toast.error(`Time card hours of ${r.full_name} must be 0 or more`);
-        return;
-      }
-      entries.push({ employee_id: r.employee_id, hours: round2(n) });
-    }
-    setSaving(true);
-    try {
-      await dataApi.saveSiteTimeCardHours(periodId, siteId, entries);
-      toast.success('Time card hours saved', {
-        description: `${group?.site_name ?? 'Site'} — ${filledCount} employee${filledCount === 1 ? '' : 's'} with hours. Final Hours & Balance now show on the table.`,
-      });
-      onOpenChange(false);
-      onSaved();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save the time card hours');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => { if (!saving) onOpenChange(v); }}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <ClipboardCheck size={16} className="text-brand" />
-            Time card hours — {MONTH_NAMES[month - 1]} {year}
-          </DialogTitle>
-          <DialogDescription>
-            Enter the approved timesheet (time card) hours of a site&apos;s employees. After
-            saving, the table gains the <b>Final Hours</b> and <b>Balance</b> columns —
-            Balance = (Final Hours − Total Hours) × effective rate − Net Payable.
-          </DialogDescription>
-        </DialogHeader>
-
-        {siteGroups.length === 0 ? (
-          <p className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
-            No sites with employees this month in the current branch scope.
-          </p>
-        ) : (
-          <div className="space-y-3">
-            <Select value={siteId} onValueChange={setSiteId} disabled={saving}>
-              <SelectTrigger className="h-10 bg-card" aria-label="Site of the time card">
-                <SelectValue placeholder="Select a site…" />
-              </SelectTrigger>
-              <SelectContent>
-                {siteGroups.map((g) => (
-                  <SelectItem key={g.site_id} value={g.site_id!}>
-                    {g.site_name} ({g.employees} employee{g.employees === 1 ? '' : 's'})
-                    {(g.time_card_total ?? 0) > 0 ? ' · time card ✓' : ''}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {rows.length > 0 && (
-              <div className="max-h-[46vh] overflow-y-auto rounded-lg border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Employee</TableHead>
-                      <TableHead className="text-right">Site Hours</TableHead>
-                      <TableHead className="w-36 text-right">Time Card Hours</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rows.map((r) => (
-                      <TableRow key={r.employee_id}>
-                        <TableCell className="py-2">
-                          <p className="truncate text-sm font-medium">{r.full_name}</p>
-                          <p className="font-mono text-[10px] text-muted-foreground">{r.employee_code}</p>
-                        </TableCell>
-                        <TableCell className="py-2 text-right font-mono text-xs">
-                          {fmtHrs(r.total_hours)} h
-                        </TableCell>
-                        <TableCell className="py-2">
-                          <Input
-                            type="number" min={0} step="0.5" inputMode="decimal" disabled={saving}
-                            placeholder="—"
-                            className="h-8 border-border/70 bg-card text-right font-mono text-xs"
-                            value={values[r.employee_id] ?? ''}
-                            onChange={(ev) => setValues((prev) => ({
-                              ...prev, [r.employee_id]: ev.target.value,
-                            }))}
-                            aria-label={`Time card hours of ${r.full_name}`}
-                          />
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Empty field = no entry for that employee (an existing one is removed).
-              {filledCount > 0 && ` ${filledCount} of ${rows.length} employees filled.`}
-            </p>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => { void save(); }}
-            disabled={saving || siteGroups.length === 0 || !siteId || rows.length === 0}
-            className="brand-gradient font-semibold text-white"
-          >
-            {saving ? <Loader2 size={15} className="mr-1 animate-spin" /> : <ClipboardCheck size={15} className="mr-1" />}
-            Save time card
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export function PayrollPage() {
@@ -857,9 +743,6 @@ export function PayrollPage() {
 
   const [finalizeOpen, setFinalizeOpen] = useState(false);
   const [reopenOpen, setReopenOpen] = useState(false);
-  // per-site APPROVED time card hours dialog (adds the Final Hours + Balance
-  // columns once saved)
-  const [timeCardOpen, setTimeCardOpen] = useState(false);
 
   // ---- edit mode (trade dropdown + inline advance / deduction) -------------
   const [editMode, setEditMode] = useState(false);
@@ -1056,26 +939,12 @@ export function PayrollPage() {
 
   // ---- TIME CARD ------------------------------------------------------------
   // The extra Final Hours + Balance columns render ONLY when time card hours
-  // exist in the current scope ("only give that extra columns when time card
-  // hours of that site were added") — the layout stays compact otherwise.
+  // exist in the current scope — the layout stays compact otherwise. The
+  // time card itself is entered per site on the SALARY SHEET.
   const hasTimeCard = useMemo(
     () => scopedEmployees.some((e) => e.time_card_hours != null),
     [scopedEmployees],
   );
-  // non-idle site groups of this period, narrowed to what the viewer may
-  // touch: normal admins → granted-branch + assigned sites; super admin →
-  // the picked branch (or every site when "All branches")
-  const timeCardSites = useMemo<SalarySheetSiteGroup[]>(() => {
-    const groups = (report?.sites ?? []).filter((g) => g.site_id != null && !g.idle);
-    if (allowedSiteIds) {
-      return groups.filter((g) => allowedSiteIds.has(g.site_id!));
-    }
-    if (branchFilter === FILTER_NONE) return [];
-    if (branchFilter !== 'all') {
-      return groups.filter((g) => branchIdOfSite.get(g.site_id!) === branchFilter);
-    }
-    return groups;
-  }, [report, allowedSiteIds, branchFilter, branchIdOfSite]);
 
   // notes grouped per employee (for the sticky-note icons)
   const notesByEmployee = useMemo(() => {
@@ -1190,7 +1059,7 @@ export function PayrollPage() {
     // manual deduction + the automatic absent deduction (what the column shows)
     deductions: round2(filteredEmployees.reduce((n, e) => n + e.deduction + (e.absent_deduction ?? 0), 0)),
     gross: round2(filteredEmployees.reduce((n, e) => n + e.gross_salary, 0)),
-    net: round2(filteredEmployees.reduce((n, e) => n + e.net_salary, 0)),
+    net: round2(filteredEmployees.reduce((n, e) => n + payrollNetPayableOf(e), 0)),
     // time-card columns (rendered only when hasTimeCard)
     finalHours: round2(filteredEmployees.reduce((n, e) => n + (e.time_card_hours ?? 0), 0)),
     balance: round2(filteredEmployees.reduce((n, e) => n + (payrollBalanceOf(e) ?? 0), 0)),
@@ -1262,12 +1131,15 @@ export function PayrollPage() {
   // payment cards — read from the stored settlement rows (never recalculated).
   // When a BRANCH is selected (or a normal admin's allowance applies) the
   // cards describe that scope — the selected branch's payroll is what loads.
+  // The net figures INCLUDE the positive time card differences (what is
+  // actually due this month); negative differences live in next month's
+  // advance, not here.
   const paidNet = useMemo(
-    () => round2(scopedEmployees.filter((e) => e.payment_status === 'paid').reduce((n, e) => n + e.net_salary, 0)),
+    () => round2(scopedEmployees.filter((e) => e.payment_status === 'paid').reduce((n, e) => n + payrollNetPayableOf(e), 0)),
     [scopedEmployees],
   );
   const balanceToPay = useMemo(
-    () => round2(scopedEmployees.filter((e) => e.payment_status !== 'paid').reduce((n, e) => n + e.net_salary, 0)),
+    () => round2(scopedEmployees.filter((e) => e.payment_status !== 'paid').reduce((n, e) => n + payrollNetPayableOf(e), 0)),
     [scopedEmployees],
   );
   const scopedPaidCount = scopedEmployees.filter((e) => e.payment_status === 'paid').length;
@@ -1363,7 +1235,7 @@ export function PayrollPage() {
         paid: true,
       });
       toast.success('Marked as paid', {
-        description: `${e.full_name} — ${fmtMoney(e.net_salary)} (net). Green in every Salary Sheet section.`,
+        description: `${e.full_name} — ${fmtMoney(payrollNetPayableOf(e))} (net). Green in every Salary Sheet section.`,
       });
       load();
     } catch (err) {
@@ -1539,18 +1411,6 @@ export function PayrollPage() {
                 {selectableYears().map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}
               </SelectContent>
             </Select>
-            {report?.exists && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setTimeCardOpen(true)}
-                className={cn('h-9 font-medium', hasTimeCard && 'border-brand/40 text-brand')}
-                title="Add / edit the approved time card hours of a site — adds the Final Hours & Balance columns"
-              >
-                <ClipboardCheck size={14} className="mr-1" />
-                Time Card
-              </Button>
-            )}
             {report?.exists && (
               <Button
                 variant="outline"
@@ -1878,8 +1738,9 @@ export function PayrollPage() {
                               : <span className="text-muted-foreground">—</span>}
                           </TableCell>
                         )}
-                        {/* Balance = (Final − Total) × effective rate − Net
-                            Payable; tooltip shows the full arithmetic */}
+                        {/* Balance = net payable − time card extra
+                            (extra = (Final − Total) × rate); tooltip shows
+                            the full arithmetic */}
                         {hasTimeCard && (
                           <TableCell className="text-right">
                             {(() => {
@@ -1887,7 +1748,7 @@ export function PayrollPage() {
                               if (bal == null) {
                                 return <span className="text-muted-foreground">—</span>;
                               }
-                              const rate = payrollEffectiveRateOf(e);
+                              const extra = payrollTimeCardExtraOf(e);
                               return (
                                 <span
                                   className={cn(
@@ -1895,7 +1756,7 @@ export function PayrollPage() {
                                     bal > 0 ? 'text-amber-600 dark:text-amber-400'
                                       : bal < 0 ? 'text-rose-500' : 'text-muted-foreground',
                                   )}
-                                  title={`(${fmtHrs(e.time_card_hours ?? 0)} final − ${fmtHrs(e.total_hours)} total) × ${fmtMoney(rate)} effective rate = ${fmtMoney(round2((e.time_card_hours! - e.total_hours) * rate))} − ${fmtMoney(e.net_salary)} net payable = ${fmtMoney(bal)}`}
+                                  title={`net payable ${fmtMoney(payrollNetPayableOf(e))} − time card amount ${fmtMoney(extra)} = ${fmtMoney(bal)}`}
                                 >
                                   {fmtMoney(bal)}
                                 </span>
@@ -1947,8 +1808,15 @@ export function PayrollPage() {
                               />
                             </div>
                           ) : (
-                            <span className={cn('font-mono text-xs', e.advance > 0 ? '' : 'text-muted-foreground')}>
+                            <span
+                              className={cn('font-mono text-xs', e.advance > 0 ? '' : 'text-muted-foreground')}
+                              title={[
+                                e.advance > 0 ? `Advance: ${fmtMoney(e.advance)}` : 'No advance this month',
+                                e.notes ? `Note: ${e.notes}` : null,
+                              ].filter(Boolean).join('\n')}
+                            >
                               {e.advance > 0 ? fmtMoney(e.advance) : '—'}
+                              {e.notes && <StickyNote size={10} className="ml-1 inline text-amber-500" aria-hidden />}
                             </span>
                           )}
                         </TableCell>
@@ -2040,8 +1908,51 @@ export function PayrollPage() {
                             </button>
                           )}
                         </TableCell>
-                        <TableCell className="text-right font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
-                          {fmtMoney(e.net_salary)}
+                        {/* NET PAYABLE — attendance net + the POSITIVE time
+                            card difference, shown as the full calculation
+                            (1,160.00 + 60.00 = 1,220.00). A negative
+                            difference is NOT deducted here — it goes to next
+                            month's advance (chip under the value). */}
+                        <TableCell className="text-right">
+                          {(() => {
+                            const extra = e.time_card_amount;
+                            if (hasTimeCard && extra != null && extra > 0) {
+                              return (
+                                <div
+                                  className="flex flex-col items-end leading-tight"
+                                  title={`Net from attendance ${fmtMoney(e.net_salary)} + time card extra ${fmtMoney(extra)} = ${fmtMoney(payrollNetPayableOf(e))}`}
+                                >
+                                  <span className="font-mono text-[11px] text-muted-foreground">
+                                    {fmtMoney(e.net_salary)} <span aria-hidden>+</span>{' '}
+                                    <span className="font-semibold text-amber-600 dark:text-amber-400">{fmtMoney(extra)}</span> <span aria-hidden>=</span>
+                                  </span>
+                                  <span className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                                    {fmtMoney(payrollNetPayableOf(e))}
+                                  </span>
+                                </div>
+                              );
+                            }
+                            if (hasTimeCard && extra != null && extra < 0) {
+                              return (
+                                <div
+                                  className="flex flex-col items-end leading-tight"
+                                  title={`Time card difference ${fmtMoney(extra)} is negative — ${fmtMoney(-extra)} is recovered from the next month's salary (added to the advance there with a note)`}
+                                >
+                                  <span className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                                    {fmtMoney(e.net_salary)}
+                                  </span>
+                                  <span className="font-mono text-[11px] text-rose-500">
+                                    − {fmtMoney(-extra)} → next month
+                                  </span>
+                                </div>
+                              );
+                            }
+                            return (
+                              <span className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                                {fmtMoney(payrollNetPayableOf(e))}
+                              </span>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="text-right">
                           {/* INSTANT toggle — no confirmation dialogs */}
@@ -2178,17 +2089,8 @@ export function PayrollPage() {
         </>
       )}
 
-      {/* dialogs — payments are INSTANT (no dialogs); the Time Card dialog
-          adds a site's approved time card hours */}
-      <TimeCardDialog
-        open={timeCardOpen}
-        onOpenChange={setTimeCardOpen}
-        periodId={period?.id ?? null}
-        siteGroups={timeCardSites}
-        year={year}
-        month={month}
-        onSaved={load}
-      />
+      {/* dialogs — payments are INSTANT (no dialogs). The Time Card dialog
+          lives on the SALARY SHEET page (per site section). */}
       <FinalizeDialog report={report} open={finalizeOpen} onOpenChange={setFinalizeOpen} onDone={load} />
       <ReopenDialog report={report} open={reopenOpen} onOpenChange={setReopenOpen} onDone={load} />
     </div>

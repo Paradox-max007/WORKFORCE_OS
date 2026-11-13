@@ -145,15 +145,21 @@ export interface DemoAuditEntry {
   created_at: string;
 }
 
-/** Approved time card hours for one (period, site, employee) — entered in the
- *  Payroll page's Time Card dialog. Lives OUTSIDE the regenerated calculation
- *  rows so drafts never wipe it (mirrors the payroll_time_card table). */
+/** Approved time card hours for one (period, site, employee) — entered per
+ *  site on the Salary Sheet. Lives OUTSIDE the regenerated calculation
+ *  rows so drafts never wipe it (mirrors the payroll_time_card table).
+ *  carryover_applied tracks how much of this period's NEGATIVE difference
+ *  currently sits in the NEXT month's advance (idempotency). */
 export interface DemoPayrollTimeCard {
   id: string;
   payroll_period_id: string;
   site_id: string;
   employee_id: string;
   time_card_hours: number;
+  /** how much of this entry's negative difference is currently applied to
+   *   the next month's advance (only the employee-level SUM is meaningful —
+   *   rebalanced onto the first entry on every save) */
+  carryover_applied: number;
   updated_at: string;
   updated_by: string | null;
 }
@@ -807,6 +813,9 @@ function loadDB(): DemoDB {
         });
         // payroll time card hours shipped without a version bump — heal to []
         if (!parsed.payrollTimeCards) parsed.payrollTimeCards = [];
+        parsed.payrollTimeCards?.forEach((tc) => {
+          if (tc.carryover_applied == null) tc.carryover_applied = 0;
+        });
         return parsed;
       }
     }

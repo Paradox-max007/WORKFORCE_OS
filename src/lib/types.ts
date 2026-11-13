@@ -618,6 +618,9 @@ export interface PayrollEmployeeSiteVM {
   /** approved time card hours at THIS site (null → not entered); present on
    * the Salary Sheet site-group rows and the Payroll e.sites[] rows */
   time_card_hours?: number | null;
+  /** per-site time card DIFFERENCE amount = (time card hours − attendance
+   * hours) × rate (rate = site gross ÷ site hours) — null → not entered */
+  time_card_amount?: number | null;
   lines: PayrollSalaryLineVM[];
 }
 
@@ -656,10 +659,15 @@ export interface PayrollEmployeeVM {
   unrated_hours: number;
   /** hours without any trade assigned */
   unassigned_hours: number;
-  /** approved TIME CARD hours of the month (Σ per-site entries, entered in
-   * the Payroll page's Time Card dialog) — null → nothing entered yet; the
-   * Final Hours + Balance columns render only when present */
+  /** approved TIME CARD hours of the month (Σ per-site entries, entered per
+   * site on the Salary Sheet) — null → nothing entered yet; the Final Hours
+   * + Balance columns render only when present */
   time_card_hours: number | null;
+  /** Σ per-site (time card − attendance hours) × rate — the time card
+   * difference. POSITIVE → added to the Payroll net payable (shown as
+   * "base + extra = total"); NEGATIVE → carried to the NEXT month's advance
+   * (added there by the save RPC, with a note). null → nothing entered */
+  time_card_amount: number | null;
   gross_salary: number;
   advance: number;
   deduction: number;
@@ -709,6 +717,9 @@ export interface SalarySheetSiteGroup {
   gross_salary: number;
   /** Σ approved time card hours of this site's employees (null → none) */
   time_card_total?: number | null;
+  /** Σ per-site time card difference amounts of this site's employees
+   * (null → none) — powers the site header indicator + Difference column */
+  time_card_amount_total?: number | null;
   /** true → the trailing "Idle Employees" group (no current site / unassigned hours) */
   idle?: boolean;
   rows: (PayrollEmployeeSiteVM & {

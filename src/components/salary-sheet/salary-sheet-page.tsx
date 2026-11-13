@@ -25,6 +25,14 @@
 //     SAME rule as the Payroll page: the absent amount edited there has
 //     PRIORITY over the configured rule and flows into this sheet, its
 //     totals and the net payable automatically
+//   • TIME CARD — every site section header has its own Time Card button
+//     (a chip shows which sites already have approved hours + their total
+//     difference). Saving stores the hours per site; the backend then adds a
+//     POSITIVE difference ((time card − attendance hours) × rate) to the
+//     employee's net payable in the Payroll, and carries a NEGATIVE one to
+//     the NEXT month's advance (with a note). This page shows the difference
+//     as a separate per-row column (only in sections with time card hours).
+//   • amounts are PLAIN numbers (no “AED” prefix — same as the Payroll page)
 //   • BRANCH-WISE SEPARATION — a Branch dropdown in the top row (shared with
 //     the Payroll page): picking a branch loads only THAT branch's site
 //     sections, summary cards and CSV export. "No branch" = sites without
@@ -35,7 +43,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, ChevronUp, Clock, Eye,
+  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, ChevronUp, ClipboardCheck, Clock, Eye,
   FileSpreadsheet, GitBranch, History, Loader2, Lock, LockOpen, Pencil, PencilLine, RotateCcw, Search,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
@@ -55,6 +63,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
+import { TimeCardDialog } from '@/components/salary-sheet/time-card-dialog';
 import { dataApi } from '@/lib/data';
 import { fmtDateTime, initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -190,7 +199,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
               <p className="text-sm font-semibold">{ROLE_LABEL[g.role] ?? g.role} — {TIER_LABEL[g.tier] ?? g.tier}</p>
               <p className="mt-0.5 font-mono text-xs text-muted-foreground">{g.site}</p>
               <p className="mt-1 font-mono text-sm">
-                {fmtHrs(g.hours)} h × AED {fmtMoney(g.rate)} = <span className="font-semibold text-brand">AED {fmtMoney(g.gross)}</span>
+                {fmtHrs(g.hours)} h × {fmtMoney(g.rate)} = <span className="font-semibold text-brand">{fmtMoney(g.gross)}</span>
               </p>
             </div>
           ))}
@@ -203,7 +212,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
             <div className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
               <span className="text-muted-foreground">Total</span>
               <span className="font-mono font-semibold">
-                {fmtHrs(employee.total_hours)} h · AED {fmtMoney(employee.gross_salary)}
+                {fmtHrs(employee.total_hours)} h · {fmtMoney(employee.gross_salary)}
               </span>
             </div>
           )}
@@ -220,7 +229,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
 function SiteGroup({
   group, index, onShowLines, editMode, peIdOf, siteDraftOf, onSiteDraftChange,
   onSaveSite, onResetAuto, busyKey, tradeOptions, tradeStateOf, onTradeChange,
-  paidOf, settlementOf,
+  paidOf, settlementOf, onOpenTimeCard,
 }: {
   group: SalarySheetSiteGroup;
   index: number;
@@ -243,9 +252,13 @@ function SiteGroup({
     advance: number; deduction: number;
     absent_deduction: number; absent_deduction_edited: boolean;
   } | undefined;
+  /** open the Time Card dialog for this site (site sections only) */
+  onOpenTimeCard: (siteId: string, siteName: string) => void;
 }) {
   const [open, setOpen] = useState(true);
   const idle = group.idle === true;
+  // time card entered for THIS site → the Difference column + header chip
+  const siteHasTimeCard = group.time_card_total != null;
 
   return (
     <motion.section
@@ -257,11 +270,21 @@ function SiteGroup({
         idle && 'border-dashed',
       )}
     >
-      <button
-        type="button"
+      {/* section header — a div (not a button) so the Time Card control can
+          nest inside; clicking anywhere still toggles the section */}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-muted/30"
+        onKeyDown={(ev) => {
+          if (ev.target !== ev.currentTarget) return;
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
         aria-expanded={open}
+        className="flex w-full cursor-pointer items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-muted/30"
       >
         {open ? <ChevronDown size={16} className="shrink-0 text-muted-foreground" /> : <ChevronRight size={16} className="shrink-0 text-muted-foreground" />}
         <span className={cn(
@@ -280,13 +303,44 @@ function SiteGroup({
               : `Employees: ${group.employees} · Hours: ${fmtHrs(group.total_hours)}`}
           </p>
         </div>
+        {/* TIME CARD — every site section has its own button, so it is always
+            visible WHICH sites already have time card hours (the chip). The
+            difference flows into the Payroll net payable / next month's
+            advance. Clicks must not toggle the section. */}
+        {!idle && group.site_id && (
+          <div
+            className="flex shrink-0 items-center gap-2"
+            onClick={(ev) => ev.stopPropagation()}
+            onKeyDown={(ev) => ev.stopPropagation()}
+          >
+            {siteHasTimeCard && (
+              <span
+                className="hidden items-center gap-1 rounded-full border border-brand/25 bg-brand/10 px-2.5 py-1 font-mono text-[11px] font-semibold text-brand md:inline-flex"
+                title={`Approved time card hours: ${fmtHrs(group.time_card_total ?? 0)} h — difference ${fmtMoney(group.time_card_amount_total ?? 0)} (time card − attendance hours, × rate)`}
+              >
+                <ClipboardCheck size={11} />
+                {fmtHrs(group.time_card_total ?? 0)} h · {fmtMoney(group.time_card_amount_total ?? 0)}
+              </span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn('h-8 gap-1.5 px-2.5 text-xs', siteHasTimeCard && 'border-brand/40 text-brand')}
+              onClick={() => onOpenTimeCard(group.site_id!, group.site_name)}
+              title={`Add / edit the approved time card hours of ${group.site_name}`}
+            >
+              <ClipboardCheck size={13} />
+              Time Card
+            </Button>
+          </div>
+        )}
         <span className={cn(
           'shrink-0 font-mono text-sm font-semibold',
           idle ? 'text-amber-500' : 'text-brand',
         )}>
-          AED {fmtMoney(group.gross_salary)}
+          {fmtMoney(group.gross_salary)}
         </span>
-      </button>
+      </div>
 
       <AnimatePresence initial={false}>
         {open && (
@@ -309,6 +363,16 @@ function SiteGroup({
                     <TableHead className="text-right">Hours</TableHead>
                     <TableHead className="text-right">Rate</TableHead>
                     <TableHead className="text-right">Gross{idle ? ' (idle)' : ' (site)'}</TableHead>
+                    {/* TIME CARD DIFFERENCE — only when this site has time card
+                        hours (column: (time card − attendance hours) × rate) */}
+                    {siteHasTimeCard && (
+                      <TableHead
+                        className="text-right"
+                        title="Time card difference = (time card hours − attendance hours) × rate — positive flows into the Payroll net payable; negative is recovered next month"
+                      >
+                        Difference
+                      </TableHead>
+                    )}
                     <TableHead className="text-right">Advance</TableHead>
                     <TableHead className="text-right">Deduction</TableHead>
                     {editMode && <TableHead className="w-20 text-right">Save</TableHead>}
@@ -328,6 +392,11 @@ function SiteGroup({
                     const paid = paidOf(r.employee_id);
                     const empBusy = peId != null && busyKey === `emp:${peId}`;
                     const settlement = settlementOf(r.employee_id);
+                    // time card difference of this row (null → no entry)
+                    const tcDiff = r.time_card_amount ?? null;
+                    const tcRate = r.total_hours > 0
+                      ? r.gross_salary / r.total_hours
+                      : effRateOf(r);
                     return (
                       <TableRow
                         key={`${r.employee_id}-${r.site_id ?? 'none'}`}
@@ -437,6 +506,27 @@ function SiteGroup({
                                 aria-label={`Gross at ${group.site_name}`}
                               />
                             </TableCell>
+                            {/* time card difference (read-only, even in edit
+                                mode — edited through the site's Time Card
+                                button above) */}
+                            {siteHasTimeCard && (
+                              <TableCell className="text-right">
+                                {tcDiff == null ? (
+                                  <span className="text-muted-foreground">—</span>
+                                ) : (
+                                  <span
+                                    className={cn(
+                                      'font-mono text-sm font-semibold',
+                                      tcDiff > 0 ? 'text-amber-600 dark:text-amber-400'
+                                        : tcDiff < 0 ? 'text-rose-500' : 'text-muted-foreground',
+                                    )}
+                                    title={`(${fmtHrs(r.time_card_hours ?? 0)} time card − ${fmtHrs(r.total_hours)} attendance) × ${fmtMoney(tcRate)} rate = ${fmtMoney(tcDiff)}`}
+                                  >
+                                    {fmtMoney(tcDiff)}
+                                  </span>
+                                )}
+                              </TableCell>
+                            )}
                             {/* advance / deduction stay employee-level (Payroll) —
                                 shown read-only even in edit mode */}
                             <TableCell className="text-right font-mono text-xs">
@@ -455,7 +545,7 @@ function SiteGroup({
                             <TableCell className="text-right font-mono text-xs">
                               <span
                                 className={settlement && (settlement.deduction + settlement.absent_deduction) > 0 ? '' : 'text-muted-foreground'}
-                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent AED ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
+                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
                               >
                                 {settlement && (settlement.deduction + settlement.absent_deduction) > 0
                                   ? fmtMoney(settlement.deduction + settlement.absent_deduction)
@@ -512,11 +602,32 @@ function SiteGroup({
                                 <span className="text-muted-foreground">—</span>
                               ) : (
                                 <span className="underline decoration-dotted underline-offset-4">
-                                  {multiRate ? `${new Set(r.lines.map((l) => l.hourly_rate)).size} rates` : `AED ${fmtMoney(firstRate ?? 0)}`}
+                                  {multiRate ? `${new Set(r.lines.map((l) => l.hourly_rate)).size} rates` : fmtMoney(firstRate ?? 0)}
                                 </span>
                               )}
                             </TableCell>
-                            <TableCell className="text-right font-mono text-sm font-semibold">AED {fmtMoney(r.gross_salary)}</TableCell>
+                            <TableCell className="text-right font-mono text-sm font-semibold">{fmtMoney(r.gross_salary)}</TableCell>
+                            {/* time card difference — (time card − attendance
+                                hours) × rate; shown only when the site has
+                                time card hours */}
+                            {siteHasTimeCard && (
+                              <TableCell className="text-right">
+                                {tcDiff == null ? (
+                                  <span className="text-muted-foreground">—</span>
+                                ) : (
+                                  <span
+                                    className={cn(
+                                      'font-mono text-sm font-semibold',
+                                      tcDiff > 0 ? 'text-amber-600 dark:text-amber-400'
+                                        : tcDiff < 0 ? 'text-rose-500' : 'text-muted-foreground',
+                                    )}
+                                    title={`(${fmtHrs(r.time_card_hours ?? 0)} time card − ${fmtHrs(r.total_hours)} attendance) × ${fmtMoney(tcRate)} rate = ${fmtMoney(tcDiff)}`}
+                                  >
+                                    {fmtMoney(tcDiff)}
+                                  </span>
+                                )}
+                              </TableCell>
+                            )}
                             {/* advance / deduction — employee-level settlement
                                 values (same on every site row of the employee);
                                 administered on the Payroll page */}
@@ -536,7 +647,7 @@ function SiteGroup({
                             <TableCell className="text-right font-mono text-xs">
                               <span
                                 className={settlement && (settlement.deduction + settlement.absent_deduction) > 0 ? '' : 'text-muted-foreground'}
-                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent AED ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
+                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
                               >
                                 {settlement && (settlement.deduction + settlement.absent_deduction) > 0
                                   ? fmtMoney(settlement.deduction + settlement.absent_deduction)
@@ -599,6 +710,8 @@ export function SalarySheetPage() {
   const [linesTarget, setLinesTarget] = useState<{ employeeId: string; siteName: string | null } | null>(null);
   const [finalizeOpen, setFinalizeOpen] = useState(false);
   const [reopenOpen, setReopenOpen] = useState(false);
+  // per-site TIME CARD dialog (each site section header has its own button)
+  const [timeCardTarget, setTimeCardTarget] = useState<{ siteId: string; siteName: string } | null>(null);
 
   // ---- edit mode (the sheet record has priority) ---------------------------
   const [editMode, setEditMode] = useState(false);
@@ -757,7 +870,7 @@ export function SalarySheetPage() {
         }],
       });
       toast.success('Row saved', {
-        description: `${r.full_name} @ ${r.site_name} — ${fmtHrs(hours)} h · AED ${fmtMoney(gross)} (protected from recalculation)`,
+        description: `${r.full_name} @ ${r.site_name} — ${fmtHrs(hours)} h · ${fmtMoney(gross)} (protected from recalculation)`,
       });
       setSiteDrafts((prev) => { const n = { ...prev }; delete n[key]; return n; });
       load();
@@ -852,6 +965,14 @@ export function SalarySheetPage() {
   const allIdleGroups = useMemo(() => report?.sites.filter((g) => g.idle) ?? [], [report]);
   const allSiteGroups = useMemo(() => report?.sites.filter((g) => g.idle !== true) ?? [], [report]);
 
+  // sites the viewer may enter time card hours for (permission-scoped, NOT
+  // branch-filtered — the per-site buttons only appear on visible sections
+  // anyway, and the dialog's dropdown allows switching between them)
+  const timeCardSiteGroups = useMemo(() => {
+    if (isSuperAdmin) return allSiteGroups.filter((g) => g.site_id != null);
+    return allSiteGroups.filter((g) => g.site_id != null && (allowedSiteIds ?? new Set()).has(g.site_id));
+  }, [isSuperAdmin, allSiteGroups, allowedSiteIds]);
+
   const scopedSiteGroups = useMemo(() => {
     const base = !isSuperAdmin
       ? allSiteGroups.filter((g) => g.site_id != null && (allowedSiteIds ?? new Set()).has(g.site_id))
@@ -908,7 +1029,7 @@ export function SalarySheetPage() {
     if (!report) return;
     // follows the BRANCH scope — only the selected branch's sections and
     // employees are exported (all sites when "All branches" is picked)
-    const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Rate (AED/h)', 'Gross (AED)', 'Advance (AED)', 'Deduction (AED)']];
+    const rows: string[][] = [['Site', 'Sl', 'Employee', 'Employee ID', 'Trade', 'Nationality', 'Hours', 'Rate', 'Gross', 'Advance', 'Deduction']];
     scopedSiteGroups.concat(scopedIdleGroups).forEach((g) => g.rows.forEach((r, i) => {
       const emp = employeeById.get(r.employee_id);
       rows.push([
@@ -1139,7 +1260,7 @@ export function SalarySheetPage() {
             <StatCard index={1} icon={<Clock size={12} />} label="Total hours"
               value={fmtHrs(branchScopeActive ? scopedSummary.totalHours : report.totals.total_hours)} />
             <StatCard index={2} icon={<Banknote size={12} />} label="Gross salary"
-              value={`AED ${fmtMoney(branchScopeActive ? scopedSummary.gross : report.totals.gross_salary)}`} tone="brand"
+              value={fmtMoney(branchScopeActive ? scopedSummary.gross : report.totals.gross_salary)} tone="brand"
               hint={`Adv. ${fmtMoney(branchScopeActive ? scopedSummary.advances : report.totals.advances)} · Ded. ${fmtMoney(branchScopeActive ? scopedSummary.deductions : report.totals.deductions)}`} />
             <StatCard index={3} icon={<BadgeCheck size={12} />} label="Paid"
               value={`${branchScopeActive ? scopedSummary.paid : report.totals.paid_count} / ${branchScopeActive ? scopedSummary.employees : report.totals.employees}`} tone="emerald"
@@ -1184,6 +1305,7 @@ export function SalarySheetPage() {
                   paidOf={paidOf}
                   settlementOf={settlementOf}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
+                  onOpenTimeCard={(siteId, siteName) => setTimeCardTarget({ siteId, siteName })}
                 />
               ))}
               {/* Idle Employees — the last section */}
@@ -1205,6 +1327,7 @@ export function SalarySheetPage() {
                   paidOf={paidOf}
                   settlementOf={settlementOf}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
+                  onOpenTimeCard={() => undefined}
                 />
               ))}
             </div>
@@ -1268,6 +1391,17 @@ export function SalarySheetPage() {
         siteName={linesTarget?.siteName ?? null}
         open={linesTarget !== null}
         onOpenChange={(v) => { if (!v) setLinesTarget(null); }}
+      />
+      {/* per-site time card — the button lives in every site section header */}
+      <TimeCardDialog
+        open={timeCardTarget !== null}
+        onOpenChange={(v) => { if (!v) setTimeCardTarget(null); }}
+        periodId={period?.id ?? null}
+        siteGroups={timeCardSiteGroups}
+        defaultSiteId={timeCardTarget?.siteId ?? null}
+        year={year}
+        month={month}
+        onSaved={load}
       />
       <FinalizeDialog report={report} open={finalizeOpen} onOpenChange={setFinalizeOpen} onDone={load} />
       <ReopenDialog report={report} open={reopenOpen} onOpenChange={setReopenOpen} onDone={load} />

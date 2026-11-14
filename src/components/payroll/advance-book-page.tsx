@@ -24,8 +24,10 @@
 // quick "apply to all" field fills them in one go). The given date, cut month
 // and note are shared.
 //
-// The MONTHLY SUMMARY keeps a month-wise record of advances GIVEN (handed out
-// that month) and RECOVERED (cleared from that month's paid salaries).
+// MONTHWISE RECORD — no separate summary table: the Month + Year dropdowns by
+// the search filter the SAME ledger (advances GIVEN in the period plus the
+// ones cut from that period's salary) and the toolbar chip totals the given
+// vs recovered amounts for the picked period.
 //
 // DEEP LINK — the Payroll page's red "− amount → next month" line under Net
 // Payable opens this ledger focused on that employee's time-card carryover
@@ -78,6 +80,21 @@ const fmtMoney = (n: number): string => n.toLocaleString('en-US', { minimumFract
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 const monthLabel = (y: number, m: number): string => `${MONTH_NAMES[m - 1].slice(0, 3)} ${y}`;
 
+/**
+ * Which parts of a record touch the picked month/year period: GIVEN (handed
+ * out then) and CUT (scheduled to be recovered from that month's salary).
+ */
+const periodMatch = (
+  r: AdvanceRecordVM,
+  m: number | null,
+  y: number | null,
+): { given: boolean; cut: boolean } => {
+  const given = (y === null || Number(r.given_date.slice(0, 4)) === y)
+    && (m === null || Number(r.given_date.slice(5, 7)) === m);
+  const cut = (y === null || r.cut_year === y) && (m === null || r.cut_month === m);
+  return { given, cut };
+};
+
 type StatusFilter = 'all' | 'due' | 'overdue' | 'cleared';
 
 /** Edit (reschedule) dialog state — a SINGLE record; adding uses BulkAddState. */
@@ -118,6 +135,10 @@ export function AdvanceBookPage() {
   const [sites, setSites] = useState<Site[] | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  /** 'all' | '1'..'12' — the monthwise filter over the SAME ledger table */
+  const [monthFilter, setMonthFilter] = useState('all');
+  /** 'all' | year string */
+  const [yearFilter, setYearFilter] = useState('all');
   const [formOpen, setFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AdvanceRecordVM | null>(null);
@@ -152,6 +173,8 @@ export function AdvanceBookPage() {
           useAppStore.setState({ advanceBookFocus: null });
           setSearch(focus.employeeName);
           setStatusFilter('all');
+          setMonthFilter('all');
+          setYearFilter('all');
           const targets = book.records.filter((r) => r.employee_id === focus.employeeId
             && (!focus.timeCard || (r.from_time_card && !r.cleared)));
           const rows = targets.length > 0
@@ -187,6 +210,10 @@ export function AdvanceBookPage() {
   );
 
   // ---- filtering -----------------------------------------------------------
+  const filterMonth = monthFilter === 'all' ? null : Number(monthFilter);
+  const filterYear = yearFilter === 'all' ? null : Number(yearFilter);
+  const periodActive = filterMonth !== null || filterYear !== null;
+
   const filtered = useMemo(() => {
     if (!report) return [];
     const q = search.toLowerCase().trim();
@@ -196,50 +223,54 @@ export function AdvanceBookPage() {
       if (statusFilter === 'due') return !r.cleared && !r.overdue;
       if (statusFilter === 'overdue') return r.overdue;
       if (statusFilter === 'cleared') return r.cleared;
+      // monthwise filter — the record was GIVEN in the period or is cut from
+      // that period's salary
+      if (periodActive) {
+        const pm = periodMatch(r, filterMonth, filterYear);
+        if (!pm.given && !pm.cut) return false;
+      }
       return true;
     });
-  }, [report, search, statusFilter]);
+  }, [report, search, statusFilter, periodActive, filterMonth, filterYear]);
 
   const visibleTotal = useMemo(
     () => filtered.reduce((n, r) => n + r.amount, 0), [filtered]);
 
-  // ---- MONTHLY SUMMARY — a month-wise record of advances given & recovered --
-  const monthly = useMemo(() => {
-    if (!report) return [];
-    const given = new Map<string, { count: number; amount: number }>();
-    const recovered = new Map<string, { count: number; amount: number }>();
-    report.records.forEach((r) => {
-      // GIVEN — grouped by the month the money was handed out (given date)
-      const gk = r.given_date.slice(0, 7);
-      const g = given.get(gk) ?? { count: 0, amount: 0 };
-      given.set(gk, { count: g.count + 1, amount: round2(g.amount + r.amount) });
-      // RECOVERED — grouped by the CUT month whose paid salary recovered it
-      if (r.cleared) {
-        const rk = `${r.cut_year}-${String(r.cut_month).padStart(2, '0')}`;
-        const v = recovered.get(rk) ?? { count: 0, amount: 0 };
-        recovered.set(rk, { count: v.count + 1, amount: round2(v.amount + r.amount) });
-      }
+  // ---- month / year filter — the monthwise given-vs-recovered record -------
+  // No separate summary table: the SAME ledger is filtered by the picked
+  // month/year and the toolbar chip totals given vs recovered for the period.
+  const filterYears = useMemo(() => {
+    const ys = new Set<number>([new Date().getFullYear()]);
+    report?.records.forEach((r) => {
+      ys.add(Number(r.given_date.slice(0, 4)));
+      ys.add(r.cut_year);
     });
-    return [...new Set([...given.keys(), ...recovered.keys()])]
-      .sort((a, b) => (a < b ? 1 : -1))
-      .map((key) => {
-        const [y, m] = key.split('-').map(Number);
-        const g = given.get(key) ?? { count: 0, amount: 0 };
-        const rc = recovered.get(key) ?? { count: 0, amount: 0 };
-        return {
-          key,
-          label: `${MONTH_NAMES[m - 1]} ${y}`,
-          given: g,
-          recovered: rc,
-          net: round2(g.amount - rc.amount),
-        };
-      });
+    return [...ys].filter((n) => Number.isFinite(n)).sort((a, b) => b - a);
   }, [report]);
 
-  const monthlyTotals = useMemo(() => ({
-    given: round2(monthly.reduce((n, m) => n + m.given.amount, 0)),
-    recovered: round2(monthly.reduce((n, m) => n + m.recovered.amount, 0)),
-  }), [monthly]);
+  const periodStats = useMemo(() => {
+    if (!report || !periodActive) return null;
+    let gCount = 0;
+    let gAmount = 0;
+    let rCount = 0;
+    let rAmount = 0;
+    report.records.forEach((r) => {
+      const { given, cut } = periodMatch(r, filterMonth, filterYear);
+      if (given) { gCount += 1; gAmount += r.amount; }
+      if (cut && r.cleared) { rCount += 1; rAmount += r.amount; }
+    });
+    return {
+      given: { count: gCount, amount: round2(gAmount) },
+      recovered: { count: rCount, amount: round2(rAmount) },
+      net: round2(gAmount - rAmount),
+    };
+  }, [report, periodActive, filterMonth, filterYear]);
+
+  const periodLabel = filterMonth !== null && filterYear !== null
+    ? `${MONTH_NAMES[filterMonth - 1]} ${filterYear}`
+    : filterMonth !== null
+      ? `${MONTH_NAMES[filterMonth - 1]} — all years`
+      : `Year ${filterYear ?? ''}`;
 
   // ---- add (single + bulk) dialog ------------------------------------------
   const openAdd = (): void => {
@@ -576,76 +607,7 @@ export function AdvanceBookPage() {
         ))}
       </div>
 
-      {/* MONTHLY SUMMARY — a month-wise record of advances given & recovered */}
-      {monthly.length > 0 && (
-        <section className="card-glow overflow-hidden rounded-xl border bg-card">
-          <div className="flex items-center justify-between gap-2 border-b bg-muted/30 px-4 py-2.5">
-            <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              <CalendarClock size={13} /> Monthly record — given vs recovered
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              Given = handed out that month · Recovered = cut from that month&apos;s paid salaries
-            </p>
-          </div>
-          <div className="max-h-56 overflow-y-auto">
-            <Table className="[&_td]:px-3 [&_th]:px-3">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-32">Month</TableHead>
-                  <TableHead className="text-right">Given</TableHead>
-                  <TableHead className="text-right">Recovered</TableHead>
-                  <TableHead className="text-right">Net (given − recovered)</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {monthly.map((m) => (
-                  <TableRow key={m.key} className="transition-colors hover:bg-muted/50">
-                    <TableCell className="text-xs font-semibold">{m.label}</TableCell>
-                    <TableCell className="text-right">
-                      <span className="inline-flex items-center justify-end gap-1.5 font-mono text-xs text-amber-600 dark:text-amber-400">
-                        <ArrowUpRight size={11} className="shrink-0" />
-                        {fmtMoney(m.given.amount)}
-                      </span>
-                      <span className="block text-[10px] text-muted-foreground">
-                        {m.given.count} advance{m.given.count === 1 ? '' : 's'} given
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <span className="inline-flex items-center justify-end gap-1.5 font-mono text-xs text-emerald-600 dark:text-emerald-400">
-                        <ArrowDownLeft size={11} className="shrink-0" />
-                        {fmtMoney(m.recovered.amount)}
-                      </span>
-                      <span className="block text-[10px] text-muted-foreground">
-                        {m.recovered.count} recovered{m.recovered.count === 0 ? ' —' : ''}
-                      </span>
-                    </TableCell>
-                    <TableCell className={cn(
-                      'text-right font-mono text-xs font-semibold',
-                      m.net > 0 ? 'text-amber-600 dark:text-amber-400'
-                        : m.net < 0 ? 'text-emerald-600 dark:text-emerald-400'
-                          : 'text-muted-foreground',
-                    )}>
-                      {fmtMoney(m.net)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-              <TableFooter>
-                <TableRow className="font-semibold hover:bg-transparent">
-                  <TableCell className="text-xs uppercase tracking-wide text-muted-foreground">Total</TableCell>
-                  <TableCell className="text-right font-mono text-xs">{fmtMoney(monthlyTotals.given)}</TableCell>
-                  <TableCell className="text-right font-mono text-xs">{fmtMoney(monthlyTotals.recovered)}</TableCell>
-                  <TableCell className="text-right font-mono text-xs">
-                    {fmtMoney(round2(monthlyTotals.given - monthlyTotals.recovered))}
-                  </TableCell>
-                </TableRow>
-              </TableFooter>
-            </Table>
-          </div>
-        </section>
-      )}
-
-      {/* toolbar */}
+      {/* toolbar — search, status, month + year (the monthwise record) */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-56 flex-1 sm:max-w-xs">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -670,6 +632,65 @@ export function AdvanceBookPage() {
             </SelectContent>
           </Select>
         </div>
+        <div
+          className="flex items-center gap-1.5 text-xs text-muted-foreground"
+          title="Monthwise record — advances given in the picked month plus the ones cut from that month's salary"
+        >
+          <CalendarClock size={14} className="shrink-0" />
+          <Select value={monthFilter} onValueChange={setMonthFilter}>
+            <SelectTrigger className="h-9 w-[7.5rem] bg-card text-xs" aria-label="Filter by month">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All months</SelectItem>
+              {MONTH_NAMES.map((m, idx) => (
+                <SelectItem key={m} value={String(idx + 1)}>{m}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={yearFilter} onValueChange={setYearFilter}>
+            <SelectTrigger className="h-9 w-28 bg-card text-xs" aria-label="Filter by year">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All years</SelectItem>
+              {filterYears.map((y) => (
+                <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        {periodStats && (
+          <span
+            className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-full border border-border/70 bg-muted/40 px-2.5 py-1 text-[11px]"
+            title="Given = advances handed out in the period · Recovered = cleared from that period's paid salaries · both are listed below and the Status column tells them apart"
+          >
+            <span className="inline-flex items-center gap-1 font-semibold">
+              <CalendarClock size={11} /> {periodLabel}
+            </span>
+            <span className="inline-flex items-center gap-1 font-mono text-amber-600 dark:text-amber-400">
+              <ArrowUpRight size={11} className="shrink-0" />
+              {fmtMoney(periodStats.given.amount)}
+              <span className="font-sans text-muted-foreground">({periodStats.given.count} given)</span>
+            </span>
+            <span className="inline-flex items-center gap-1 font-mono text-emerald-600 dark:text-emerald-400">
+              <ArrowDownLeft size={11} className="shrink-0" />
+              {fmtMoney(periodStats.recovered.amount)}
+              <span className="font-sans text-muted-foreground">({periodStats.recovered.count} recovered)</span>
+            </span>
+            <span className="font-mono font-semibold text-muted-foreground">
+              Net {fmtMoney(periodStats.net)}
+            </span>
+            <button
+              type="button"
+              aria-label="Clear the month / year filter"
+              onClick={() => { setMonthFilter('all'); setYearFilter('all'); }}
+              className="ml-0.5 text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <X size={11} />
+            </button>
+          </span>
+        )}
         {focusIds.size > 0 && (
           <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
             <Users size={11} /> Linked from Payroll — {focusIds.size} record{focusIds.size === 1 ? '' : 's'} highlighted
@@ -817,7 +838,9 @@ export function AdvanceBookPage() {
                   <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
                     {report.records.length === 0
                       ? 'No advances recorded yet — use Add Advance to hand one out and pick its cut month.'
-                      : 'No records match the search / filter.'}
+                      : periodActive
+                        ? 'No records for this month / year — switch back to All months / All years.'
+                        : 'No records match the search / filter.'}
                   </TableCell>
                 </TableRow>
               )}

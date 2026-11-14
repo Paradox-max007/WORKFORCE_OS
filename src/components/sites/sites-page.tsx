@@ -173,7 +173,9 @@ const displayTrade = (r: Pick<SheetRow, 'position' | 'isTeamLeader' | 'isSupervi
  * sheet into its iframe, and it also styles the live preview + the off-screen
  * PDF copy. Everything is scoped under `.att-sheet` so it never leaks into the
  * rest of the app. Row paddings are tuned so a full page (24 rows + the extra
- * table) always fits within the fixed 1123px page height.
+ * table) always fits within the fixed 1123px page height. The PAGE x OF y tag
+ * is pinned to the bottom edge of every sheet (not to the last content), so it
+ * sits at the paper's bottom on screen, in print and in the exported PDF.
  */
 const ATT_CSS = `
 .att-sheet,.att-sheet *{-webkit-print-color-adjust:exact;print-color-adjust:exact;box-sizing:border-box}
@@ -207,7 +209,7 @@ const ATT_CSS = `
 .att-sheet .att-totals{display:flex;gap:40px;margin-top:16px;padding-top:10px;border-top:2px solid #000}
 .att-sheet .att-totals-cell{flex:1;display:flex;align-items:flex-end;gap:6px;font-size:12px;font-weight:700;text-transform:uppercase;color:#000}
 .att-sheet .att-totals-blank{flex:1;border-bottom:1.5px solid #000;min-height:18px;font-weight:700;color:#000}
-.att-sheet .att-pageinfo{text-align:right;font-size:10px;color:#6b7280;margin-top:4px;text-transform:uppercase}
+.att-sheet .att-pageinfo{position:absolute;left:38px;right:38px;bottom:12px;text-align:right;font-size:10px;color:#6b7280;text-transform:uppercase}
 .att-sheet .att-text{min-height:16px;color:#000;font-weight:700}
 .att-sheet .att-input{width:100%;background:transparent;border:none;outline:none;font-family:inherit;font-size:inherit;font-weight:700;text-transform:uppercase;color:#000;padding:0;min-height:16px;cursor:text}
 .att-sheet .att-pdfwrap{width:800px;height:1148px;display:flex;align-items:center;justify-content:center;background:#fff}
@@ -1734,6 +1736,17 @@ function AttendanceSheetView({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // lock the background page scroll while the sheet overlay is open — without
+  // this, wheel events over non-scrollable parts of the overlay chain to the
+  // document behind it and the page underneath jumps around
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
   // responsive preview scale (fit the 794px page into the viewport)
   useEffect(() => {
     const el = previewRef.current;
@@ -2003,7 +2016,11 @@ function AttendanceSheetView({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    // `relative overflow-hidden` keeps the off-screen print/PDF copies (absolutely
+    // positioned at left:-20000px) clipped inside this view — without it they
+    // anchor to an ancestor in the page flow and stretch the document with a
+    // huge blank scrollable region below the app
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
       {/* ---- toolbar ---- */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-card/90 px-3 py-2.5 backdrop-blur sm:px-4">
         <Button variant="outline" size="sm" onClick={onClose} className="gap-1.5 font-semibold">
@@ -2034,7 +2051,7 @@ function AttendanceSheetView({
       </div>
 
       {/* ---- scrollable A4 preview ---- */}
-      <div ref={previewRef} className="flex-1 overflow-auto bg-muted/50 p-4 sm:p-6 dark:bg-zinc-950/40">
+      <div ref={previewRef} className="flex-1 overflow-auto overscroll-contain bg-muted/50 p-4 sm:p-6 dark:bg-zinc-950/40">
         <div className="mx-auto flex w-fit flex-col items-center gap-6">
           {pages.map((pageRows, i) => (
             <div

@@ -756,6 +756,31 @@ export function AttendancePage() {
     return Math.round(total * 100) / 100;
   };
 
+  // Present / absent DAY marks an employee has at ONE particular site in the
+  // viewed month (same segment scoping as siteRowHours — a moved employee's
+  // days count only at the site they belong to, so nobody is double-counted).
+  // A marked day counts as present: hours (any number 0–24) or a free-text
+  // marker; only "A" counts as absent.
+  const siteRowMarks = (empId: string, siteKey: string | null): { present: number; absent: number } => {
+    const segs = timelines.get(empId)?.segments ?? null;
+    let present = 0;
+    let absent = 0;
+    const addDay = (d: number) => {
+      const parsed = parseCell(cellText(empId, ymd(year, month, d)));
+      if (parsed.kind === 'absent') absent += 1;
+      else if (parsed.kind === 'hours' || parsed.kind === 'text') present += 1;
+    };
+    if (!segs) {
+      for (let d = 1; d <= days; d++) addDay(d);
+    } else {
+      for (const sg of segs) {
+        if ((sg.siteId ?? null) !== siteKey) continue;
+        for (let d = sg.fromDay; d <= sg.toDay; d++) addDay(d);
+      }
+    }
+    return { present, absent };
+  };
+
   // ---- month navigation ----------------------------------------------------------
   const shiftMonth = (delta: number) => {
     const d = new Date(year, month - 1 + delta, 1);
@@ -1034,6 +1059,15 @@ export function AttendancePage() {
     const totalHours = section.emps.reduce(
       (sum, emp) => sum + siteRowHours(emp.id, section.isIdle ? null : section.key), 0,
     );
+    // present / absent day totals of this section for the VIEWED month —
+    // site-scoped per employee (moved employees count only their days here)
+    const marks = section.emps.reduce(
+      (acc, emp) => {
+        const m = siteRowMarks(emp.id, section.isIdle ? null : section.key);
+        return { present: acc.present + m.present, absent: acc.absent + m.absent };
+      },
+      { present: 0, absent: 0 },
+    );
     const movedCount = section.emps.filter((e) => timelines.get(e.id)?.transferred).length;
     const siteNameOf = (siteId: string | null): string =>
       siteId ? (sites ?? []).find((s) => s.id === siteId)?.name ?? 'Former site' : 'Unassigned / Idle';
@@ -1081,6 +1115,22 @@ export function AttendancePage() {
             >
               {section.emps.length} employee{section.emps.length !== 1 ? 's' : ''}
             </span>
+            {section.emps.length > 0 && (
+              <span
+                className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500"
+                title={`Total present day-marks in ${MONTH_NAMES[month - 1]} ${year} — hours or any marker (only "A" counts as absent)`}
+              >
+                Present: {marks.present}
+              </span>
+            )}
+            {section.emps.length > 0 && (
+              <span
+                className="rounded-full border border-rose-500/25 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-rose-500"
+                title={`Total absent day-marks ("A") in ${MONTH_NAMES[month - 1]} ${year}`}
+              >
+                Absent: {marks.absent}
+              </span>
+            )}
             {section.emps.length > 0 && (
               <span className="hidden rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500 sm:inline-flex">
                 Site total: {Math.round(totalHours * 100) / 100}h
@@ -1330,6 +1380,22 @@ export function AttendancePage() {
       });
     };
     const crewCount = group.sections.reduce((n, sec) => n + sec.emps.length, 0);
+    // present / absent day totals of the whole branch for the VIEWED month —
+    // summed site-scoped (a moved employee's days count at each site once, so
+    // nothing is double-counted across the branch's sections)
+    const branchMarks = group.sections.reduce(
+      (acc, sec) => {
+        const per = sec.emps.reduce(
+          (a, emp) => {
+            const m = siteRowMarks(emp.id, sec.key);
+            return { present: a.present + m.present, absent: a.absent + m.absent };
+          },
+          { present: 0, absent: 0 },
+        );
+        return { present: acc.present + per.present, absent: acc.absent + per.absent };
+      },
+      { present: 0, absent: 0 },
+    );
     return (
       <motion.div
         key={group.id}
@@ -1369,6 +1435,18 @@ export function AttendancePage() {
               </span>
               <span className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-500">
                 {crewCount} employee{crewCount !== 1 ? 's' : ''}
+              </span>
+              <span
+                className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-emerald-600 dark:text-emerald-400"
+                title={`Total present day-marks across this branch in ${MONTH_NAMES[month - 1]} ${year}`}
+              >
+                Present: {branchMarks.present}
+              </span>
+              <span
+                className="rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-rose-500"
+                title={`Total absent day-marks ("A") across this branch in ${MONTH_NAMES[month - 1]} ${year}`}
+              >
+                Absent: {branchMarks.absent}
               </span>
               {!group.isActive && (
                 <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">

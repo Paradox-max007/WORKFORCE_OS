@@ -1431,13 +1431,12 @@ function SiteEmployeesView({
         </div>
       </div>
 
-      {/* ---- crew table card ---- */}
+      {/* ---- team table card ---- */}
       <div className="card-glow rounded-xl border bg-card">
         <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
           <SectionTitle
             icon={<Users size={16} />}
-            title="Crew Members"
-            sub="Sorted with the team leader first"
+            title="Team Members"
           />
           <div className="relative w-full sm:max-w-xs">
             <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />

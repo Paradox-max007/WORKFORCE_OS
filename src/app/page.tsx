@@ -7,6 +7,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
+import { AiChatWidget } from '@/components/ai/ai-chat-widget';
 import { LoginPage } from '@/components/auth/login-page';
 import { SignupPage } from '@/components/auth/signup-page';
 import { AdminPage } from '@/components/admins/admin-page';
@@ -216,6 +217,8 @@ export default function Home() {
     <>
       <DemoBanner />
       <MainLayout />
+      {/* floating AI assistant — renders itself only while the org enabled it */}
+      <AiChatWidget />
     </>
   );
 }

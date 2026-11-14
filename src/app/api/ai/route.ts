@@ -6,10 +6,12 @@
 //
 //   test — pings the provider with the given (or stored) connection and
 //          reports success / latency. Used by the settings page button.
-//   chat — forwards a chat conversation to the provider. Foundation for the
+//   chat — forwards a chat conversation to the provider. Powers the floating
 //          in-app AI bot: in SUPABASE mode the key never reaches the browser
 //          (it is read from site_settings with the service-role key after the
-//          caller is verified); in DEMO mode the caller supplies the
+//          caller is verified — any signed-in admin may CHAT through the
+//          stored connection, while the stored-key fallback for 'test' stays
+//          super-admin only); in DEMO mode the caller supplies the
 //          connection from its local demo store.
 //
 // Security: same-origin only, http(s) base URLs, hard caps on sizes and a
@@ -124,7 +126,7 @@ export async function POST(request: Request): Promise<Response> {
   let apiKey = (body.apiKey ?? '').trim();
   let model = (body.model ?? '').trim();
 
-  const readStored = async (): Promise<{ base: string; key: string; model: string } | null> => {
+  const readStored = async (requireSuper: boolean): Promise<{ base: string; key: string; model: string } | null> => {
     if (!isSupabase) return null;
     const bearer = request.headers.get('Authorization')?.replace('Bearer ', '') ?? '';
     if (!bearer) return null;
@@ -132,8 +134,16 @@ export async function POST(request: Request): Promise<Response> {
       global: { headers: { Authorization: `Bearer ${bearer}` } },
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    const { data: isSuper } = await caller.rpc('is_super_admin');
-    if (!isSuper) return null;
+    if (requireSuper) {
+      // stored-key fallback for 'test' — super admins only
+      const { data: isSuper } = await caller.rpc('is_super_admin');
+      if (!isSuper) return null;
+    } else {
+      // 'chat' — every signed-in admin may use the stored connection; the
+      // raw key itself is only ever read server-side
+      const { data: { user: callerUser } } = await caller.auth.getUser();
+      if (!callerUser) return null;
+    }
     const admin = createClient(supabaseUrl!, serviceKey!, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -151,7 +161,9 @@ export async function POST(request: Request): Promise<Response> {
   };
 
   if (!baseUrl || !apiKey || !model) {
-    const stored = await readStored();
+    // 'test' falls back to the stored connection for super admins only;
+    // 'chat' may use it as any signed-in admin (key stays server-side)
+    const stored = await readStored(body.action === 'test');
     if (stored) {
       baseUrl = baseUrl || stored.base;
       apiKey = apiKey || stored.key;

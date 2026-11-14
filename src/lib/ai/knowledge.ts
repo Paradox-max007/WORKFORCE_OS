@@ -12,9 +12,9 @@
 //   • buildAiSystemPrompt()   — the full system prompt for the bot: identity,
 //                               the app guide + the live data snapshot as JSON
 //
-// The bot chat UI (when it ships) will call /api/ai with this prompt and the
-// user's question; the provider (base URL + model + key from Site Settings)
-// does the rest.
+// The floating chat widget (components/ai/ai-chat-widget.tsx) calls /api/ai
+// with this prompt and the user's question; the provider (base URL + model +
+// key from Site Settings) does the rest.
 // ============================================================================
 
 import { dataApi } from '@/lib/data';
@@ -146,8 +146,31 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
   };
 }
 
+/** Hard ceiling for the snapshot section. The /api/ai proxy rejects any
+ *  message over 24k characters, so the snapshot is slimmed before it is
+ *  embedded in the system prompt (guide + framing need headroom too). */
+const MAX_SNAPSHOT_CHARS = 17_000;
+
+/** JSON of the DB snapshot, kept under the prompt budget: when the raw dump
+ *  is too big, the largest sections collapse — largest first — into short
+ *  placeholder notes so the bot still knows those entities exist. */
+function snapshotJson(data: Record<string, unknown>): string {
+  const full = JSON.stringify(data);
+  if (full.length <= MAX_SNAPSHOT_CHARS) return full;
+  const sized = Object.entries(data)
+    .map(([k, v]) => ({ k, size: JSON.stringify(v).length }))
+    .sort((a, b) => b.size - a.size);
+  const slimmed: Record<string, unknown> = { ...data };
+  for (const { k } of sized) {
+    slimmed[k] = `[section "${k}" exists in the database but was omitted to keep the prompt small — say so if asked about it]`;
+    const next = JSON.stringify(slimmed);
+    if (next.length <= MAX_SNAPSHOT_CHARS) return next;
+  }
+  return `${JSON.stringify(slimmed).slice(0, MAX_SNAPSHOT_CHARS)} …[truncated]`;
+}
+
 /** The complete system prompt for the AI bot: identity + the app guide + the
- *  live database snapshot. The chat UI sends this as the first message. */
+ *  live database snapshot. The chat widget sends this as the first message. */
 export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings): string {
   return [
     `You are the built-in AI assistant of "${settings.project_name}" (${settings.company_name}), a workforce & payroll operations app.`,
@@ -158,7 +181,7 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     '',
     '=== LIVE DATABASE SNAPSHOT (JSON) ===',
     `Generated at ${kb.generated_at}. Currency is AED. "attendance_current_month" and "salary_sheet_current_month" cover the current calendar month only.`,
-    JSON.stringify(kb.data),
+    snapshotJson(kb.data),
     '',
     'RULES: base every answer ONLY on the snapshot and the guide; if something is not in the data, say so instead of inventing it; keep answers concise and formatted with short lists when helpful.',
   ].join('\n');

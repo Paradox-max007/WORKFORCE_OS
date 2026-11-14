@@ -219,8 +219,20 @@ const ATT_CSS = `
 @page{size:A4;margin:0}
 `;
 
-/** Inline SVG logo (html2canvas-safe and survives printElement's outerHTML copy). */
-function AttLogo() {
+/** Paper logo — the CUSTOM company logo from Site Settings when one is
+ *  uploaded (data:/https: URL), otherwise the default inline PULSE mark.
+ *  Inline sizing keeps it html2canvas-safe and lets it survive the
+ *  outerHTML copy that printElement makes. */
+function AttLogo({ src }: { src?: string | null }) {
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt="Company logo"
+        style={{ width: 48, height: 48, objectFit: 'contain' }}
+      />
+    );
+  }
   return (
     <svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="PULSE logo">
       <defs>
@@ -1661,9 +1673,10 @@ function AttendanceSheetView({
   const pdfRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
 
-  // org-wide branding — the company legal name printed on the paper header
-  // (Site Settings, super admin only)
+  // org-wide branding — the company legal name + logo printed on the paper
+  // header (Site Settings, super admin only)
   const companyName = useSettingsStore((s) => s.settings.company_name);
+  const logoUrl = useSettingsStore((s) => s.settings.logo_url);
 
   const [scale, setScale] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -1831,7 +1844,7 @@ function AttendanceSheetView({
                 <div className="att-subband">DAILY ATTENDANCE</div>
               </div>
               <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-                <AttLogo />
+                <AttLogo src={logoUrl} />
               </div>
             </div>
             <div className="att-info">

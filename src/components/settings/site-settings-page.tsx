@@ -34,6 +34,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { dataApi, isDemoMode } from '@/lib/data';
 import { db as demoDb } from '@/lib/data/demo-store';
+import { aiProxyHeaders } from '@/lib/ai/client';
 import { buildAiKnowledgeBase } from '@/lib/ai/knowledge';
 import type { AccentColor, SiteSettings, ThemeMode } from '@/lib/types';
 import { fmtTimeAgo } from '@/lib/format';
@@ -278,11 +279,12 @@ export function SiteSettingsPage() {
     setTest({ kind: 'running' });
     try {
       // demo mode: the stored raw key lives in the local demo store — prod
-      // reads it server-side (the browser never sees it again)
+      // sends the caller's token so the proxy can fall back to the STORED key
+      // (the raw key never returns to the browser)
       const storedKey = isDemoMode ? demoDb.siteSettings.ai_api_key : '';
       const res = await fetch('/api/ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await aiProxyHeaders(),
         body: JSON.stringify({
           action: 'test',
           baseUrl: aiBaseUrl.trim(),

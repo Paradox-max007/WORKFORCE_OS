@@ -28,6 +28,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { isDemoMode } from '@/lib/data';
 import { db as demoDb } from '@/lib/data/demo-store';
+import { aiProxyHeaders } from '@/lib/ai/client';
 import { buildAiKnowledgeBase, buildAiSystemPrompt } from '@/lib/ai/knowledge';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -175,7 +176,9 @@ export function AiChatWidget() {
       };
       const res = await fetch('/api/ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Supabase mode: the bearer token lets the proxy verify the caller
+        // and read the STORED connection (key stays server-side)
+        headers: await aiProxyHeaders(),
         body: JSON.stringify(body),
       });
       const json = (await res.json()) as { ok: boolean; reply?: string; error?: string };

@@ -28,6 +28,7 @@ import { NotificationPage } from '@/components/notifications/notification-page';
 import { PayrollExportPreviewPage } from '@/components/payroll/payroll-export-preview-page';
 import { PayrollPage } from '@/components/payroll/payroll-page';
 import { SalarySheetPage } from '@/components/salary-sheet/salary-sheet-page';
+import { SiteSettingsPage } from '@/components/settings/site-settings-page';
 import { SitesPage } from '@/components/sites/sites-page';
 import { TradePage } from '@/components/trades/trade-page';
 import { UniformRegistryPage } from '@/components/uniform-registry/uniform-registry-page';
@@ -35,6 +36,8 @@ import { WorkingHoursPage } from '@/components/working-hours/working-hours-page'
 import { dataApi, isDemoMode } from '@/lib/data';
 import { useAppStore, type AppView } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
+import { useSettingsStore } from '@/store/settings-store';
+import { useRealtimeVersion } from '@/store/realtime';
 
 // ---------------------------------------------------------------------------
 // Loading screen
@@ -91,6 +94,7 @@ function MainLayout() {
     cancellation_requests: <CancellationRequestPage />,
     notifications: <NotificationPage />,
     admins: <AdminPage />,
+    site_settings: <SiteSettingsPage />,
   };
 
   return (
@@ -138,20 +142,61 @@ export default function Home() {
   const isLoading = useAuthStore((s) => s.isLoading);
   const bootstrap = useAuthStore((s) => s.bootstrap);
   const [hasProfiles, setHasProfiles] = useState<boolean | null>(null);
+  const settings = useSettingsStore((s) => s.settings);
+  const settingsLoaded = useSettingsStore((s) => s.loaded);
+  const loadSettings = useSettingsStore((s) => s.load);
+  const settingsVersion = useRealtimeVersion(['site_settings']);
 
   useEffect(() => {
     bootstrap();
     dataApi.hasProfiles().then(setHasProfiles).catch(() => setHasProfiles(true));
   }, [bootstrap]);
 
-  // Sync theme + accent to <html>
+  // org-wide site settings — loaded on boot and refreshed whenever a super
+  // admin saves a change anywhere (this browser or another one)
+  useEffect(() => {
+    loadSettings(true);
+  }, [loadSettings, settingsVersion]);
+
+  // Sync theme + accent to <html>. Once the org settings arrive they WIN over
+  // the personal profile preference (the look is controlled by the super admin
+  // from Site Settings); the profile preference is the pre-load fallback.
   useEffect(() => {
     const root = document.documentElement;
-    const theme = user?.theme ?? 'dark';
-    const accent = user?.accent ?? 'violet';
+    const theme = settingsLoaded ? settings.theme : (user?.theme ?? 'dark');
+    const accent = settingsLoaded ? settings.accent : (user?.accent ?? 'violet');
     root.classList.toggle('dark', theme === 'dark');
     root.dataset.accent = accent;
-  }, [user?.theme, user?.accent]);
+  }, [settings.theme, settings.accent, settingsLoaded, user?.theme, user?.accent]);
+
+  // browser title follows the org project name (server-rendered default in
+  // layout.tsx until this takes over). Next.js restores the SSR <title> once
+  // hydration finishes — AFTER this effect's first run — so re-assert the
+  // org title whenever the head tries to flip it back, until it sticks.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const title = `${settings.project_name} — Operations OS`;
+    let settled = false;
+    const apply = () => {
+      if (document.title !== title) document.title = title;
+    };
+    apply();
+    const observer = new MutationObserver(() => {
+      if (settled) return;
+      apply();
+    });
+    const head = document.head;
+    observer.observe(head, { childList: true, subtree: true, characterData: true });
+    const stop = setTimeout(() => {
+      settled = true;
+      observer.disconnect();
+    }, 10_000);
+    return () => {
+      settled = true;
+      observer.disconnect();
+      clearTimeout(stop);
+    };
+  }, [settings.project_name, settingsLoaded]);
 
   if (isLoading) return <LoadingScreen />;
 

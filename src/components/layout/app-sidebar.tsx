@@ -19,6 +19,7 @@ import { MENUS, MENU_GROUPS, menuAllows, menuRenderList, type MenuDef } from '@/
 import type { AccentColor, Profile } from '@/lib/types';
 import { useAppStore, type AppView } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
+import { useSettingsStore } from '@/store/settings-store';
 import { useRealtimeVersion } from '@/store/realtime';
 import { toast } from 'sonner';
 
@@ -171,12 +172,21 @@ function SidebarContent({
 }) {
   const { currentView, navigateTo, navigateToEmployees } = useAppStore();
   const signOut = useAuthStore((s) => s.signOut);
-  const setTheme = useAuthStore((s) => s.setTheme);
-  const setAccent = useAuthStore((s) => s.setAccent);
   const perms = useAuthStore((s) => s.menuPermissions);
+  const settings = useSettingsStore((s) => s.settings);
+  const updateSettings = useSettingsStore((s) => s.update);
+  const loadSettings = useSettingsStore((s) => s.load);
+  const settingsVersion = useRealtimeVersion(['site_settings']);
   const unread = useUnreadCount(user);
   const [latestNotification, setLatestNotification] = useState<string | null>(null);
   const version = useRealtimeVersion(['notification']);
+  const isSuperAdmin = user.role === 'super_admin';
+
+  // branding / theme changes made anywhere (this browser or another admin's)
+  // refresh the sidebar live
+  useEffect(() => {
+    loadSettings(true);
+  }, [loadSettings, settingsVersion]);
 
   useEffect(() => {
     if (!user) return;
@@ -214,6 +224,23 @@ function SidebarContent({
     toast.success('Signed out');
   };
 
+  // The look is org-wide (Site Settings, super admin only) — the footer
+  // shortcuts write the SAME settings for the boss and are hidden for
+  // normal admins.
+  const applyTheme = () => {
+    updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
+      .catch((e: Error) => toast.error(e.message || 'Could not change the theme'));
+  };
+  const applyAccent = (accent: AccentColor) => {
+    updateSettings({ accent }).catch((e: Error) => toast.error(e.message || 'Could not change the accent'));
+  };
+
+  // project display name — first word plain, the rest with the gradient
+  // (mirrors the default “PULSE Workforce” look)
+  const brandWords = settings.project_name.trim().split(/\s+/);
+  const brandFirst = brandWords[0] ?? 'PULSE';
+  const brandRest = brandWords.slice(1).join(' ');
+
   return (
     <div className="flex h-full flex-col">
       {/* Logo */}
@@ -224,8 +251,9 @@ function SidebarContent({
         </div>
         {!collapsed && (
           <div className="min-w-0">
-            <p className="text-sm font-bold leading-tight">
-              PULSE <span className="gradient-text">Workforce</span>
+            <p className="truncate text-sm font-bold leading-tight">
+              {brandFirst}{' '}
+              {brandRest && <span className="gradient-text">{brandRest}</span>}
             </p>
             <p className="text-[10px] uppercase tracking-widest text-muted-foreground">Operations OS</p>
           </div>
@@ -284,16 +312,16 @@ function SidebarContent({
               </p>
             </div>
           )}
-          {!collapsed && (
+          {!collapsed && isSuperAdmin && (
             <div className="flex items-center gap-1">
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-8 text-muted-foreground hover:text-foreground"
-                title={user.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-                onClick={() => setTheme(user.theme === 'dark' ? 'light' : 'dark')}
+                title={settings.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                onClick={applyTheme}
               >
-                {user.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+                {settings.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
               </Button>
               <Button
                 variant="ghost"
@@ -306,35 +334,62 @@ function SidebarContent({
               </Button>
             </div>
           )}
+          {!collapsed && !isSuperAdmin && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
+              title="Sign out"
+              onClick={handleSignOut}
+            >
+              <LogOut size={15} />
+            </Button>
+          )}
         </div>
 
-        {/* Accent picker */}
-        <div className={cn('mt-3 flex items-center gap-1.5', collapsed ? 'flex-col' : 'justify-center')}>
-          {ACCENTS.map((a) => (
-            <button
-              key={a.id}
-              onClick={() => setAccent(a.id)}
-              title={`${a.id} accent`}
-              className={cn(
-                'size-3.5 rounded-full border-2 transition-all hover:scale-125',
-                a.cls,
-                user.accent === a.id ? 'border-foreground/80 scale-110' : 'border-transparent opacity-60',
-              )}
-            />
-          ))}
-        </div>
+        {/* Accent picker — org-wide, super admin only (Site Settings) */}
+        {isSuperAdmin && (
+          <div className={cn('mt-3 flex items-center gap-1.5', collapsed ? 'flex-col' : 'justify-center')}>
+            {ACCENTS.map((a) => (
+              <button
+                key={a.id}
+                onClick={() => applyAccent(a.id)}
+                title={`${a.id} accent`}
+                className={cn(
+                  'size-3.5 rounded-full border-2 transition-all hover:scale-125',
+                  a.cls,
+                  settings.accent === a.id ? 'border-foreground/80 scale-110' : 'border-transparent opacity-60',
+                )}
+              />
+            ))}
+          </div>
+        )}
 
-        {collapsed && (
+        {collapsed && isSuperAdmin && (
           <div className="mt-3 flex flex-col items-center gap-1">
             <Button
               variant="ghost"
               size="icon"
               className="size-8 text-muted-foreground hover:text-foreground"
-              title={user.theme === 'dark' ? 'Light theme' : 'Dark theme'}
-              onClick={() => setTheme(user.theme === 'dark' ? 'light' : 'dark')}
+              title={settings.theme === 'dark' ? 'Light theme' : 'Dark theme'}
+              onClick={applyTheme}
             >
-              {user.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              {settings.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
             </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
+              title="Sign out"
+              onClick={handleSignOut}
+            >
+              <LogOut size={15} />
+            </Button>
+          </div>
+        )}
+
+        {collapsed && !isSuperAdmin && (
+          <div className="mt-3 flex flex-col items-center gap-1">
             <Button
               variant="ghost"
               size="icon"

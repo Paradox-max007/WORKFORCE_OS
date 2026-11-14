@@ -6,9 +6,23 @@
 
 import { motion } from 'framer-motion';
 import Image from 'next/image';
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
+import { useSettingsStore } from '@/store/settings-store';
 
 export function AuthShell({ children, footer }: { children: ReactNode; footer?: ReactNode }) {
+  // org branding (demo mode reads it without a session; live mode falls back
+  // to the default name until the caller is authenticated)
+  const settings = useSettingsStore((s) => s.settings);
+  const loadSettings = useSettingsStore((s) => s.load);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
+
+  const brandWords = settings.project_name.trim().split(/\s+/);
+  const brandFirst = brandWords[0] ?? 'PULSE';
+  const brandRest = brandWords.slice(1).join(' ');
+
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10">
       {/* aurora background */}
@@ -38,7 +52,9 @@ export function AuthShell({ children, footer }: { children: ReactNode; footer?: 
             </motion.div>
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">
-                PULSE <span className="gradient-text font-bold">Workforce OS</span>
+                {brandFirst}{' '}
+                {brandRest && <span className="gradient-text font-bold">{brandRest}</span>}
+                {' '}<span className="gradient-text font-bold">OS</span>
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">The live pulse of your workforce operations.</p>
             </div>

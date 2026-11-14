@@ -26,12 +26,13 @@ import {
   type SalaryRole,
   type SharedSheetSnapshot,
   type Site,
+  type SiteSettings,
   type SiteTransfer,
   type Trade,
   type UniformEntry,
   type Warning,
 } from '@/lib/types';
-import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE } from '@/lib/types';
+import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE, DEFAULT_SITE_SETTINGS } from '@/lib/types';
 
 export interface DemoProfile extends Profile {
   password: string;
@@ -233,6 +234,16 @@ export interface DemoDB {
   // effective absent-deduction rule (Trade Management → Deductions tab —
   // mirrors the deduction_settings Postgres singleton, see 20261111c)
   deductionSettings: DeductionSettings;
+  // org-wide site settings (Site Settings page — mirrors the site_settings
+  // Postgres singleton, see 20261114). Unlike the public SiteSettings shape
+  // this keeps the RAW ai_api_key (demo data never leaves the browser).
+  siteSettings: DemoSiteSettings;
+}
+
+/** Demo-only site settings row — the public masked-key field is replaced by
+ *  the RAW ai_api_key (demo data never leaves the browser). */
+export interface DemoSiteSettings extends Omit<SiteSettings, 'ai_api_key_masked'> {
+  ai_api_key: string;
 }
 
 /** Raw employee-note row (author name resolved at read time from profiles) */
@@ -343,6 +354,18 @@ function seedDB(): DemoDB {
     deductionSettings: {
       absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
       absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+      updated_at: null,
+      updated_by_name: null,
+    },
+    siteSettings: {
+      project_name: DEFAULT_SITE_SETTINGS.project_name,
+      company_name: DEFAULT_SITE_SETTINGS.company_name,
+      theme: DEFAULT_SITE_SETTINGS.theme,
+      accent: DEFAULT_SITE_SETTINGS.accent,
+      ai_enabled: false,
+      ai_base_url: DEFAULT_SITE_SETTINGS.ai_base_url,
+      ai_model: DEFAULT_SITE_SETTINGS.ai_model,
+      ai_api_key: '',
       updated_at: null,
       updated_by_name: null,
     },
@@ -826,6 +849,21 @@ function loadDB(): DemoDB {
           parsed.deductionSettings = {
             absent_free_days: ABSENT_DEDUCTION_FREE_DAYS,
             absent_deduction_amount: ABSENT_DEDUCTION_RATE,
+            updated_at: null,
+            updated_by_name: null,
+          };
+        }
+        // site settings shipped without a version bump — heal to the defaults
+        if (!parsed.siteSettings) {
+          parsed.siteSettings = {
+            project_name: DEFAULT_SITE_SETTINGS.project_name,
+            company_name: DEFAULT_SITE_SETTINGS.company_name,
+            theme: DEFAULT_SITE_SETTINGS.theme,
+            accent: DEFAULT_SITE_SETTINGS.accent,
+            ai_enabled: false,
+            ai_base_url: DEFAULT_SITE_SETTINGS.ai_base_url,
+            ai_model: DEFAULT_SITE_SETTINGS.ai_model,
+            ai_api_key: '',
             updated_at: null,
             updated_by_name: null,
           };

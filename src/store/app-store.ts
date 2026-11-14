@@ -28,7 +28,8 @@ export type AppView =
   | 'leave_requests'
   | 'cancellation_requests'
   | 'notifications'
-  | 'admins';
+  | 'admins'
+  | 'site_settings';
 
 export const VIEW_TITLES: Record<AppView, string> = {
   dashboard: 'Dashboard',
@@ -52,6 +53,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   cancellation_requests: 'Cancellation Requests',
   notifications: 'Notifications Hub',
   admins: 'Admin Management',
+  site_settings: 'Site Settings',
 };
 
 interface AppStore {

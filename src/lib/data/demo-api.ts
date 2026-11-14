@@ -38,6 +38,8 @@ import {
   type SalarySheetRowUpdate,
   type SalaryRole,
   type SharedSheetEmployee,
+  type SiteSettings,
+  type SiteSettingsInput,
   type SharedSheetExtra,
   type SharedSheetPayload,
   type SharedSheetSnapshot,
@@ -92,6 +94,7 @@ import {
   tradesWithRates,
 } from './demo-salary';
 import { defaultPermissionMap } from '@/lib/menus';
+import { maskApiKey } from '@/lib/types';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
 type VM = Record<string, unknown>;
@@ -1807,6 +1810,94 @@ export const demoApi = {
     // realtime tables a rate change bumps
     saveAndEmit(['deduction_settings', 'payroll_period', 'payroll_employee']);
     return { ...db.deductionSettings };
+  },
+
+  // ---- site settings (Site Settings page — super admin only) ------------------
+  /** Public view of the org-wide settings. In DEMO mode the raw AI API key is
+   *  also attached (demo data never leaves the browser) so the settings page
+   *  can re-test the stored connection; Postgres never returns it. */
+  async getSiteSettings(): Promise<SiteSettings> {
+    return {
+      project_name: db.siteSettings.project_name,
+      company_name: db.siteSettings.company_name,
+      theme: db.siteSettings.theme,
+      accent: db.siteSettings.accent,
+      ai_enabled: db.siteSettings.ai_enabled,
+      ai_base_url: db.siteSettings.ai_base_url,
+      ai_model: db.siteSettings.ai_model,
+      ai_api_key_masked: maskApiKey(db.siteSettings.ai_api_key),
+      updated_at: db.siteSettings.updated_at,
+      updated_by_name: db.siteSettings.updated_by_name,
+    };
+  },
+
+  async updateSiteSettings(input: SiteSettingsInput): Promise<SiteSettings> {
+    const me = currentProfile();
+    if (me?.role !== 'super_admin') {
+      throw new Error('Only super admins can change site settings');
+    }
+
+    const next = { ...db.siteSettings };
+
+    if (input.project_name !== undefined) {
+      const name = input.project_name.trim();
+      if (!name) throw new Error('Project name cannot be empty');
+      if (name.length > 60) throw new Error('Project name is too long (max 60 characters)');
+      next.project_name = name;
+    }
+    if (input.company_name !== undefined) {
+      const name = input.company_name.trim();
+      if (!name) throw new Error('Company name cannot be empty');
+      if (name.length > 120) throw new Error('Company name is too long (max 120 characters)');
+      next.company_name = name;
+    }
+    if (input.theme !== undefined) {
+      if (input.theme !== 'dark' && input.theme !== 'light') throw new Error('Unknown theme');
+      next.theme = input.theme;
+    }
+    if (input.accent !== undefined) {
+      if (!['violet', 'emerald', 'amber', 'rose'].includes(input.accent)) {
+        throw new Error('Unknown accent color');
+      }
+      next.accent = input.accent;
+    }
+    if (input.ai_base_url !== undefined) {
+      const url = input.ai_base_url.trim().replace(/\/+$/, '');
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error();
+      } catch {
+        throw new Error('AI base URL must be a valid http(s) URL, e.g. https://api.openai.com/v1');
+      }
+      next.ai_base_url = url;
+    }
+    if (input.ai_model !== undefined) {
+      const model = input.ai_model.trim();
+      if (!model) throw new Error('AI model cannot be empty');
+      next.ai_model = model;
+    }
+    // write-only key: undefined = keep the stored key, '' = clear it
+    if (input.ai_api_key !== undefined) {
+      const key = input.ai_api_key.trim();
+      if (key.includes('•')) {
+        throw new Error('That looks like a masked key — paste the full API key or leave the field empty');
+      }
+      next.ai_api_key = key;
+    }
+    if (input.ai_enabled !== undefined) {
+      if (input.ai_enabled && !next.ai_api_key) {
+        throw new Error('Save an API key before enabling the AI assistant');
+      }
+      next.ai_enabled = input.ai_enabled;
+    }
+
+    db.siteSettings = {
+      ...next,
+      updated_at: nowISO(),
+      updated_by_name: me?.name ?? null,
+    };
+    saveAndEmit(['site_settings']);
+    return this.getSiteSettings();
   },
 
   async getTradeRateHistory(tradeId: string): Promise<TradeRate[]> {

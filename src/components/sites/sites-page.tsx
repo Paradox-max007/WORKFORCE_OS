@@ -51,6 +51,7 @@ import { exportElementToPdf, printElement } from '@/lib/pdf';
 import { cn } from '@/lib/utils';
 import type { BranchWithCount, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
+import { useSettingsStore } from '@/store/settings-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
 // ---------------------------------------------------------------------------
@@ -1660,6 +1661,10 @@ function AttendanceSheetView({
   const pdfRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
 
+  // org-wide branding — the company legal name printed on the paper header
+  // (Site Settings, super admin only)
+  const companyName = useSettingsStore((s) => s.settings.company_name);
+
   const [scale, setScale] = useState(1);
   const [busy, setBusy] = useState(false);
 
@@ -1822,7 +1827,7 @@ function AttendanceSheetView({
             <div className="att-band">
               <div style={{ flex: 1 }} />
               <div style={{ flex: '0 0 auto', textAlign: 'center' }}>
-                <div className="att-company">PULSE WORKFORCE OS LLC.</div>
+                <div className="att-company">{upper(companyName)}</div>
                 <div className="att-subband">DAILY ATTENDANCE</div>
               </div>
               <div style={{ flex: 1, display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
@@ -1859,7 +1864,7 @@ function AttendanceSheetView({
         ) : (
           <>
             <div className="att-band att-band-compact">
-              <div className="att-company att-company-sm">PULSE WORKFORCE OS LLC.</div>
+              <div className="att-company att-company-sm">{upper(companyName)}</div>
               <div className="att-subband">DAILY ATTENDANCE</div>
             </div>
             <div className="att-compact-line">

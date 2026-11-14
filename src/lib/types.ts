@@ -492,6 +492,66 @@ export const DEFAULT_DEDUCTION_SETTINGS: DeductionSettings = {
   updated_by_name: null,
 };
 
+/** ------------------------------------------------------------------------
+ *  SITE SETTINGS — org-wide configuration edited on the Site Settings page
+ *  (super admin only). Covers branding (project + company name shown in the
+ *  sidebar, auth screens, attendance paper…), the default look (theme +
+ *  accent applied for EVERY admin) and the AI assistant connection the
+ *  upcoming in-app AI bot will use (OpenAI-compatible base URL + API key +
+ *  model). Mirrored by the site_settings Postgres singleton — see the
+ *  20261114 SQL migration.
+ *  ------------------------------------------------------------------------ */
+export interface SiteSettings {
+  /** display name of the project (sidebar, browser title, auth screens) */
+  project_name: string;
+  /** legal company name printed on the attendance paper */
+  company_name: string;
+  /** org-wide look — applied for every signed-in admin */
+  theme: ThemeMode;
+  accent: AccentColor;
+  /** AI assistant (upcoming in-app bot) connection */
+  ai_enabled: boolean;
+  /** OpenAI-compatible endpoint, e.g. https://api.openai.com/v1 */
+  ai_base_url: string;
+  /** model id, e.g. gpt-4o-mini or glm-4.6 */
+  ai_model: string;
+  /** masked view of the stored API key (never the raw key), '' when unset */
+  ai_api_key_masked: string;
+  updated_at: string | null;
+  updated_by_name: string | null;
+}
+
+/** Payload for updating site settings — every field optional (patch). The
+ *  raw API key is WRITE-ONLY: undefined = keep the stored key, '' = clear it. */
+export interface SiteSettingsInput {
+  project_name?: string;
+  company_name?: string;
+  theme?: ThemeMode;
+  accent?: AccentColor;
+  ai_enabled?: boolean;
+  ai_base_url?: string;
+  ai_model?: string;
+  ai_api_key?: string;
+}
+
+/** Fallback when no settings row exists yet (fresh DB / RPC failure). */
+export const DEFAULT_SITE_SETTINGS: SiteSettings = {
+  project_name: 'PULSE Workforce',
+  company_name: 'PULSE WORKFORCE OS LLC.',
+  theme: 'dark',
+  accent: 'violet',
+  ai_enabled: false,
+  ai_base_url: 'https://api.openai.com/v1',
+  ai_model: 'gpt-4o-mini',
+  ai_api_key_masked: '',
+  updated_at: null,
+  updated_by_name: null,
+};
+
+/** Mask an API key for display: keep only the last 4 characters. */
+export const maskApiKey = (key: string): string =>
+  key ? `••••••••${key.slice(-4)}` : '';
+
 export interface Trade {
   id: string;
   name: string;
@@ -897,7 +957,8 @@ export type RealtimeTable =
   | 'payroll_time_card'
   | 'advance_record'
   | 'deduction_settings'
-  | 'attendance_share_link';
+  | 'attendance_share_link'
+  | 'site_settings';
 
 export interface MonthlySummaryRow {
   month: string; // YYYY-MM

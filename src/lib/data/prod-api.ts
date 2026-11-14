@@ -49,6 +49,8 @@ import {
   type DeductionSettings,
   type DeductionSettingsInput,
   type Site,
+  type SiteSettings,
+  type SiteSettingsInput,
   type SiteTransfer,
   type SiteWithCount,
   type Trade,
@@ -60,7 +62,7 @@ import {
   type UniformEntryUpdate,
   type WarningVM,
 } from '@/lib/types';
-import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE } from '@/lib/types';
+import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE, DEFAULT_SITE_SETTINGS } from '@/lib/types';
 import { defaultPermissionMap } from '@/lib/menus';
 
 const sb = () => {
@@ -139,6 +141,7 @@ function ensureRealtimeChannel(): void {
     'payroll_employee',
     'attendance_share_link',
     'advance_record',
+    'site_settings',
   ];
 
   // Clean up any stale channel on the same topic before subscribing
@@ -1105,6 +1108,58 @@ export const prodApi = {
     return {
       absent_free_days: Number(row.absent_free_days ?? input.absent_free_days),
       absent_deduction_amount: Number(row.absent_deduction_amount ?? input.absent_deduction_amount),
+      updated_at: (row.updated_at as string | null) ?? null,
+      updated_by_name: (row.updated_by_name as string | null) ?? null,
+    };
+  },
+
+  // ---- site settings (Site Settings page — super admin only) ------------------
+  async getSiteSettings(): Promise<SiteSettings> {
+    try {
+      const { data, error } = await sb().rpc('get_site_settings');
+      if (error) throw error;
+      const row = (data ?? {}) as Record<string, unknown>;
+      return {
+        project_name: (row.project_name as string) || DEFAULT_SITE_SETTINGS.project_name,
+        company_name: (row.company_name as string) || DEFAULT_SITE_SETTINGS.company_name,
+        theme: (row.theme as SiteSettings['theme']) || DEFAULT_SITE_SETTINGS.theme,
+        accent: (row.accent as SiteSettings['accent']) || DEFAULT_SITE_SETTINGS.accent,
+        ai_enabled: Boolean(row.ai_enabled),
+        ai_base_url: (row.ai_base_url as string) || DEFAULT_SITE_SETTINGS.ai_base_url,
+        ai_model: (row.ai_model as string) || DEFAULT_SITE_SETTINGS.ai_model,
+        ai_api_key_masked: (row.ai_api_key_masked as string) ?? '',
+        updated_at: (row.updated_at as string | null) ?? null,
+        updated_by_name: (row.updated_by_name as string | null) ?? null,
+      };
+    } catch {
+      // fresh DB without the settings row / RPC yet → ship the defaults
+      return { ...DEFAULT_SITE_SETTINGS };
+    }
+  },
+
+  async updateSiteSettings(input: SiteSettingsInput): Promise<SiteSettings> {
+    const { data, error } = await sb().rpc('update_site_settings', {
+      p_project_name: input.project_name ?? null,
+      p_company_name: input.company_name ?? null,
+      p_theme: input.theme ?? null,
+      p_accent: input.accent ?? null,
+      p_ai_enabled: input.ai_enabled ?? null,
+      p_ai_base_url: input.ai_base_url ?? null,
+      p_ai_model: input.ai_model ?? null,
+      // null = keep the stored key, '' = clear it
+      p_ai_api_key: input.ai_api_key ?? null,
+    });
+    assertOk(error);
+    const row = (data ?? {}) as Record<string, unknown>;
+    return {
+      project_name: (row.project_name as string) || DEFAULT_SITE_SETTINGS.project_name,
+      company_name: (row.company_name as string) || DEFAULT_SITE_SETTINGS.company_name,
+      theme: (row.theme as SiteSettings['theme']) || DEFAULT_SITE_SETTINGS.theme,
+      accent: (row.accent as SiteSettings['accent']) || DEFAULT_SITE_SETTINGS.accent,
+      ai_enabled: Boolean(row.ai_enabled),
+      ai_base_url: (row.ai_base_url as string) || DEFAULT_SITE_SETTINGS.ai_base_url,
+      ai_model: (row.ai_model as string) || DEFAULT_SITE_SETTINGS.ai_model,
+      ai_api_key_masked: (row.ai_api_key_masked as string) ?? '',
       updated_at: (row.updated_at as string | null) ?? null,
       updated_by_name: (row.updated_by_name as string | null) ?? null,
     };

@@ -26,7 +26,7 @@
 
 import {
   LayoutDashboard, Users, Building2, GitBranch, Tent, CalendarCheck, Clock, Shirt,
-  FileWarning, Ban, Bell, UserSquare2, Wallet, Banknote, BookOpenText, Wrench, type LucideIcon,
+  FileWarning, Ban, Bell, UserSquare2, Wallet, Banknote, BookOpenText, Wrench, Settings, type LucideIcon,
 } from 'lucide-react';
 import type { AppView } from '@/store/app-store';
 import type { MenuPermissionMap } from '@/lib/types';
@@ -95,6 +95,8 @@ export const MENUS = [
   { id: 'notifications', label: 'Notifications', hint: 'Alerts & announcements', icon: Bell, managed: true, defaultOn: false },
   // super admin only — never listed as an admin toggle
   { id: 'admins', label: 'Admin Management', hint: 'Accounts, roles & permissions', icon: UserSquare2, managed: false, defaultOn: false },
+  // super admin only — org-wide branding, theme & the AI assistant connection
+  { id: 'site_settings', label: 'Site Settings', hint: 'Project name, company branding, theme, accent & the AI assistant connection', icon: Settings, managed: false, defaultOn: false },
 ] as const satisfies readonly MenuDef[];
 
 /** Every sidebar menu id. */

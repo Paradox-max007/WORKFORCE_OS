@@ -79,7 +79,10 @@ export interface CampWithCount extends Camp {
   employee_count: number;
 }
 
-export type EmployeeStatus = 'active' | 'pending_deletion' | 'deleted';
+/** 'cancelled' = removed from the roster via an approved Cancellation
+ *  Request — the employee stays in the Cancelled list with ALL past records
+ *  (attendance, salary, advances, uniforms…) kept for future reference. */
+export type EmployeeStatus = 'active' | 'pending_deletion' | 'deleted' | 'cancelled';
 export type DocumentStatus = 'Valid' | 'Expired' | 'N/A';
 
 /** A manpower / contracting company employees work under (its own table). */
@@ -506,6 +509,8 @@ export interface SiteSettings {
   project_name: string;
   /** legal company name printed on the attendance paper */
   company_name: string;
+  /** custom company logo (data: or https: URL) — null = the default PULSE mark */
+  logo_url: string | null;
   /** org-wide look — applied for every signed-in admin */
   theme: ThemeMode;
   accent: AccentColor;
@@ -526,6 +531,8 @@ export interface SiteSettings {
 export interface SiteSettingsInput {
   project_name?: string;
   company_name?: string;
+  /** undefined = keep, '' = reset to the default logo, otherwise a data:/https: URL */
+  logo_url?: string;
   theme?: ThemeMode;
   accent?: AccentColor;
   ai_enabled?: boolean;
@@ -538,6 +545,7 @@ export interface SiteSettingsInput {
 export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   project_name: 'PULSE Workforce',
   company_name: 'PULSE WORKFORCE OS LLC.',
+  logo_url: null,
   theme: 'dark',
   accent: 'violet',
   ai_enabled: false,

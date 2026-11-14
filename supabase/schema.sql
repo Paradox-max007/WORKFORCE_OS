@@ -107,7 +107,7 @@ create table if not exists public.employee (
   camp_block          text,                           -- block number inside the camp
   camp_room           text,                           -- room number inside the camp
   rating              numeric(2,1) not null default 5.0 check (rating >= 0 and rating <= 5),
-  status              text not null default 'active' check (status in ('active','pending_deletion','deleted')),
+  status              text not null default 'active' check (status in ('active','pending_deletion','deleted','cancelled')),
   photo               text,                            -- base64 data-url
   is_team_leader      boolean not null default false,
   team_leader_site_id uuid references public.site(id) on delete set null,
@@ -1130,6 +1130,7 @@ begin
   select * into emp from public.employee where id = p_employee_id;
   if emp.id is null then raise exception 'Employee not found'; end if;
   if emp.status = 'deleted' then raise exception 'This employee is already deleted'; end if;
+  if emp.status = 'cancelled' then raise exception 'This employee is already cancelled'; end if;
   if emp.status = 'pending_deletion' then raise exception 'This employee already has a pending deletion request'; end if;
 
   insert into public.cancellation_request (employee_id, reason, status, requested_by)
@@ -1162,9 +1163,10 @@ begin
 
   if p_approve then
     update public.cancellation_request set status = 'approved', reviewed_by = auth.uid(), reviewed_at = now() where id = p_id;
-    update public.employee set status = 'deleted', current_site_id = null, is_team_leader = false, team_leader_site_id = null
+    -- CANCEL, not delete: the employee keeps every past record for future
+    -- reference (see the 20261115 migration)
+    update public.employee set status = 'cancelled', current_site_id = null, is_team_leader = false, team_leader_site_id = null
       where id = req.employee_id;
-    update public.uniform_registry set is_deleted = true, is_hidden = true where employee_id = req.employee_id;
   else
     update public.cancellation_request set status = 'rejected', reviewed_by = auth.uid(), reviewed_at = now() where id = p_id;
     update public.employee set status = 'active' where id = req.employee_id and status = 'pending_deletion';
@@ -1174,11 +1176,28 @@ begin
     insert into public.notification (profile_id, title, message, type)
     values (req.requested_by,
       'Cancellation Request ' || case when p_approve then 'Approved' else 'Rejected' end,
-      'The removal request for ' || coalesce(emp.full_name,'the employee') || ' has been ' ||
-        case when p_approve then 'approved and the employee was removed.' else 'rejected and the employee was restored.' end,
+      'The cancellation request for ' || coalesce(emp.full_name,'the employee') || ' has been ' ||
+        case when p_approve
+          then 'approved — the employee was moved to the cancelled list (all past records kept).'
+          else 'rejected and the employee was restored.' end,
       'request');
   end if;
 end; $$;
+
+-- Super admin brings a cancelled employee back to 'active' (20261115)
+create or replace function public.restore_employee(p_id uuid)
+returns void language plpgsql
+security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then raise exception 'Only super admins can restore cancelled employees'; end if;
+  if not exists (select 1 from public.employee where id = p_id and status = 'cancelled') then
+    raise exception 'Only cancelled employees can be restored';
+  end if;
+  update public.employee set status = 'active' where id = p_id;
+end; $$;
+
+grant execute on function public.restore_employee(uuid) to authenticated;
 
 -- ============================================================================
 -- 9. ATTENDANCE RPCs

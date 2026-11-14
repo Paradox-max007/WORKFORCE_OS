@@ -51,6 +51,7 @@ export function EmployeeStatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
     active: { label: 'Active', cls: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/25' },
     pending_deletion: { label: 'Pending Deletion', cls: 'bg-amber-500/10 text-amber-500 border-amber-500/25' },
+    cancelled: { label: 'Cancelled', cls: 'bg-rose-500/10 text-rose-500 border-rose-500/25' },
     deleted: { label: 'Deleted', cls: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/25' },
   };
   const cfg = map[status] ?? { label: status, cls: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/25' };

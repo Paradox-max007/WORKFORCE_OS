@@ -243,11 +243,19 @@ function SidebarContent({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Logo */}
+      {/* Logo — custom company logo (Site Settings) or the default PULSE mark */}
       <div className={cn('flex items-center gap-3 px-4 py-5', collapsed && 'justify-center px-2')}>
         <div className="relative shrink-0">
-          <div className="absolute inset-0 rounded-xl brand-gradient opacity-40 blur-md" />
-          <Image src="/logo.svg" alt="PULSE logo" width={36} height={36} className="relative rounded-xl" />
+          {settings.logo_url ? (
+            // custom logo can be a data URL — plain <img> (next/image cannot
+            // optimize data: URLs)
+            <img src={settings.logo_url} alt="Company logo" className="relative size-9 rounded-xl object-contain" />
+          ) : (
+            <>
+              <div className="absolute inset-0 rounded-xl brand-gradient opacity-40 blur-md" />
+              <Image src="/logo.svg" alt="PULSE logo" width={36} height={36} className="relative rounded-xl" />
+            </>
+          )}
         </div>
         {!collapsed && (
           <div className="min-w-0">

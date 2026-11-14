@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================================
-// PULSE Workforce OS — Cancellation Requests module (employee removal workflow)
+// PULSE Workforce OS — Cancellation Requests module (employee cancellation workflow)
 // ============================================================================
 
 import { motion } from 'framer-motion';
@@ -132,8 +132,8 @@ export function CancellationRequestPage() {
       const { req, approve } = reviewTarget;
       await dataApi.reviewCancellationRequest(req.id, approve);
       if (approve) {
-        toast.success('Cancellation approved — employee deleted', {
-          description: `${req.employee_name} (${req.employee_code}) has been permanently removed.`,
+        toast.success('Cancellation approved — employee cancelled', {
+          description: `${req.employee_name} (${req.employee_code}) moved to the Cancelled list — every past record is kept.`,
         });
       } else {
         toast.success('Cancellation rejected — employee restored', {
@@ -155,7 +155,7 @@ export function CancellationRequestPage() {
         className={cn(APPROVE_BTN, full && 'flex-1')}
         onClick={() => setReviewTarget({ req: r, approve: true })}
       >
-        <Trash2 size={14} /> Approve &amp; Delete
+        <Trash2 size={14} /> Approve &amp; Cancel
       </Button>
       <Button
         variant="outline" size="sm"
@@ -170,7 +170,7 @@ export function CancellationRequestPage() {
   const statCards = [
     { label: 'Total Requests', value: stats.total, icon: <FileX2 size={20} />, tone: 'brand' as const, hint: 'All cancellation requests' },
     { label: 'Pending', value: stats.pending, icon: <Clock size={20} />, tone: 'amber' as const, hint: 'Awaiting approval' },
-    { label: 'Approved', value: stats.approved, icon: <CheckCircle2 size={20} />, tone: 'emerald' as const, hint: 'Employees deleted' },
+    { label: 'Approved', value: stats.approved, icon: <CheckCircle2 size={20} />, tone: 'emerald' as const, hint: 'Employees cancelled' },
     { label: 'Rejected', value: stats.rejected, icon: <XCircle size={20} />, tone: 'rose' as const, hint: 'Employees restored' },
   ];
 
@@ -178,7 +178,7 @@ export function CancellationRequestPage() {
     <div className="mx-auto max-w-7xl space-y-6">
       <PageHeader
         title="Cancellation Requests"
-        description="Employee removal workflow — approvals required before deletion"
+        description="Employee cancellation workflow — approvals archive, never delete"
         actions={
           <Button
             onClick={() => setCreateOpen(true)}
@@ -412,7 +412,7 @@ export function CancellationRequestPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {reviewTarget?.approve ? 'Approve & Delete Employee?' : 'Reject & Restore Employee?'}
+              {reviewTarget?.approve ? 'Approve & Cancel Employee?' : 'Reject & Restore Employee?'}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {reviewTarget && (
@@ -421,7 +421,7 @@ export function CancellationRequestPage() {
                     {reviewTarget.req.employee_name} ({reviewTarget.req.employee_code})
                   </span>{' '}
                   {reviewTarget.approve
-                    ? '— the employee will be permanently deleted and their records hidden. This action cannot be undone.'
+                    ? '— the employee will be moved to the Cancelled list. They leave every working list but NONE of their records are deleted: attendance, salary sheet, advances, uniforms, warnings and fines all stay available for future reference. They can be restored anytime.'
                     : '— the employee will be restored to active status and the cancellation request will be marked as rejected.'}
                 </>
               )}
@@ -441,7 +441,7 @@ export function CancellationRequestPage() {
               {reviewBusy
                 ? <Loader2 size={16} className="animate-spin" />
                 : reviewTarget?.approve ? <Trash2 size={16} /> : <RotateCcw size={16} />}
-              {reviewTarget?.approve ? 'Approve & Delete' : 'Reject & Restore'}
+              {reviewTarget?.approve ? 'Approve & Cancel' : 'Reject & Restore'}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -481,7 +481,7 @@ function NewCancellationRequestDialog({
     try {
       await dataApi.createCancellationRequest(employeeId, reason.trim() || null);
       toast.success('Cancellation request submitted', {
-        description: `${selectedEmployee?.full_name ?? 'The employee'} is now marked as 'Pending Deletion' until a super admin approves it.`,
+        description: `${selectedEmployee?.full_name ?? 'The employee'} is now marked as 'Pending Deletion' until a super admin reviews it.`,
       });
       onOpenChange(false);
     } catch (err) {
@@ -497,7 +497,7 @@ function NewCancellationRequestDialog({
         <DialogHeader>
           <DialogTitle>New Cancellation Request</DialogTitle>
           <DialogDescription>
-            Request the removal of an employee. A super admin must approve it before deletion.
+            Request the cancellation of an employee. A super admin must approve it first.
           </DialogDescription>
         </DialogHeader>
 
@@ -513,7 +513,8 @@ function NewCancellationRequestDialog({
             <p>
               Upon submission, the employee will be marked as{' '}
               <span className="font-semibold">&quot;Pending Deletion&quot;</span> until a super admin
-              approves or rejects. If approved, the employee will be permanently deleted.
+              approves or rejects. If approved, the employee is moved to the Cancelled list — all their
+              past records are kept and they can be restored later.
             </p>
           </motion.div>
 

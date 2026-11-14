@@ -47,8 +47,16 @@ export function AuthShell({ children, footer }: { children: ReactNode; footer?: 
               transition={{ type: 'spring', stiffness: 260, damping: 18, delay: 0.15 }}
               className="relative"
             >
-              <div className="absolute inset-0 rounded-2xl brand-gradient opacity-40 blur-xl" />
-              <Image src="/logo.svg" alt="PULSE logo" width={56} height={56} className="relative rounded-2xl" priority />
+              {settings.logo_url ? (
+                // custom company logo (Site Settings) — can be a data URL,
+                // which next/image cannot optimize → plain <img>
+                <img src={settings.logo_url} alt="Company logo" className="relative size-14 rounded-2xl object-contain" />
+              ) : (
+                <>
+                  <div className="absolute inset-0 rounded-2xl brand-gradient opacity-40 blur-xl" />
+                  <Image src="/logo.svg" alt="PULSE logo" width={56} height={56} className="relative rounded-2xl" priority />
+                </>
+              )}
             </motion.div>
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">

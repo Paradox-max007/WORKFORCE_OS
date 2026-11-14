@@ -360,6 +360,7 @@ function seedDB(): DemoDB {
     siteSettings: {
       project_name: DEFAULT_SITE_SETTINGS.project_name,
       company_name: DEFAULT_SITE_SETTINGS.company_name,
+      logo_url: null,
       theme: DEFAULT_SITE_SETTINGS.theme,
       accent: DEFAULT_SITE_SETTINGS.accent,
       ai_enabled: false,
@@ -858,6 +859,7 @@ function loadDB(): DemoDB {
           parsed.siteSettings = {
             project_name: DEFAULT_SITE_SETTINGS.project_name,
             company_name: DEFAULT_SITE_SETTINGS.company_name,
+            logo_url: null,
             theme: DEFAULT_SITE_SETTINGS.theme,
             accent: DEFAULT_SITE_SETTINGS.accent,
             ai_enabled: false,
@@ -867,6 +869,10 @@ function loadDB(): DemoDB {
             updated_at: null,
             updated_by_name: null,
           };
+        }
+        // logo_url shipped after the settings row existed — heal to the default
+        if (parsed.siteSettings && parsed.siteSettings.logo_url === undefined) {
+          parsed.siteSettings.logo_url = null;
         }
         // branches shipped in DB v15 — heal older shapes defensively
         if (!parsed.branches) parsed.branches = [];

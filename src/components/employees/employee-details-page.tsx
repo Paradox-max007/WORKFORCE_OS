@@ -13,7 +13,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
   ChevronRight, Clock3, CreditCard, Crown, FileDown, FileText, Loader2, MessageCircle,
-  Pencil, Plus, Tent, TriangleAlert, UserRound, X,
+  Pencil, Plus, RotateCcw, Tent, TriangleAlert, UserRound, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -21,6 +21,10 @@ import {
   AnimatedCounter, BranchBadge, EmptyState, EmployeeStatusBadge, RatingStars, SectionTitle,
   SiteBadge, SkeletonRows,
 } from '@/components/shared/primitives';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -39,6 +43,7 @@ import type {
   PaymentType, SalaryEligibility, WarningVM,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
+import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
 // ---------------------------------------------------------------------------
@@ -86,6 +91,7 @@ const hoursDecimalsFor = (n: number): 0 | 1 | 2 => {
 const STATUS_LABEL: Record<EmployeeStatus, string> = {
   active: 'Active',
   pending_deletion: 'Pending Deletion',
+  cancelled: 'Cancelled',
   deleted: 'Deleted',
 };
 
@@ -133,11 +139,12 @@ const describeMonths = (points: MonthPoint[]): string => {
 /** Lifetime range: first working month = join month, or the earliest month that
  *  has marked attendance (whichever is earlier — probed with a bounded look-back
  *  that never precedes the employee record). Last working month = the current
- *  month, or the updated_at month for deleted / pending-deletion employees. */
+ *  month, or the updated_at month for deleted / pending-deletion / cancelled
+ *  employees (cancelled = the month their cancellation was approved). */
 async function computeLifetimeRange(emp: EmployeeVM): Promise<{ first: MonthPoint; last: MonthPoint }> {
   const current = currentMonthPoint();
   let last = current;
-  if ((emp.status === 'deleted' || emp.status === 'pending_deletion') && emp.updated_at) {
+  if ((emp.status === 'deleted' || emp.status === 'pending_deletion' || emp.status === 'cancelled') && emp.updated_at) {
     const lu = monthOf(emp.updated_at);
     if (monthIndexOf(lu) < monthIndexOf(current)) last = lu;
   }
@@ -1005,9 +1012,14 @@ export function EmployeeDetailsPage() {
   const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
   const navigateToEmployeeForm = useAppStore((s) => s.navigateToEmployeeForm);
   const navigateToNotifications = useAppStore((s) => s.navigateToNotifications);
+  const user = useAuthStore((s) => s.user);
+  const isSuperAdmin = user?.role === 'super_admin';
 
   const [emp, setEmp] = useState<EmployeeVM | null>(null);
   const [loading, setLoading] = useState(true);
+  // super-admin restore of a cancelled employee (archived, records kept)
+  const [restoreTarget, setRestoreTarget] = useState<EmployeeVM | null>(null);
+  const [restoring, setRestoring] = useState(false);
 
   const initialPoint = currentMonthPoint();
   const [trYear, setTrYear] = useState(initialPoint.y);
@@ -1041,8 +1053,17 @@ export function EmployeeDetailsPage() {
     (async () => {
       try {
         const emps = await dataApi.listEmployees();
+        let found = emps.find((e) => e.id === selectedEmployeeId) ?? null;
+        if (!found) {
+          // CANCELLED employees keep their full profile + every record —
+          // resolve them from the archive so their history stays reachable
+          try {
+            const archived = await dataApi.listCancelledEmployees();
+            found = archived.find((e) => e.id === selectedEmployeeId) ?? null;
+          } catch { /* stays null → "not found" */ }
+        }
         if (cancelled) return;
-        setEmp(emps.find((e) => e.id === selectedEmployeeId) ?? null);
+        setEmp(found);
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load employee');
       } finally {
@@ -1224,14 +1245,29 @@ export function EmployeeDetailsPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2 lg:flex-col lg:items-stretch xl:flex-row xl:items-center">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => navigateToEmployeeForm('edit', emp.id, 'employee_details')}
-              aria-label={`Edit ${emp.full_name}`}
-            >
-              <Pencil size={14} /> Edit
-            </Button>
+            {emp.status === 'cancelled' ? (
+              // archived — restore instead of edit (super admin only); the
+              // profile + every record below stays fully readable
+              isSuperAdmin && (
+                <Button
+                  variant="outline" size="sm"
+                  onClick={() => setRestoreTarget(emp)}
+                  aria-label={`Restore ${emp.full_name}`}
+                  className="border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400"
+                >
+                  <RotateCcw size={14} /> Restore to Active
+                </Button>
+              )
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigateToEmployeeForm('edit', emp.id, 'employee_details')}
+                aria-label={`Edit ${emp.full_name}`}
+              >
+                <Pencil size={14} /> Edit
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -1549,6 +1585,47 @@ export function EmployeeDetailsPage() {
           <ShareDialogContent emp={emp} onPreviewChange={setSharePreviewActive} />
         </DialogContent>
       </Dialog>
+
+      {/* ====================== Restore cancelled employee ====================== */}
+      <AlertDialog open={!!restoreTarget} onOpenChange={(o) => { if (!o) setRestoreTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restore Employee?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <strong>{restoreTarget?.full_name}</strong> will return to the active roster with all
+              their past records (attendance, salary, advances, uniforms…). Assign a site and camp
+              again from Edit afterwards.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoring}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={restoring}
+              className="bg-emerald-600 text-white hover:bg-emerald-600/90"
+              onClick={async (ev) => {
+                // keep the dialog open until the API answers (default closes it)
+                ev.preventDefault();
+                if (!restoreTarget) return;
+                setRestoring(true);
+                try {
+                  await dataApi.restoreEmployee(restoreTarget.id);
+                  toast.success('Employee restored', {
+                    description: `${restoreTarget.full_name} is back on the active roster — assign a site/camp from Edit.`,
+                  });
+                  setRestoreTarget(null);
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : 'Restore failed');
+                } finally {
+                  setRestoring(false);
+                }
+              }}
+            >
+              {restoring ? <Loader2 size={15} className="animate-spin" /> : <RotateCcw size={15} />}
+              Restore
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
   );
 }

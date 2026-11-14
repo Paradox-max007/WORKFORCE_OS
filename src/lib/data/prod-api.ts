@@ -603,10 +603,12 @@ export const prodApi = {
 
   // ---- employees ---------------------------------------------------------------
   async listEmployees(): Promise<EmployeeVM[]> {
+    // the WORKING roster — cancelled (archived) and deleted employees are
+    // served by listCancelledEmployees / stay gone; both keep their records
     // site → owning branch (branch_name) comes along via the nested embed
     const { data, error } = await sb().from('employee')
       .select('*, site:current_site_id(name, branch:branch_id(name)), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name), card_type:card_type_id(name)')
-      .neq('status', 'deleted')
+      .in('status', ['active', 'pending_deletion'])
       .order('created_at');
     assertOk(error);
     return ((data ?? []) as unknown as {
@@ -628,6 +630,36 @@ export const prodApi = {
     const { data, error } = await sb().from('site_transfer').select('*').order('created_at');
     assertOk(error);
     return (data ?? []) as SiteTransfer[];
+  },
+
+  /** Cancelled employees (approved Cancellation Requests) — the Employees
+   *  page "Cancelled" status filter. All past records remain available. */
+  async listCancelledEmployees(): Promise<EmployeeVM[]> {
+    const { data, error } = await sb().from('employee')
+      .select('*, site:current_site_id(name, branch:branch_id(name)), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name), card_type:card_type_id(name)')
+      .eq('status', 'cancelled')
+      .order('updated_at', { ascending: false });
+    assertOk(error);
+    return ((data ?? []) as unknown as {
+      site: { name: string; branch: { name: string } | null } | null; leader_site: { name: string } | null; camp: { name: string } | null;
+      trade: { name: string } | null; card_type: { name: string } | null;
+      [k: string]: unknown;
+    }[]).map((row) => ({
+      ...(row as unknown as EmployeeVM),
+      site_name: row.site?.name ?? null,
+      branch_name: row.site?.branch?.name ?? null,
+      leader_site_name: row.leader_site?.name ?? null,
+      camp_name: row.camp?.name ?? null,
+      trade_name: row.trade?.name ?? null,
+      card_type_name: row.card_type?.name ?? null,
+    }));
+  },
+
+  /** Super admin brings a cancelled employee back to the active roster
+   *  (restore_employee RPC — 20261115 migration). */
+  async restoreEmployee(id: string): Promise<void> {
+    const { error } = await sb().rpc('restore_employee', { p_id: id });
+    assertOk(error);
   },
 
   /** Lifetime working-hours report — all aggregation happens in Postgres
@@ -1122,6 +1154,7 @@ export const prodApi = {
       return {
         project_name: (row.project_name as string) || DEFAULT_SITE_SETTINGS.project_name,
         company_name: (row.company_name as string) || DEFAULT_SITE_SETTINGS.company_name,
+        logo_url: (row.logo_url as string | null) ?? null,
         theme: (row.theme as SiteSettings['theme']) || DEFAULT_SITE_SETTINGS.theme,
         accent: (row.accent as SiteSettings['accent']) || DEFAULT_SITE_SETTINGS.accent,
         ai_enabled: Boolean(row.ai_enabled),
@@ -1141,6 +1174,8 @@ export const prodApi = {
     const { data, error } = await sb().rpc('update_site_settings', {
       p_project_name: input.project_name ?? null,
       p_company_name: input.company_name ?? null,
+      // undefined = keep the stored logo, '' = reset to the default mark
+      p_logo_url: input.logo_url ?? null,
       p_theme: input.theme ?? null,
       p_accent: input.accent ?? null,
       p_ai_enabled: input.ai_enabled ?? null,
@@ -1154,6 +1189,7 @@ export const prodApi = {
     return {
       project_name: (row.project_name as string) || DEFAULT_SITE_SETTINGS.project_name,
       company_name: (row.company_name as string) || DEFAULT_SITE_SETTINGS.company_name,
+      logo_url: (row.logo_url as string | null) ?? null,
       theme: (row.theme as SiteSettings['theme']) || DEFAULT_SITE_SETTINGS.theme,
       accent: (row.accent as SiteSettings['accent']) || DEFAULT_SITE_SETTINGS.accent,
       ai_enabled: Boolean(row.ai_enabled),

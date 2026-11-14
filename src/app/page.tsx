@@ -169,6 +169,13 @@ export default function Home() {
     root.dataset.accent = accent;
   }, [settings.theme, settings.accent, settingsLoaded, user?.theme, user?.accent]);
 
+  // company logo (Site Settings) doubles as the browser favicon — layout.tsx
+  // ships the default <link rel="icon" href="/logo.svg"> this swaps live
+  useEffect(() => {
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link) link.href = settings.logo_url ?? '/logo.svg';
+  }, [settings.logo_url]);
+
   // browser title follows the org project name (server-rendered default in
   // layout.tsx until this takes over). Next.js restores the SSR <title> once
   // hydration finishes — AFTER this effect's first run — so re-assert the

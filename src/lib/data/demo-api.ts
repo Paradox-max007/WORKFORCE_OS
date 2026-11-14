@@ -152,6 +152,14 @@ const recordToCellText = (r: Attendance | undefined): string => {
   return '';
 };
 
+/** Roster membership: 'cancelled' employees (approved Cancellation Requests)
+ *  keep every record but leave ALL working lists — roster lists, site/camp/
+ *  branch counts and pickers. They surface only in the Cancelled list
+ *  (Employees page → status filter "Cancelled") and stay readable everywhere
+ *  else (details, history, salary sheet, advance book…). */
+const isRosterEmployee = (e: Employee): boolean =>
+  e.status === 'active' || e.status === 'pending_deletion';
+
 /** THE shared marking engine (mirrors the mark_attendance_core SQL
  *  function): parse → upsert → rating → 3-consecutive-absences warning.
  *  NO permission checks inside — permission-gated callers (markAttendance)
@@ -590,7 +598,7 @@ export const demoApi = {
           ...b,
           site_count: siteIds.size,
           employee_count: db.employees.filter(
-            (e) => e.current_site_id != null && siteIds.has(e.current_site_id) && e.status !== 'deleted',
+            (e) => e.current_site_id != null && siteIds.has(e.current_site_id) && isRosterEmployee(e),
           ).length,
         };
       })
@@ -682,7 +690,7 @@ export const demoApi = {
   async listSites(): Promise<SiteWithCount[]> {
     return db.sites.map((s) => ({
       ...s,
-      employee_count: db.employees.filter((e) => e.current_site_id === s.id && e.status !== 'deleted').length,
+      employee_count: db.employees.filter((e) => e.current_site_id === s.id && isRosterEmployee(e)).length,
     }));
   },
 
@@ -748,7 +756,7 @@ export const demoApi = {
   async listCamps(): Promise<CampWithCount[]> {
     return db.camps.map((c) => ({
       ...c,
-      employee_count: db.employees.filter((e) => e.camp_id === c.id && e.status !== 'deleted').length,
+      employee_count: db.employees.filter((e) => e.camp_id === c.id && isRosterEmployee(e)).length,
     }));
   },
 
@@ -805,8 +813,33 @@ export const demoApi = {
   },
 
   // ---- employees ---------------------------------------------------------------
+  /** The WORKING roster — active + pending-deletion employees. Cancelled
+   *  employees are archived (listCancelledEmployees) and deleted ones are
+   *  gone; both keep their records for future reference. */
   async listEmployees(): Promise<EmployeeVM[]> {
-    return db.employees.filter((e) => e.status !== 'deleted').map(attachEmployeeVM);
+    return db.employees.filter(isRosterEmployee).map(attachEmployeeVM);
+  },
+
+  /** Cancelled employees (approved Cancellation Requests) — listed on the
+   *  Employees page via the "Cancelled" status filter. All past records
+   *  (attendance, salary, advances, uniforms…) remain available. */
+  async listCancelledEmployees(): Promise<EmployeeVM[]> {
+    return db.employees
+      .filter((e) => e.status === 'cancelled')
+      .map(attachEmployeeVM)
+      .sort((a, b) => (b.updated_at ?? b.created_at).localeCompare(a.updated_at ?? a.created_at));
+  },
+
+  /** Super admin brings a cancelled employee back to the active roster. */
+  async restoreEmployee(id: string): Promise<void> {
+    const me = currentProfile();
+    if (me?.role !== 'super_admin') throw new Error('Only super admins can restore cancelled employees');
+    const e = db.employees.find((x) => x.id === id);
+    if (!e) throw new Error('Employee not found');
+    if (e.status !== 'cancelled') throw new Error('Only cancelled employees can be restored');
+    e.status = 'active';
+    e.updated_at = nowISO();
+    saveAndEmit(['employee']);
   },
 
   async listSiteTransfers(): Promise<SiteTransfer[]> {
@@ -1096,6 +1129,7 @@ export const demoApi = {
     const e = db.employees.find((x) => x.id === id);
     if (!e) throw new Error('Employee not found');
     if (e.status === 'deleted') throw new Error('This employee is already deleted');
+    if (e.status === 'cancelled') throw new Error('This employee is already cancelled');
     if (e.status === 'pending_deletion') throw new Error('This employee already has a pending deletion request');
 
     db.cancellationRequests.push({
@@ -1144,6 +1178,9 @@ export const demoApi = {
   async markAttendance(employeeId: string, date: string, value: string | null): Promise<void> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
+    if (e.status === 'cancelled') {
+      throw new Error('This employee is cancelled — restore them before marking attendance');
+    }
 
     // site-scoped marking is DATE-EFFECTIVE (mirrors the mark_attendance RPC):
     // normal admins only mark days the employee belonged to one of their
@@ -1516,11 +1553,14 @@ export const demoApi = {
 
     const e = db.employees.find((x) => x.id === r.employee_id);
     if (approve && e) {
-      e.status = 'deleted';
+      // CANCEL, never delete — the employee leaves the working roster but
+      // every past record (attendance, salary sheet, advances, uniforms,
+      // warnings, fines, leaves) stays available for future reference.
+      e.status = 'cancelled';
       e.current_site_id = null;
       e.is_team_leader = false;
       e.team_leader_site_id = null;
-      db.uniforms.filter((u) => u.employee_id === e.id).forEach((u) => { u.is_deleted = true; u.is_hidden = true; });
+      e.updated_at = nowISO();
     } else if (!approve && e && e.status === 'pending_deletion') {
       e.status = 'active';
     }
@@ -1529,11 +1569,14 @@ export const demoApi = {
       db.notifications.push({
         id: uid(), profile_id: r.requested_by,
         title: `Cancellation Request ${approve ? 'Approved' : 'Rejected'}`,
-        message: `The removal request for ${e.full_name} has been ${approve ? 'approved and the employee was removed.' : 'rejected and the employee was restored.'}`,
+        message: `The cancellation request for ${e.full_name} has been ${
+          approve
+            ? 'approved — the employee was moved to the cancelled list (all past records kept).'
+            : 'rejected and the employee was restored.'}`,
         type: 'request', read: false, is_hidden: false, created_at: nowISO(),
       });
     }
-    saveAndEmit(['cancellation_request', 'employee', 'uniform_registry', 'notification']);
+    saveAndEmit(['cancellation_request', 'employee', 'notification']);
   },
 
   // ---- companies (manpower companies — own table) ------------------------------
@@ -1820,6 +1863,7 @@ export const demoApi = {
     return {
       project_name: db.siteSettings.project_name,
       company_name: db.siteSettings.company_name,
+      logo_url: db.siteSettings.logo_url ?? null,
       theme: db.siteSettings.theme,
       accent: db.siteSettings.accent,
       ai_enabled: db.siteSettings.ai_enabled,
@@ -1850,6 +1894,21 @@ export const demoApi = {
       if (!name) throw new Error('Company name cannot be empty');
       if (name.length > 120) throw new Error('Company name is too long (max 120 characters)');
       next.company_name = name;
+    }
+    // logo: undefined = keep, '' = back to the default mark, else a data:/https: URL
+    if (input.logo_url !== undefined) {
+      const logo = input.logo_url.trim();
+      if (logo === '') {
+        next.logo_url = null;
+      } else {
+        if (!/^(data:image\/|https?:\/\/)/.test(logo)) {
+          throw new Error('Logo must be an image file or an http(s) URL');
+        }
+        if (logo.length > 2_000_000) {
+          throw new Error('Logo is too large — use an image under ~1.5 MB');
+        }
+        next.logo_url = logo;
+      }
     }
     if (input.theme !== undefined) {
       if (input.theme !== 'dark' && input.theme !== 'light') throw new Error('Unknown theme');
@@ -2112,6 +2171,9 @@ export const demoApi = {
     const me = currentProfile();
     const emp = db.employees.find((e) => e.id === input.employee_id && e.status !== 'deleted');
     if (!emp) throw new Error('Employee not found');
+    if (emp.status === 'cancelled') {
+      throw new Error('This employee is cancelled — restore them before adding advances');
+    }
     if (!Number.isFinite(input.amount) || input.amount <= 0) {
       throw new Error('Advance amount must be greater than 0');
     }

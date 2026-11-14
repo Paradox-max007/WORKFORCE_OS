@@ -6,7 +6,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Building2, Crown, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil, Plus, Search, Tent, Trash2,
+  Building2, Crown, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil, Plus, RotateCcw, Search, Tent, Trash2,
   UserRound, UserX, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -38,6 +38,9 @@ export function EmployeePage() {
   const realtimeVersion = useRealtimeVersion(['employee', 'site', 'camp', 'card_type']);
 
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
+  // archived employees (approved Cancellation Requests) — listed by the
+  // "Cancelled" status filter; every past record stays available
+  const [cancelledEmployees, setCancelledEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
   const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
   const [camps, setCamps] = useState<CampWithCount[] | null>(null);
@@ -63,6 +66,8 @@ export function EmployeePage() {
   const [deleteTarget, setDeleteTarget] = useState<EmployeeVM | null>(null);
   const [requestDeleteTarget, setRequestDeleteTarget] = useState<EmployeeVM | null>(null);
   const [requestReason, setRequestReason] = useState('');
+  // bringing a cancelled employee back to the active roster (super admin)
+  const [restoreTarget, setRestoreTarget] = useState<EmployeeVM | null>(null);
 
   // cross-page filter (e.g. dashboard "Idle" card)
   useEffect(() => {
@@ -82,14 +87,17 @@ export function EmployeePage() {
     let cancelled = false;
     (async () => {
       try {
-        const [emps, sts, cps, cards, brs] = await Promise.all([
-          dataApi.listEmployees(), dataApi.listSites(), dataApi.listCamps(),
+        const [emps, cancelledList, sts, cps, cards, brs] = await Promise.all([
+          dataApi.listEmployees(), dataApi.listCancelledEmployees().catch(() => [] as EmployeeVM[]),
+          dataApi.listSites(), dataApi.listCamps(),
           dataApi.listCardTypes().catch(() => [] as CardType[]),
           // branches: every branch for super admins, only the GRANTED branches
           // for normal admins (used for the scoping below)
           dataApi.listBranches().catch(() => [] as BranchWithCount[]),
         ]);
-        if (!cancelled) { setEmployees(emps); setSites(sts); setCamps(cps); setCardTypes(cards); setBranches(brs); }
+        if (!cancelled) {
+          setEmployees(emps); setCancelledEmployees(cancelledList); setSites(sts); setCamps(cps); setCardTypes(cards); setBranches(brs);
+        }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
       }
@@ -140,12 +148,13 @@ export function EmployeePage() {
   }, [viewAllBranches, assignedSiteIds, branches, sites]);
 
   // countries present in the directory, grouped by region (Africans, Asians, …)
+  // — includes CANCELLED employees so their nationalities stay filterable
   const regionCountries = useMemo(
-    () => countriesByRegion((employees ?? []).map((e) => e.nationality)),
-    [employees],
+    () => countriesByRegion([...(employees ?? []), ...(cancelledEmployees ?? [])].map((e) => e.nationality)),
+    [employees, cancelledEmployees],
   );
   const countryOptions = useMemo(() => {
-    const present = new Set((employees ?? []).map((e) => e.nationality).filter(Boolean) as string[]);
+    const present = new Set([...(employees ?? []), ...(cancelledEmployees ?? [])].map((e) => e.nationality).filter(Boolean) as string[]);
     if (regionFilter === 'all') {
       return Object.values(regionCountries).flat().sort((a, b) => a.localeCompare(b));
     }
@@ -163,20 +172,25 @@ export function EmployeePage() {
 
   // filtering
   const filtered = useMemo(() => {
-    const list = employees ?? [];
+    // the "Cancelled" filter lists ARCHIVED employees (approved cancellation
+    // requests — never deleted, all records kept). Every other filter works on
+    // the working roster.
+    const viewingCancelled = statusFilter === 'cancelled';
+    const list = viewingCancelled ? (cancelledEmployees ?? []) : (employees ?? []);
     const q = debouncedSearch.toLowerCase().trim();
     const region = regionFilter === 'all' ? null : NATIONALITY_REGIONS.find((r) => r.key === regionFilter) ?? null;
     return list.filter((e) => {
       // branch scope — normal admins (without the all-branches grant) only see
-      // employees working at one of their effective sites
-      if (effectiveSiteIds && (!e.current_site_id || !effectiveSiteIds.has(e.current_site_id))) return false;
-      // super-admin Branch dropdown
-      if (branchFilter !== 'all') {
+      // employees working at one of their effective sites. Cancelled employees
+      // are site-free (archived) → the scope check is skipped for them.
+      if (!viewingCancelled && effectiveSiteIds && (!e.current_site_id || !effectiveSiteIds.has(e.current_site_id))) return false;
+      // super-admin Branch dropdown + Site filter (working roster only —
+      // cancelled employees have no current site by definition)
+      if (!viewingCancelled && branchFilter !== 'all') {
         const b = e.current_site_id ? branchIdOfSite.get(e.current_site_id) : null;
         if (b !== branchFilter) return false;
       }
-      // site filter (works for every admin, combined with all other filters)
-      if (siteFilter !== 'all' && e.current_site_id !== siteFilter) return false;
+      if (!viewingCancelled && siteFilter !== 'all' && e.current_site_id !== siteFilter) return false;
       if (statusFilter === 'active' && e.status !== 'active') return false;
       if (statusFilter === 'working' && (e.status !== 'active' || !e.current_site_id)) return false;
       if (statusFilter === 'idle' && (e.status !== 'active' || e.current_site_id)) return false;
@@ -208,7 +222,7 @@ export function EmployeePage() {
       }
       return true;
     });
-  }, [employees, debouncedSearch, statusFilter, regionFilter, countryFilter, campFilter, payFilter, effectiveSiteIds, branchFilter, siteFilter, branchIdOfSite]);
+  }, [employees, cancelledEmployees, debouncedSearch, statusFilter, regionFilter, countryFilter, campFilter, payFilter, effectiveSiteIds, branchFilter, siteFilter, branchIdOfSite]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
   const safePage = Math.min(page, totalPages);
@@ -307,6 +321,18 @@ export function EmployeePage() {
     }
   };
 
+  const confirmRestore = async () => {
+    if (!restoreTarget) return;
+    try {
+      await dataApi.restoreEmployee(restoreTarget.id);
+      toast.success('Employee restored', { description: `${restoreTarget.full_name} is back on the active roster — assign a site/camp from Edit.` });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Restore failed');
+    } finally {
+      setRestoreTarget(null);
+    }
+  };
+
   const loading = !employees || !sites || (!isSuperAdmin && assignedSiteIds === null && !viewAllBranches);
 
   return (
@@ -316,7 +342,9 @@ export function EmployeePage() {
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Employee Management</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {filtered.length} employee{filtered.length !== 1 ? 's' : ''} · full HR profiles, documents and ratings
+            {statusFilter === 'cancelled'
+              ? <>Cancelled employees — archived, every past record kept for reference</>
+              : <>{filtered.length} employee{filtered.length !== 1 ? 's' : ''} · full HR profiles, documents and ratings</>}
           </p>
         </motion.div>
         <div className="flex flex-wrap items-center gap-2">
@@ -382,6 +410,7 @@ export function EmployeePage() {
             <SelectItem value="working">Currently Working</SelectItem>
             <SelectItem value="idle">Idle (No Site)</SelectItem>
             <SelectItem value="pending_deletion">Pending Deletion</SelectItem>
+            <SelectItem value="cancelled">Cancelled</SelectItem>
           </SelectContent>
         </Select>
         {/* payment method filter (cash / card types from the card_type table) */}
@@ -466,9 +495,11 @@ export function EmployeePage() {
       ) : pageRows.length === 0 ? (
         <EmptyState
           icon={<UserRound size={22} />}
-          title="No employees found"
+          title={statusFilter === 'cancelled' ? 'No cancelled employees' : 'No employees found'}
           description={
-            !viewAllBranches && effectiveSiteIds !== null && effectiveSiteIds.size === 0
+            statusFilter === 'cancelled'
+              ? 'Employees land here after a cancellation request is approved. They are never deleted — all past records stay available.'
+              : !viewAllBranches && effectiveSiteIds !== null && effectiveSiteIds.size === 0
               ? 'You have no branch or site access yet — ask a super admin to grant your branches (Admin Management → Manage Permissions → Branch access).'
               : search || statusFilter !== 'all' || branchFilter !== 'all' || siteFilter !== 'all'
                 ? 'Try adjusting your filters.'
@@ -573,13 +604,24 @@ export function EmployeePage() {
                           <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}>
                             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
                           </Button>
-                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="Edit" onClick={() => openEdit(emp)}>
-                            <Pencil size={14} />
-                          </Button>
-                          {emp.status !== 'pending_deletion' && (
-                            <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500" title="Delete" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}>
-                              <Trash2 size={14} />
-                            </Button>
+                          {emp.status === 'cancelled' ? (
+                            // archived — restore only (super admin); records stay
+                            isSuperAdmin && (
+                              <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-500" title="Restore to active" onClick={() => setRestoreTarget(emp)}>
+                                <RotateCcw size={14} />
+                              </Button>
+                            )
+                          ) : (
+                            <>
+                              <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="Edit" onClick={() => openEdit(emp)}>
+                                <Pencil size={14} />
+                              </Button>
+                              {emp.status !== 'pending_deletion' && (
+                                <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500" title="Delete" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}>
+                                  <Trash2 size={14} />
+                                </Button>
+                              )}
+                            </>
                           )}
                         </div>
                       </td>
@@ -638,9 +680,17 @@ export function EmployeePage() {
                     </div>
                     <div className="flex gap-1">
                       <Button variant="outline" size="icon" className="size-8" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></Button>
-                      <Button variant="outline" size="icon" className="size-8" onClick={() => openEdit(emp)}><Pencil size={13} /></Button>
-                      {emp.status !== 'pending_deletion' && (
-                        <Button variant="outline" size="icon" className="size-8 hover:border-rose-500/40 hover:text-rose-500" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}><Trash2 size={13} /></Button>
+                      {emp.status === 'cancelled' ? (
+                        isSuperAdmin && (
+                          <Button variant="outline" size="icon" className="size-8 hover:border-emerald-500/40 hover:text-emerald-500" title="Restore to active" onClick={() => setRestoreTarget(emp)}><RotateCcw size={13} /></Button>
+                        )
+                      ) : (
+                        <>
+                          <Button variant="outline" size="icon" className="size-8" onClick={() => openEdit(emp)}><Pencil size={13} /></Button>
+                          {emp.status !== 'pending_deletion' && (
+                            <Button variant="outline" size="icon" className="size-8 hover:border-rose-500/40 hover:text-rose-500" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}><Trash2 size={13} /></Button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
@@ -690,6 +740,25 @@ export function EmployeePage() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-rose-600 text-white hover:bg-rose-600/90" onClick={confirmDelete}>
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ============ Restore cancelled employee (super admin) ============ */}
+      <AlertDialog open={!!restoreTarget} onOpenChange={(o) => { if (!o) setRestoreTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restore Employee?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <strong>{restoreTarget?.full_name}</strong> will return to the active roster with all their past records
+              (attendance, salary, advances, uniforms…). Assign a site and camp again from Edit afterwards.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-emerald-600 text-white hover:bg-emerald-600/90" onClick={confirmRestore}>
+              Restore
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

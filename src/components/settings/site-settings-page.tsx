@@ -7,20 +7,22 @@
 // normal admins and the page guards on top):
 //
 //   • General     — project display name (sidebar, browser title, auth
-//                   screens) + company legal name (attendance paper)
+//                   screens), company legal name (attendance paper) and the
+//                   company LOGO (sidebar, sign-in screen, browser favicon)
 //   • Appearance  — org-wide theme (dark/light) and accent, applied for every
 //                   signed-in admin; the sidebar footer shortcuts write here
 //   • AI Bot      — the in-app AI assistant connection: OpenAI-compatible
 //                   base URL + API key (write-only, stored masked) + model,
-//                   with a live Test connection button. The proxy route
-//                   (/api/ai) never exposes the stored key to the browser.
+//                   with presets AND a fully custom provider option, plus a
+//                   live Test connection button. The proxy route (/api/ai)
+//                   never exposes the stored key to the browser.
 //   • AI scope    — what the assistant will be able to read: EVERY entity of
 //                   the system (A to Z), with live counts from the database
 // ============================================================================
 
 import {
-  Bot, CheckCircle2, Building2, Loader2, Palette, PlugZap, Save, ShieldCheck,
-  Sun, Moon, XCircle, Eye,
+  Bot, CheckCircle2, Building2, Image as ImageIcon, Loader2, Palette, PlugZap, Plus, Save, ShieldCheck,
+  Sun, Moon, XCircle, Eye, Upload, Trash2,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -59,13 +61,14 @@ const SCOPE_LABELS: Record<string, string> = {
   branches: 'Branches',
   sites: 'Sites',
   camps: 'Camps',
-  employees: 'Employees',
+  employees: 'Employees (roster)',
+  cancelled_employees: 'Cancelled employees',
   trades: 'Trades & rates',
   attendance_current_month: 'Attendance (this month)',
   salary_sheet_current_month: 'Salary sheet (this month)',
   advance_book: 'Advance records',
   leave_requests: 'Leave requests',
-  cancellation_requests: 'Deletion requests',
+  cancellation_requests: 'Cancellation requests',
   uniforms: 'Uniform entries',
   companies: 'Companies',
   card_types: 'Payroll card types',
@@ -74,6 +77,42 @@ const SCOPE_LABELS: Record<string, string> = {
   notifications: 'Notifications',
   deduction_settings: 'Deduction rule',
 };
+
+/** Read an image file → a compact square-fitting PNG data URL (max 256px) —
+ *  small enough to persist inside the settings row and render instantly. */
+function fileToLogoDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      reject(new Error('Please choose an image file (PNG, JPG, WEBP, SVG…)'));
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      reject(new Error('Image is too large — use a file under 5 MB'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the file'));
+    reader.onload = () => {
+      const img = new window.Image();
+      img.onerror = () => reject(new Error('Could not load the image'));
+      img.onload = () => {
+        const max = 256;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { reject(new Error('Canvas is not available in this browser')); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 type TestState =
   | { kind: 'idle' }
@@ -93,11 +132,17 @@ export function SiteSettingsPage() {
   // staged form values (seeded from the store; re-synced after realtime)
   const [projectName, setProjectName] = useState(settings.project_name);
   const [companyName, setCompanyName] = useState(settings.company_name);
+  // staged logo: '' = default PULSE mark, otherwise a data:/https: URL
+  const [logoUrl, setLogoUrl] = useState(settings.logo_url ?? '');
+  const [logoBusy, setLogoBusy] = useState(false);
   const [aiBaseUrl, setAiBaseUrl] = useState(settings.ai_base_url);
   const [aiModel, setAiModel] = useState(settings.ai_model);
   const [aiApiKey, setAiApiKey] = useState('');
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [savingAi, setSavingAi] = useState(false);
+  // AI provider mode — true after the Custom chip is clicked (until a preset
+  // is picked), so the chip + helper text stay visible while typing
+  const [customProviderMode, setCustomProviderMode] = useState(false);
   const [test, setTest] = useState<TestState>({ kind: 'idle' });
 
   // AI knowledge scope (entity → live row count)
@@ -111,9 +156,10 @@ export function SiteSettingsPage() {
   useEffect(() => {
     setProjectName(settings.project_name);
     setCompanyName(settings.company_name);
+    setLogoUrl(settings.logo_url ?? '');
     setAiBaseUrl(settings.ai_base_url);
     setAiModel(settings.ai_model);
-  }, [settings.project_name, settings.company_name, settings.ai_base_url, settings.ai_model]);
+  }, [settings.project_name, settings.company_name, settings.logo_url, settings.ai_base_url, settings.ai_model]);
 
   // load the AI scope once (and when the underlying data changes)
   const dataVersion = useRealtimeVersion(['employee', 'site', 'attendance', 'payroll_period', 'advance_record']);
@@ -158,12 +204,29 @@ export function SiteSettingsPage() {
   const saveGeneral = async () => {
     setSavingGeneral(true);
     try {
-      await updateSettings({ project_name: projectName, company_name: companyName });
-      toast.success('Branding saved', { description: 'The sidebar, browser title and attendance paper follow it.' });
+      await updateSettings({
+        project_name: projectName,
+        company_name: companyName,
+        logo_url: logoUrl,
+      });
+      toast.success('Branding saved', { description: 'The sidebar, browser title, sign-in screen and attendance paper follow it.' });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Could not save the branding');
     } finally {
       setSavingGeneral(false);
+    }
+  };
+
+  const pickLogo = async (file: File | null) => {
+    if (!file) return;
+    setLogoBusy(true);
+    try {
+      const dataUrl = await fileToLogoDataUrl(file);
+      setLogoUrl(dataUrl);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not read the image');
+    } finally {
+      setLogoBusy(false);
     }
   };
 
@@ -238,8 +301,17 @@ export function SiteSettingsPage() {
     }
   };
 
-  const generalDirty = projectName !== settings.project_name || companyName !== settings.company_name;
+  const generalDirty = projectName !== settings.project_name
+    || companyName !== settings.company_name
+    || logoUrl !== (settings.logo_url ?? '');
   const aiDirty = aiBaseUrl !== settings.ai_base_url || aiModel !== settings.ai_model || aiApiKey.trim() !== '';
+  // a preset chip is active when the staged URL matches it; the CUSTOM chip
+  // is active when a non-preset URL is staged (any OpenAI-compatible endpoint)
+  // or right after it was picked (before anything is typed)
+  const isPresetUrl = (u: string) => AI_PRESETS.some((p) => p.baseUrl === u);
+  const customProviderActive = aiBaseUrl.trim()
+    ? !isPresetUrl(aiBaseUrl.trim())
+    : customProviderMode;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -277,10 +349,57 @@ export function SiteSettingsPage() {
               </CardTitle>
               <CardDescription>
                 The project name shows in the sidebar, browser title and sign-in screens; the company
-                legal name prints on the attendance paper header.
+                legal name prints on the attendance paper header; the logo replaces the default PULSE
+                mark in the sidebar, on the sign-in screen and as the browser favicon.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* company logo — upload / preview / remove */}
+              <div className="flex flex-wrap items-center gap-4 rounded-xl border border-border/60 bg-brand/5 p-4">
+                <div className="relative shrink-0">
+                  <div className={cn('absolute inset-0 rounded-xl blur-md', logoUrl ? 'opacity-0' : 'brand-gradient opacity-40')} />
+                  {logoUrl ? (
+                    // staged custom logo (data URL / https) — plain <img>: it can
+                    // be a data URL, which next/image does not optimize
+                    <img src={logoUrl} alt="Company logo" className="relative size-14 rounded-xl border border-border/60 bg-background object-contain p-1" />
+                  ) : (
+                    <div className="relative flex size-14 items-center justify-center rounded-xl border border-border/60 bg-background">
+                      <ImageIcon size={22} className="text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold">Company logo</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {logoUrl ? 'Custom logo staged — save branding to apply it.' : 'Using the default PULSE mark. PNG / JPG / WEBP / SVG up to 5 MB.'}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button
+                      variant="outline" size="sm"
+                      disabled={logoBusy}
+                      onClick={() => document.getElementById('logo-file-input')?.click()}
+                      className="gap-1.5 font-medium"
+                    >
+                      {logoBusy ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                      {logoUrl ? 'Replace image' : 'Upload logo'}
+                    </Button>
+                    {logoUrl && (
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => setLogoUrl('')}
+                        className="gap-1.5 font-medium text-rose-500 hover:bg-rose-500/10 hover:text-rose-500"
+                      >
+                        <Trash2 size={14} /> Remove
+                      </Button>
+                    )}
+                    {/* hidden native picker — the styled buttons drive it */}
+                    <input
+                      id="logo-file-input" type="file" accept="image/*" className="hidden"
+                      onChange={(e) => { pickLogo(e.target.files?.[0] ?? null); e.target.value = ''; }}
+                    />
+                  </div>
+                </div>
+              </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="project-name">Project name</Label>
@@ -392,8 +511,9 @@ export function SiteSettingsPage() {
                 <Bot size={16} className="text-brand" /> AI assistant
               </CardTitle>
               <CardDescription>
-                Connection for the upcoming in-app AI bot. Any OpenAI-compatible endpoint works — pick a
-                preset or enter a custom base URL. The API key is stored write-only and never shown again.
+                Connection for the upcoming in-app AI bot. Pick a preset or switch to a CUSTOM provider
+                and point it at any OpenAI-compatible endpoint (Groq, Together, DeepSeek, Ollama, LM
+                Studio, your own gateway…). The API key is stored write-only and never shown again.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-5">
@@ -412,12 +532,12 @@ export function SiteSettingsPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-medium text-muted-foreground">Presets:</span>
+                <span className="text-xs font-medium text-muted-foreground">Provider:</span>
                 {AI_PRESETS.map((p) => (
                   <button
                     key={p.label}
                     type="button"
-                    onClick={() => { setAiBaseUrl(p.baseUrl); setAiModel(p.model); setTest({ kind: 'idle' }); }}
+                    onClick={() => { setAiBaseUrl(p.baseUrl); setAiModel(p.model); setCustomProviderMode(false); setTest({ kind: 'idle' }); }}
                     className={cn(
                       'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
                       aiBaseUrl === p.baseUrl
@@ -428,7 +548,38 @@ export function SiteSettingsPage() {
                     {p.label}
                   </button>
                 ))}
+                {/* CUSTOM provider — any OpenAI-compatible endpoint */}
+                <button
+                  type="button"
+                  aria-pressed={customProviderActive}
+                  onClick={() => {
+                    setTest({ kind: 'idle' });
+                    // clear preset values so free entry starts from scratch;
+                    // a custom URL typed already just gets highlighted
+                    if (!customProviderActive) {
+                      setAiBaseUrl('');
+                      setAiModel('');
+                      setCustomProviderMode(true);
+                      document.getElementById('ai-base-url')?.focus();
+                    }
+                  }}
+                  className={cn(
+                    'flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                    customProviderActive
+                      ? 'border-brand/50 bg-brand/10 text-foreground'
+                      : 'border-dashed border-border/60 text-muted-foreground hover:border-brand/30 hover:text-foreground',
+                  )}
+                >
+                  <Plus size={11} /> Custom
+                </button>
               </div>
+              {customProviderActive && (
+                <p className="rounded-lg border border-brand/25 bg-brand/5 px-3 py-2 text-xs text-muted-foreground">
+                  Custom provider — enter the base URL and model of any OpenAI-compatible API below
+                  (e.g. https://api.groq.com/openai/v1 + llama-3.3-70b-versatile, or your self-hosted
+                  gateway). The Test connection button validates it before you save.
+                </p>
+              )}
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">

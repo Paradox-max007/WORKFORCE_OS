@@ -33,7 +33,8 @@ export const AI_APP_GUIDE = `PULSE Workforce OS — workforce & payroll manageme
 
 MODULES
 - Dashboard: branch-scoped overview (employees, present/absent, monthly attendance, site breakdown).
-- Employees: full directory (name, code, nationality, position, trade, company, passport/ID status, camp, site, rating, team-leader flags). Deletion goes through Cancellation Requests.
+- Employees: full directory (name, code, nationality, position, trade, company, passport/ID status, camp, site, rating, team-leader flags). Deletion goes through Cancellation Requests — an APPROVED request CANCELS the employee (status 'cancelled'): they leave every working list but keep ALL records; super admins can restore them (status 'active') from the Cancelled filter.
+- Cancelled employees: archived workforce (Employees page → status filter "Cancelled"). Their attendance, salary history, advances, uniforms, warnings and fines remain readable everywhere for future reference.
 - Branches: regional groups owning sites; admins are granted branches (or direct site access).
 - Sites: work sites (client, project, supervisor, team leader, live status); printable A4 Daily Attendance paper per site.
 - Camps: accommodation with block/room assignments.
@@ -48,7 +49,7 @@ MODULES
 - Leave Requests: casual/annual/sick/other with approval flow.
 - Notifications: request/warning/fine alerts.
 - Admin Management: accounts, roles (super_admin/admin), per-menu permissions, branch/site access.
-- Site Settings (super admin only): project/company name, org theme & accent, and THIS AI assistant connection.
+- Site Settings (super admin only): project/company name, company logo, org theme & accent, and THIS AI assistant connection (presets or any custom OpenAI-compatible provider).
 
 PAYROLL RULES
 - Pay per attendance line = hours × the trade rate for (role, experience tier) effective that day.
@@ -65,7 +66,7 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
   const [
-    profiles, branches, sites, camps, employees, trades, leaveRequests,
+    profiles, branches, sites, camps, employees, cancelledEmployees, trades, leaveRequests,
     cancellationRequests, uniforms, companies, cardTypes, warnings, fines,
     notifications, attendance, salarySheet, advanceBook, deductionSettings,
   ] = await Promise.allSettled([
@@ -74,6 +75,7 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
     dataApi.listSites(),
     dataApi.listCamps(),
     dataApi.listEmployees(),
+    dataApi.listCancelledEmployees(),
     dataApi.listTrades(),
     dataApi.listLeaveRequests(),
     dataApi.listCancellationRequests(),
@@ -98,6 +100,7 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
     sites: val(sites, []),
     camps: val(camps, []),
     employees: val(employees, []),
+    cancelled_employees: val(cancelledEmployees, []),
     trades: val(trades, []),
     leave_requests: val(leaveRequests, []),
     cancellation_requests: val(cancellationRequests, []),

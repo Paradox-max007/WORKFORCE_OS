@@ -98,6 +98,16 @@ interface AppStore {
   setSalaryPeriodBranch: (branchId: string) => void;
   /** Which tab the Notifications Hub opens on (deep links from other pages) */
   notificationsTab: 'requests' | 'warnings' | 'fines';
+  /** Deep-link payload for the Advance Book — set when another page (e.g. the
+   *  Payroll red time-card carryover line under Net Payable) sends the user to
+   *  a SPECIFIC employee's advance record. The page scrolls to the record(s),
+   *  highlights them, then CONSUMES the payload (one-shot). */
+  advanceBookFocus: {
+    employeeId: string;
+    employeeName: string;
+    /** true → focus the record(s) born from a time-card carryover */
+    timeCard?: boolean;
+  } | null;
   navigateTo: (view: AppView) => void;
   navigateToNotifications: (tab?: 'requests' | 'warnings' | 'fines') => void;
   navigateToEmployees: (filter?: string) => void;
@@ -126,6 +136,13 @@ interface AppStore {
     year: number,
     month: number,
   ) => void;
+  /** Advance Book deep link — opens the ledger focused on one employee's
+   *  record(s) (the Payroll page's red "→ next month" carryover line). */
+  navigateToAdvanceBook: (focus: {
+    employeeId: string;
+    employeeName: string;
+    timeCard?: boolean;
+  }) => void;
   setSidebarOpen: (open: boolean) => void;
   consumeEmployeeFilter: () => string;
 }
@@ -147,6 +164,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   salaryPeriodBranchId: 'all',
   setSalaryPeriodBranch: (branchId) => set({ salaryPeriodBranchId: branchId }),
   notificationsTab: 'requests' as const,
+  advanceBookFocus: null,
   navigateTo: (view) => set(
     // plain sidebar navigation to the hub always opens the default Requests
     // tab — only the deep links (navigateToNotifications) preselect a tab
@@ -170,6 +188,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }),
   navigateToAttendanceCalendar: (employee, year, month) =>
     set({ currentView: 'attendance_calendar', attendanceCalendar: { employee, year, month } }),
+  navigateToAdvanceBook: (focus) =>
+    set({ currentView: 'advance_book', advanceBookFocus: focus }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   consumeEmployeeFilter: () => {
     const f = get().employeeFilter;

@@ -40,16 +40,19 @@
 //     exact amounts in the tooltip):
 //       1,160 + 60 = 1,220.00
 //     A NEGATIVE difference is NOT deducted this month — it is carried to the
-//     NEXT month's salary (added to that employee's advance there, with a
-//     note carrying the time card + attendance hours details; the note is
-//     visible as a tooltip on the Advance cell).
+//     NEXT month's salary (an Advance Book record with a note). The red line
+//     under Net Payable is a LINK: clicking it opens that record directly in
+//     the Advance Book.
 //       Final Hours = Σ approved time card hours of the month
 //       extra = Σ per-site (Final − site hours) × rate
 //       Net payable = attendance net + max(extra, 0)
-//       Balance = net payable − extra — 0 while the difference is 0 (the
-//       amount only shows when the time card actually differs); when it
-//       differs, the cell shows the FULL CALCULATION the same way:
-//       1,220 − 60 = 1,160.00 (a negative extra appears as +|extra|)
+//       Balance = net payable − |extra| — the time card difference ALWAYS
+//       applies with its sign: a NEGATIVE extra (time card below the
+//       attendance) REDUCES the balance (recovered next month via the
+//       advance) and is never flipped into an addition. 0 while the
+//       difference is 0 — when it differs, the cell shows the FULL
+//       CALCULATION the same way:
+//       1,220 − 60 = 1,160.00
 //   • FIT-TO-SCREEN table — table-fixed with PERCENTAGE widths on EVERY
 //     column in view mode (each set summing to 100%): the table fills its
 //     container and the space is shared across all columns (long content
@@ -1097,6 +1100,7 @@ export function PayrollPage() {
 
   const navigateToPayrollExport = useAppStore((s) => s.navigateToPayrollExport);
   const navigateToAttendanceCalendar = useAppStore((s) => s.navigateToAttendanceCalendar);
+  const navigateToAdvanceBook = useAppStore((s) => s.navigateToAdvanceBook);
 
   // ---- payment-method data (card types list + employee sticky notes) -------
   const [cardTypes, setCardTypes] = useState<CardType[]>([]);
@@ -2013,7 +2017,7 @@ export function PayrollPage() {
                     {hasTimeCard && (
                       <TableHead
                         className="w-[10%] text-right"
-                        title="Net Payable − time card amount ((Final Hours − Total Hours) × rate) — 0 while the difference is 0 (the amount only shows when the time card actually differs); the calculation renders inline in the cell"
+                        title="Net Payable − the time card difference ((Final Hours − Total Hours) × rate) — the difference ALWAYS applies with its sign: a NEGATIVE difference (time card below the attendance) REDUCES the balance and is recovered from the next month's salary via the advance; 0 while the difference is 0 — the calculation renders inline in the cell"
                       >
                         Balance
                       </TableHead>
@@ -2108,14 +2112,17 @@ export function PayrollPage() {
                               : <span className="text-muted-foreground">—</span>}
                           </TableCell>
                         )}
-                        {/* Balance = net payable − time card extra
+                        {/* Balance = net payable − |time card extra|
                             (extra = (Final − Total) × rate). A ZERO difference
                             shows a plain muted 0 — the amount only displays
                             when the time card actually differs; when it
                             differs the FULL ARITHMETIC renders inline above
-                            the value (same style as Net Payable). A negative
-                            extra is subtracted as a PLUS (−(−x) = +x — it is
-                            the amount recovered next month) */}
+                            the value (same style as Net Payable). The sign is
+                            RESPECTED: a NEGATIVE extra (time card below the
+                            approved attendance) SUBTRACTS — the balance
+                            shrinks by |extra| and the difference is recovered
+                            from next month's salary via the advance (it is
+                            never flipped into an addition) */}
                         {hasTimeCard && (
                           <TableCell className="text-right">
                             {(() => {
@@ -2134,15 +2141,15 @@ export function PayrollPage() {
                                   </span>
                                 );
                               }
-                              const operand = Math.abs(extra); // |extra| — shown with the effective sign
+                              const operand = Math.abs(extra); // |extra| — always SUBTRACTED (sign respected)
                               return (
                                 <div
                                   className="flex flex-col items-end leading-tight"
-                                  title={`net payable ${fmtMoney(payrollNetPayableOf(e))} − time card amount ${fmtMoney(extra)} = ${fmtMoney(bal)}`}
+                                  title={`net payable ${fmtMoney(payrollNetPayableOf(e))} − time card difference ${fmtMoney(operand)} = ${fmtMoney(bal)}${extra < 0 ? ' — the time card is below the attendance: the difference reduces the balance and is recovered from the next month\'s salary via the advance' : ''}`}
                                 >
                                   <span className="font-mono text-[10px] leading-tight text-muted-foreground">
                                     {fmtMoneyShort(payrollNetPayableOf(e))}{' '}
-                                    <span aria-hidden>{extra > 0 ? '−' : '+'}</span>{' '}
+                                    <span aria-hidden>−</span>{' '}
                                     <span
                                       className={cn(
                                         'font-semibold',
@@ -2332,14 +2339,28 @@ export function PayrollPage() {
                               return (
                                 <div
                                   className="flex flex-col items-end leading-tight"
-                                  title={`Time card difference ${fmtMoney(extra)} is negative — ${fmtMoney(-extra)} is recovered from the next month's salary (added to the advance there with a note)`}
+                                  title={`Time card difference ${fmtMoney(extra)} is negative — ${fmtMoney(-extra)} is recovered from the next month's salary (an Advance Book record). Click the red line to open it in the Advance Book.`}
                                 >
                                   <span className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400">
                                     {fmtMoney(e.net_salary)}
                                   </span>
-                                  <span className="font-mono text-[11px] text-rose-500">
+                                  {/* the red carryover line is a LINK — it opens
+                                      this employee's time-card carryover
+                                      record in the Advance Book (deep link) */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      navigateToAdvanceBook({
+                                        employeeId: e.employee_id,
+                                        employeeName: e.full_name,
+                                        timeCard: true,
+                                      });
+                                    }}
+                                    title={`Open ${e.full_name}'s carryover advance record (${fmtMoney(-extra)} cut from next month) in the Advance Book`}
+                                    className="inline-flex items-center gap-1 font-mono text-[11px] text-rose-500 underline decoration-dotted underline-offset-2 transition-colors hover:text-rose-600"
+                                  >
                                     − {fmtMoney(-extra)} → next month
-                                  </span>
+                                  </button>
                                 </div>
                               );
                             }

@@ -35,16 +35,20 @@ export function payrollNetPayableOf(e: PayrollEmployeeVM): number {
   return round2(e.net_salary + Math.max(e.time_card_amount ?? 0, 0));
 }
 
-/** BALANCE = net payable − time card extra
+/** BALANCE = net payable − |time card extra|
  *  (extra = (final hours − total hours) × rate, per the user's formula).
- *  No difference (extra = 0) → the balance is 0: the net salary amount is
- *  NOT repeated in the Balance column — a balance only displays when the
- *  time card actually differs. null → no time card entered. */
+ *  The difference ALWAYS applies with its EFFECT on the balance: a NEGATIVE
+ *  difference (time card below the approved attendance) REDUCES the balance —
+ *  the sign is never flipped into an addition (the amount is recovered from
+ *  the next month's salary via the advance). No difference (extra = 0) → the
+ *  balance is 0: the net salary amount is NOT repeated in the Balance column —
+ *  a balance only displays when the time card actually differs. null → no
+ *  time card entered. */
 export function payrollBalanceOf(e: PayrollEmployeeVM): number | null {
   if (e.time_card_hours == null) return null;
   const extra = e.time_card_amount ?? 0;
   if (extra === 0) return 0;
-  return round2(payrollNetPayableOf(e) - extra);
+  return round2(payrollNetPayableOf(e) - Math.abs(extra));
 }
 
 /** The effective hourly rate behind the Balance column (gross ÷ total hours). */

@@ -21,6 +21,7 @@
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { motion } from 'framer-motion';
 import {
   ArrowLeft, Briefcase, Building2, CalendarDays, Download, Eye, FileClock,
@@ -33,7 +34,6 @@ import {
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { EmptyState, PageHeader } from '@/components/shared/primitives';
-import { TimesheetEditorDialog } from '@/components/sites/timesheet-editor';
 import { dataApi } from '@/lib/data';
 import {
   deleteSiteDoc, downloadSiteDoc, isEditableTimesheet, listSiteDocs, monthLabel,
@@ -43,6 +43,13 @@ import {
 import type { SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { cn } from '@/lib/utils';
+
+/** the full spreadsheet stack (jspreadsheet + SheetJS + ExcelJS) is a big
+ *  chunk — load it only when an Excel file is actually opened for editing. */
+const TimesheetEditorDialog = dynamic(
+  () => import('@/components/sites/timesheet-editor').then((m) => m.TimesheetEditorDialog),
+  { ssr: false, loading: () => null },
+);
 
 function fmtSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;

@@ -327,9 +327,23 @@ export function AiChatWidget() {
   /** "Digging deeper…" — running a [[LOOKUP]] round */
   const [digging, setDigging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** seconds the current question has been running — slow providers can now
+   *  legally take up to ~90s per round, and a silent spinner feels broken */
+  const [elapsedSec, setElapsedSec] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // live elapsed-seconds counter while a question is in flight
+  useEffect(() => {
+    if (!sending) return;
+    const began = Date.now();
+    setElapsedSec(0);
+    const tick = window.setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - began) / 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [sending]);
 
   // keep the thread glued to the newest message
   useEffect(() => {
@@ -454,7 +468,17 @@ export function AiChatWidget() {
           headers: await aiProxyHeaders(),
           body: JSON.stringify(body),
         });
-        const json = (await res.json()) as { ok: boolean; reply?: string; error?: string };
+        // the platform (or a proxy) can answer a too-long request with an
+        // HTML error page — parse defensively instead of throwing "Unexpected token <"
+        let json: { ok?: boolean; reply?: string; error?: string } | null = null;
+        try {
+          json = (await res.json()) as { ok?: boolean; reply?: string; error?: string } | null;
+        } catch {
+          json = null;
+        }
+        if (!json) {
+          throw new Error('The AI service returned an unreadable response — the host may have cut the request off. Please try again.');
+        }
         if (!json.ok || typeof json.reply !== 'string') {
           throw new Error(json.error || 'The assistant could not answer that.');
         }
@@ -597,7 +621,14 @@ export function AiChatWidget() {
                     <div className="flex justify-start">
                       <div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-muted px-3.5 py-2 text-[13px] text-muted-foreground">
                         <Loader2 className="size-3.5 animate-spin" />
-                        {preparing ? 'Searching the database…' : digging ? 'Digging deeper into the records…' : 'Thinking…'}
+                        {preparing
+                          ? 'Searching the database…'
+                          : digging
+                            ? 'Digging deeper into the records…'
+                            : elapsedSec >= 30
+                              ? 'Still thinking — the AI provider is slow, hang on…'
+                              : 'Thinking…'}
+                        {elapsedSec >= 10 && <span className="tabular-nums opacity-70">· {elapsedSec}s</span>}
                       </div>
                     </div>
                   )}

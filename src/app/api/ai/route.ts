@@ -22,10 +22,18 @@
 //          OpenAI-compatible provider — no tool-calling support needed.
 //
 // Security: same-origin only, http(s) base URLs, hard caps on sizes and a
-// 45s per-call timeout. The raw API key is never logged.
+// 90s per-call timeout inside a 110s whole-request budget (the web-research
+// round only runs with the time that is left, so one question can never
+// double-timeout). The raw API key is never logged.
+//
+// Vercel: maxDuration is exported below so the platform keeps the function
+// alive for the full budget instead of killing it at the plan default.
 // ============================================================================
 
 import { createClient } from '@supabase/supabase-js';
+
+/** Vercel function limit for this route — must exceed REQUEST_BUDGET_MS. */
+export const maxDuration = 120;
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -48,6 +56,16 @@ const MAX_MESSAGES = 40;
 const MAX_CONTENT_CHARS = 150_000;
 const MAX_TOKENS_CAP = 4096;
 
+/** Per provider call. Slow OpenAI-compatible endpoints routinely need more
+ *  than 45s to chew through Pebble's large knowledge prompt, which used to
+ *  abort every message; 90s covers all but the slowest models. */
+const PROVIDER_TIMEOUT_MS = 90_000;
+/** Whole-request budget (must stay under the exported maxDuration). The
+ *  optional web-research round runs only while this much time is left. */
+const REQUEST_BUDGET_MS = 110_000;
+/** Below this much remaining budget the web round is skipped gracefully. */
+const WEB_ROUND_MIN_REMAINING_MS = 20_000;
+
 /** Directive the model uses to request web research: [[WEB: query]] */
 const WEB_DIRECTIVE = /\[\[WEB:\s*([^\]]+?)\s*\]\]/i;
 const WEB_DIRECTIVE_ALL = /\[\[WEB:\s*[^\]]+?\s*\]\]/gi;
@@ -69,6 +87,40 @@ function chatCompletionsUrl(base: string): URL | null {
   }
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const cause = (err as { cause?: { name?: string } }).cause;
+  return err.name === 'AbortError' || cause?.name === 'AbortError';
+}
+
+/** Turn a provider failure into an actionable message. A bare "fetch failed"
+ *  or "Unable to connect" tells the admin nothing — naming the host and the
+ *  network layer error points straight at the broken setting. Works on both
+ *  runtimes: Node/undici (Vercel) puts the code on err.cause; Bun (self-
+ *  hosted `bun start`) throws Error with code 'ConnectionRefused'. */
+function describeProviderError(err: unknown, host: string, timeoutMs: number): string {
+  if (isAbortError(err)) {
+    const secs = Math.round(timeoutMs / 1000);
+    return `${host} did not respond within ${secs}s — the endpoint is unreachable, the model is too slow for Pebble's database prompt, or the key cannot use it. Run “Test connection” on the Site Settings page; if it is just slow, pick a faster model there.`;
+  }
+  const errCode = (err as { code?: string })?.code;
+  const causeCode = (err as { cause?: { code?: string } })?.cause?.code;
+  const code = causeCode ?? errCode;
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return `Could not resolve the provider host ${host} — check the AI base URL on the Site Settings page.`;
+  }
+  if (code === 'ECONNREFUSED' || code === 'ConnectionRefused') {
+    return `Could not connect to ${host} — the AI base URL (host or port) is most likely wrong, or this server's network blocks it. Check the base URL on the Site Settings page.`;
+  }
+  if (code === 'ETIMEDOUT' || code === 'ECONNRESET' || code === 'EPIPE') {
+    return `The connection to ${host} was interrupted (${code}) — the provider may be down, blocking this server, or extremely slow. Try “Test connection” on the Site Settings page.`;
+  }
+  if (err instanceof TypeError || (err instanceof Error && /unable to connect/i.test(err.message))) {
+    return `Could not reach ${host} — the AI base URL may be wrong, or this server cannot access it. (${err.message})`;
+  }
+  return err instanceof Error ? err.message : 'The AI request failed';
+}
+
 async function callProvider(
   url: URL,
   apiKey: string,
@@ -76,9 +128,10 @@ async function callProvider(
   messages: ChatMessage[],
   maxTokens: number,
   temperature: number,
+  timeoutMs: number = PROVIDER_TIMEOUT_MS,
 ): Promise<{ reply: string; usage: unknown }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -317,9 +370,9 @@ export async function POST(request: Request): Promise<Response> {
   if (!url) return bad('AI base URL must be a valid http(s) URL, e.g. https://api.openai.com/v1');
 
   // --- run the action ----------------------------------------------------------
+  const started = Date.now();
   try {
     if (body.action === 'test') {
-      const started = Date.now();
       const { reply } = await callProvider(
         url, apiKey, model,
         [{ role: 'user', content: 'Reply with exactly one word: pong' }],
@@ -348,35 +401,51 @@ export async function POST(request: Request): Promise<Response> {
     let { reply, usage } = await callProvider(url, apiKey, model, messages, maxTokens, temperature);
 
     // --- web research round: the model asked for [[WEB: query]] ----------
-    // One round only — the follow-up must be a final answer. Any directive
-    // tokens surviving in the final reply are stripped so the protocol never
-    // leaks into the chat UI.
+    // One round only — the follow-up must be a final answer. It runs with
+    // whatever is left of the REQUEST_BUDGET (so one question can never
+    // double-timeout); with too little left it is skipped gracefully. Any
+    // directive tokens surviving in the final reply are stripped so the
+    // protocol never leaks into the chat UI.
     const webMatch = reply.match(WEB_DIRECTIVE);
     if (webMatch) {
       const query = webMatch[1].trim();
-      const research = await webSearch(query);
-      const researched: ChatMessage[] = [
-        ...messages,
-        { role: 'assistant', content: reply },
-        {
-          role: 'user',
-          content: `WEB RESEARCH for "${query}" (fetched just now, ${new Date().toISOString()}):\n${research}\n\n( system-provided research — now answer the user's question using these results; briefly mention the source(s); if the results are thin or irrelevant, say you could not verify current data and answer from general knowledge; do not print any directive )`,
-        },
-      ];
-      const second = await callProvider(url, apiKey, model, researched, maxTokens, temperature);
-      reply = second.reply.replace(WEB_DIRECTIVE_ALL, '').trim();
-      usage = second.usage ?? usage;
+      const remainingAfterSearch = REQUEST_BUDGET_MS - (Date.now() - started);
+      if (remainingAfterSearch < WEB_ROUND_MIN_REMAINING_MS) {
+        // out of budget — answer with whatever the first call produced
+        const stripped = reply.replace(WEB_DIRECTIVE_ALL, '').trim();
+        reply = stripped
+          || 'The AI provider answered too slowly to finish its web research — please ask again, or switch to a faster model on the Site Settings page.';
+      } else {
+        const research = await webSearch(query);
+        const left = REQUEST_BUDGET_MS - (Date.now() - started);
+        if (left < WEB_ROUND_MIN_REMAINING_MS) {
+          const stripped = reply.replace(WEB_DIRECTIVE_ALL, '').trim();
+          reply = stripped
+            || 'The AI provider answered too slowly to finish its web research — please ask again, or switch to a faster model on the Site Settings page.';
+        } else {
+          const researched: ChatMessage[] = [
+            ...messages,
+            { role: 'assistant', content: reply },
+            {
+              role: 'user',
+              content: `WEB RESEARCH for "${query}" (fetched just now, ${new Date().toISOString()}):\n${research}\n\n( system-provided research — now answer the user's question using these results; briefly mention the source(s); if the results are thin or irrelevant, say you could not verify current data and answer from general knowledge; do not print any directive )`,
+            },
+          ];
+          const second = await callProvider(
+            url, apiKey, model, researched, maxTokens, temperature,
+            Math.min(PROVIDER_TIMEOUT_MS, left),
+          );
+          reply = second.reply.replace(WEB_DIRECTIVE_ALL, '').trim();
+          usage = second.usage ?? usage;
+        }
+      }
     } else {
       reply = reply.replace(WEB_DIRECTIVE_ALL, '').trim();
     }
 
     return Response.json({ ok: true, model, reply, usage });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'The AI request failed';
-    const aborted = err instanceof Error && err.name === 'AbortError';
-    return Response.json(
-      { ok: false, error: aborted ? 'The provider timed out after 45s — check the base URL and key' : message },
-      { status: 502 },
-    );
+    const error = describeProviderError(err, url.host, PROVIDER_TIMEOUT_MS);
+    return Response.json({ ok: false, error }, { status: 502 });
   }
 }

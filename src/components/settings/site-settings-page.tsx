@@ -292,11 +292,18 @@ export function SiteSettingsPage() {
           model: aiModel.trim(),
         }),
       });
-      const json = (await res.json()) as { ok: boolean; error?: string; latencyMs?: number; model?: string; reply?: string };
-      if (json.ok) {
+      // the platform can answer a too-long request with an HTML error page —
+      // parse defensively instead of throwing "Unexpected token <"
+      let json: { ok: boolean; error?: string; latencyMs?: number; model?: string; reply?: string } | null = null;
+      try {
+        json = (await res.json()) as { ok: boolean; error?: string; latencyMs?: number; model?: string; reply?: string };
+      } catch {
+        json = null;
+      }
+      if (json && json.ok) {
         setTest({ kind: 'ok', latencyMs: json.latencyMs ?? 0, model: json.model ?? aiModel, reply: json.reply ?? '' });
       } else {
-        setTest({ kind: 'fail', error: json.error ?? 'The connection test failed' });
+        setTest({ kind: 'fail', error: json?.error ?? 'The connection test failed — the host may have cut the request off. Please try again.' });
       }
     } catch {
       setTest({ kind: 'fail', error: 'Could not reach the /api/ai proxy on this server' });

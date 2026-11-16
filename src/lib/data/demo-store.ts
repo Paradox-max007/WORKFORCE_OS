@@ -33,6 +33,7 @@ import {
   type Warning,
 } from '@/lib/types';
 import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE, DEFAULT_SITE_SETTINGS } from '@/lib/types';
+import { refreshPayrollPeriod } from './demo-salary';
 
 export interface DemoProfile extends Profile {
   password: string;
@@ -862,6 +863,28 @@ function seedDB(): DemoDB {
     },
   ];
 
+  // ---- last month's salary sheet (paid vs pending showcase) --------------------
+  // Generate the PREVIOUS month's payroll draft — settlement rows computed from
+  // the seeded attendance + trade rates, the due advance (Rajesh's AED 800,
+  // cut this month) folded into the Advance column — and mark a few employees
+  // PAID. This gives the Salary Sheet / Payroll pages and Pebby's "what was
+  // paid vs pending last month" answers a real period from the moment the
+  // demo boots (Rajesh stays UNPAID so his advance remains the overdue case).
+  const prevPeriod = refreshPayrollPeriod(
+    db, prevM.getFullYear(), prevM.getMonth() + 1, superP.id, uid,
+  );
+  ['Muhammad Iqbal', 'Arun Nair', 'Joseph Santos'].forEach((nm) => {
+    const e = emp(nm);
+    const pe = db.payrollEmployees.find(
+      (x) => x.payroll_period_id === prevPeriod.id && x.employee_id === e?.id,
+    );
+    if (pe && pe.payment_status === 'unpaid') {
+      pe.payment_status = 'paid';
+      pe.paid_at = new Date(Date.now() - 2 * 86400000).toISOString();
+      pe.paid_by = superP.id;
+    }
+  });
+
   return db;
 }
 
@@ -869,7 +892,7 @@ function seedDB(): DemoDB {
 // Persistence + cross-tab realtime sync
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'pulse_demo_db_v8';
+const STORAGE_KEY = 'pulse_demo_db_v9';
 const SESSION_KEY = 'pulse_demo_session';
 const CHANNEL = 'pulse-demo-realtime';
 

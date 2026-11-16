@@ -59,6 +59,7 @@ import {
   type UniformEntryUpdate,
   type WarningVM,
   type MenuPermissionMap,
+  type AdminAccess,
   type WorkingHoursMonth,
 } from '@/lib/types';
 import {
@@ -93,7 +94,7 @@ import {
   syncAdvanceBookPeriod,
   tradesWithRates,
 } from './demo-salary';
-import { defaultPermissionMap } from '@/lib/menus';
+import { MENUS, defaultPermissionMap, permissionLabel, type PermissionKey } from '@/lib/menus';
 import { maskApiKey } from '@/lib/types';
 import { getEmployeeSiteForDate, indexRecords } from '@/lib/site-timeline';
 
@@ -581,6 +582,40 @@ export const demoApi = {
       profileName: db.profiles.find((p) => p.id === x.profile_id)?.name ?? 'Unknown admin',
       siteId: x.site_id,
     }));
+  },
+
+  /** Full admin-access snapshot for the Smart Assistant: role + EFFECTIVE
+   *  menu permissions (defaults + explicit toggles) + granted branches +
+   *  directly assigned sites. Super admins carry everything. */
+  async listAdminAccess(): Promise<AdminAccess[]> {
+    const branchName = new Map(db.branches.map((b) => [b.id, b.name]));
+    const siteName = new Map(db.sites.map((s) => [s.id, s.name]));
+    return db.profiles.map((p): AdminAccess => {
+      if (p.role === 'super_admin') {
+        return {
+          profileId: p.id, name: p.name, email: p.email, role: p.role,
+          created: p.created_at.slice(0, 10),
+          menus: MENUS.map((m) => m.label),
+          branches: db.branches.map((b) => b.name),
+          sites: db.sites.map((s) => s.name),
+        };
+      }
+      const map = defaultPermissionMap();
+      db.menuPermissions
+        .filter((x) => x.profile_id === p.id)
+        .forEach((x) => { if (x.menu_key in map) map[x.menu_key as PermissionKey] = x.allowed; });
+      return {
+        profileId: p.id, name: p.name, email: p.email, role: p.role,
+        created: p.created_at.slice(0, 10),
+        menus: (Object.keys(map) as PermissionKey[]).filter((k) => map[k]).map(permissionLabel),
+        branches: db.branchAssignments
+          .filter((x) => x.profile_id === p.id)
+          .map((x) => branchName.get(x.branch_id) ?? 'unknown branch'),
+        sites: db.siteAssignments
+          .filter((x) => x.profile_id === p.id)
+          .map((x) => siteName.get(x.site_id) ?? 'unknown site'),
+      };
+    });
   },
 
   // ---- branches (regional site groups) ---------------------------------------

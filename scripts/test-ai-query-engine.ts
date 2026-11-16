@@ -23,6 +23,10 @@ const EXAMPLES = [
   '[[QUERY]] {"table": employees}',
   // not a directive at all
   'This is a normal answer.',
+  // admin access — permissions + branch supervision (new fields)
+  '[[QUERY]] {"table":"admins"}',
+  '[[QUERY]] {"table":"admins","fields":["name","branches"],"where":[{"field":"branches","op":"contains","value":"Northern"}]}',
+  '[[QUERY]] {"table":"admins","fields":["name","menus"],"where":[{"field":"menus","op":"contains","value":"Attendance"}]}',
 ];
 
 let failures = 0;
@@ -56,6 +60,12 @@ const checks: [string, boolean][] = [
   ['dictionary lists cancellation_requests', prompt.includes('- cancellation_requests —')],
   ['dictionary lists every table (25 total)', (prompt.match(/^- [a-z_]+ —/gm) ?? []).length >= 25],
   ['worked example mentions the cancellation-date semantics', prompt.includes('IS the cancellation date')],
+  ['ADMINS section carries menu permissions', /ADMINS \(\d+\)[\s\S]*?menus:/.test(prompt)],
+  ['ADMINS section carries branch supervision', /supervises branches: [^\n]+Branch/.test(prompt)],
+  ['ADMINS section carries direct site access', /direct site access:/.test(prompt)],
+  ['super-admin line says access EVERYTHING', /SUPER ADMIN[\s\S]*?access: EVERYTHING/.test(prompt)],
+  ['answer protocol asks for markdown tables', prompt.includes('markdown pipe table')],
+  ['answer protocol covers admin questions', prompt.includes('Admin questions')],
 ];
 for (const [label, ok] of checks) {
   console.log(`${ok ? 'PASS' : 'FAIL'}: ${label}`);

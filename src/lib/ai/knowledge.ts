@@ -26,7 +26,7 @@
 import { dataApi } from '@/lib/data';
 import { queryableTablesDoc } from '@/lib/ai/query-engine';
 import type {
-  Attendance, EmployeeVM, LeaveRequestVM, Notification, SalarySheetReport,
+  AdminAccess, Attendance, EmployeeVM, LeaveRequestVM, Notification, SalarySheetReport,
   SiteSettings, UniformEntry, WarningVM, FineVM, CancellationRequestVM,
 } from '@/lib/types';
 
@@ -62,7 +62,7 @@ MODULES
 - Uniform Registry: uniform tokens & renewals per employee.
 - Leave Requests: casual/annual/sick/other with approval flow.
 - Notifications: request/warning/fine alerts.
-- Admin Management: accounts, roles (super_admin/admin), per-menu permissions, branch/site access.
+- Admin Management: accounts, roles (super_admin/admin), per-menu permissions, branch supervision and direct site access. The snapshot below carries each admin's EXACT grants — effective menu permissions, supervised branches, directly assigned sites (super admins: everything).
 - Site Settings (super admin only): project/company name, company logo, org theme & accent, and the AI connection powering Pebby (presets or any custom OpenAI-compatible provider).
 
 PAYROLL RULES
@@ -89,11 +89,11 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
   const [
-    profiles, branches, sites, camps, employees, cancelledEmployees, trades, leaveRequests,
+    adminAccess, branches, sites, camps, employees, cancelledEmployees, trades, leaveRequests,
     cancellationRequests, uniforms, companies, cardTypes, warnings, fines,
     notifications, attendance, salarySheet, advanceBook, deductionSettings,
   ] = await Promise.allSettled([
-    dataApi.listProfiles(),
+    dataApi.listAdminAccess(),
     dataApi.listBranches(),
     dataApi.listSites(),
     dataApi.listCamps(),
@@ -118,7 +118,7 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
     r.status === 'fulfilled' ? r.value : fallback;
 
   const data: Record<string, unknown> = {
-    admins: val(profiles, []),
+    admins: val(adminAccess, []),
     branches: val(branches, []),
     sites: val(sites, []),
     camps: val(camps, []),
@@ -290,7 +290,7 @@ export function formatSalarySheetPeriod(
 // ---------------------------------------------------------------------------
 
 interface SnapshotInput {
-  admins: { name: string; role: string; email: string }[];
+  admins: AdminAccess[];
   branches: { name: string; location: string | null; is_active: boolean; site_count: number; employee_count: number }[];
   sites: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean; employee_count: number }[];
   camps: { name: string; location: string | null; capacity: number | null; is_active: boolean; employee_count: number }[];
@@ -320,7 +320,16 @@ function buildSnapshotText(d: SnapshotInput): string {
 
   sections.push([
     `ADMINS (${d.admins.length})`,
-    ...d.admins.map((a) => `- ${a.name} · ${a.role} · ${a.email}`),
+    ...d.admins.map((a) => {
+      const head = `- ${a.name} · ${a.role === 'super_admin' ? 'SUPER ADMIN' : a.role.toUpperCase()} · ${a.email} · created ${a.created}`;
+      if (a.role === 'super_admin') {
+        return `${head} · access: EVERYTHING — every menu, every branch and site, Admin Management & Site Settings; can approve/reject requests and restore cancelled employees`;
+      }
+      const bits = [`menus: ${a.menus.join(', ') || '(none)'}`];
+      bits.push(a.branches.length ? `supervises branches: ${a.branches.join(', ')}` : 'no branch grants');
+      bits.push(a.sites.length ? `direct site access: ${a.sites.join(', ')}` : 'no direct site grants');
+      return `${head} · ${bits.join(' · ')}`;
+    }),
   ].join('\n'));
 
   sections.push([
@@ -481,6 +490,7 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     '   [[WEB: short search query]]',
     '   The system researches the web and asks you again — then answer the user using the results.',
     '5. Never invent data. If the snapshot (plus queries/lookups) cannot answer, say so plainly and point to the right module of the app.',
-    '6. Keep answers concise and well formatted: short paragraphs, compact lists, amounts in AED, dates as YYYY-MM-DD. Mention employee codes with names so answers are verifiable. When a question involves a date, state the exact date (and time when useful) from the record.',
+    '6. Keep answers concise and well formatted: short paragraphs, compact bullet lists, amounts in AED, dates as YYYY-MM-DD. When your answer lists several records (per-employee amounts, admin access, advance rows, per-site stats…), present them as a compact markdown pipe table (header row + a |---| separator row, key columns only, max ~6 columns) — the chat renders it as a real scrollable table. Mention employee codes with names so answers are verifiable. When a question involves a date, state the exact date (and time when useful) from the record.',
+    '7. Admin questions (who has which permissions, who supervises a branch/site, who can approve requests): read the ADMINS section of the snapshot — it lists every admin\'s effective menus, supervised branches and direct site access. Super admins have everything; only they can manage accounts, settings and restore cancelled employees.',
   ].join('\n');
 }

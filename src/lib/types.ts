@@ -323,6 +323,26 @@ export type MenuPermissionMap = {
   [K in PermissionKey]: boolean;
 };
 
+/** Everything the Smart Assistant knows about an admin account — the
+ *  Admin Management picture in one row: identity + role + EFFECTIVE menu
+ *  permissions (defaults + explicit toggles) + granted branches + directly
+ *  assigned sites. Super admins carry every menu / branch / site. */
+export interface AdminAccess {
+  profileId: string;
+  name: string;
+  email: string;
+  role: Role;
+  /** account creation date (YYYY-MM-DD) */
+  created: string;
+  /** effective ALLOWED menu labels (super_admin → every menu) */
+  menus: string[];
+  /** supervised branch names (super_admin → every branch) */
+  branches: string[];
+  /** directly assigned site names — attendance marking scope
+   *  (super_admin → every site) */
+  sites: string[];
+}
+
 // ============================================================================
 // Input payloads
 // ============================================================================

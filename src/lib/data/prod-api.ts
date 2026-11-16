@@ -30,6 +30,7 @@ import {
   type LeaveRequestInput,
   type LeaveRequestVM,
   type MenuPermissionMap,
+  type AdminAccess,
   type MonthlySummaryRow,
   type Notification,
   type PayrollAdjustmentInput,
@@ -63,7 +64,7 @@ import {
   type WarningVM,
 } from '@/lib/types';
 import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE, DEFAULT_SITE_SETTINGS } from '@/lib/types';
-import { defaultPermissionMap } from '@/lib/menus';
+import { MENUS, defaultPermissionMap, permissionLabel, type PermissionKey } from '@/lib/menus';
 
 const sb = () => {
   if (!supabase) throw new Error('Supabase is not configured');
@@ -362,6 +363,62 @@ export const prodApi = {
         siteId: r.site_id,
       };
     });
+  },
+
+  /** Full admin-access snapshot for the Smart Assistant: role + EFFECTIVE
+   *  menu permissions (defaults + explicit toggles) + granted branches +
+   *  directly assigned sites. Super admins carry everything. RLS: a normal
+   *  admin only sees their own account/assignments — same as listProfiles. */
+  async listAdminAccess(): Promise<AdminAccess[]> {
+    const [profiles, permRows, branchRows, siteRows, branches, sites] = await Promise.all([
+      sb().from('profiles').select('id, email, name, role, created_at').order('created_at'),
+      sb().from('menu_permission').select('profile_id, menu_key, allowed'),
+      sb().from('admin_branch').select('profile_id, branch_id'),
+      sb().from('admin_site').select('profile_id, site_id'),
+      sb().from('branch').select('id, name'),
+      sb().from('site').select('id, name'),
+    ]);
+    [profiles, permRows, branchRows, siteRows, branches, sites].forEach((r) => assertOk(r.error));
+
+    const branchName = new Map(((branches.data ?? []) as { id: string; name: string }[]).map((b) => [b.id, b.name]));
+    const siteName = new Map(((sites.data ?? []) as { id: string; name: string }[]).map((s) => [s.id, s.name]));
+    const allBranchNames = [...branchName.values()];
+    const allSiteNames = [...siteName.values()];
+    const permsByProfile = new Map<string, { menu_key: string; allowed: boolean }[]>();
+    ((permRows.data ?? []) as { profile_id: string; menu_key: string; allowed: boolean }[])
+      .forEach((r) => {
+        const list = permsByProfile.get(r.profile_id) ?? [];
+        list.push(r);
+        permsByProfile.set(r.profile_id, list);
+      });
+
+    return ((profiles.data ?? []) as { id: string; email: string; name: string; role: 'super_admin' | 'admin' | 'pending'; created_at: string }[])
+      .map((p): AdminAccess => {
+        if (p.role === 'super_admin') {
+          return {
+            profileId: p.id, name: p.name, email: p.email, role: p.role,
+            created: p.created_at.slice(0, 10),
+            menus: MENUS.map((m) => m.label),
+            branches: allBranchNames,
+            sites: allSiteNames,
+          };
+        }
+        const map = defaultPermissionMap();
+        (permsByProfile.get(p.id) ?? []).forEach((r) => {
+          if (r.menu_key in map) map[r.menu_key as PermissionKey] = r.allowed;
+        });
+        return {
+          profileId: p.id, name: p.name, email: p.email, role: p.role,
+          created: p.created_at.slice(0, 10),
+          menus: (Object.keys(map) as PermissionKey[]).filter((k) => map[k]).map(permissionLabel),
+          branches: ((branchRows.data ?? []) as { profile_id: string; branch_id: string }[])
+            .filter((r) => r.profile_id === p.id)
+            .map((r) => branchName.get(r.branch_id) ?? 'unknown branch'),
+          sites: ((siteRows.data ?? []) as { profile_id: string; site_id: string }[])
+            .filter((r) => r.profile_id === p.id)
+            .map((r) => siteName.get(r.site_id) ?? 'unknown site'),
+        };
+      });
   },
 
   // ---- branches (regional site groups) ---------------------------------------

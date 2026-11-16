@@ -150,6 +150,14 @@ export function defaultPermissionMap(): MenuPermissionMap {
   return map;
 }
 
+/** Human label for any permission key (sidebar menu id or permission-only
+ *  extra) — used by Admin Management and the AI admin-access snapshot. */
+export function permissionLabel(key: PermissionKey): string {
+  const extra = EXTRA_PERMISSIONS.find((p) => p.key === key);
+  if (extra) return extra.label;
+  return (MENU_BY_ID as Record<string, MenuDef | undefined>)[key]?.label ?? key;
+}
+
 /**
  * Effective access for a normal admin to a view.
  * • super admins are handled by the caller (always allowed);

@@ -654,14 +654,22 @@ const TABLES: Record<string, TableDef> = {
     },
   },
   admins: {
-    doc: 'admin accounts — name, email, role (super_admin|admin|pending), created',
-    fields: ['name', 'email', 'role', 'created'],
-    defaultFields: ['name', 'email', 'role', 'created'],
+    doc: 'admin accounts — name, email, role (super_admin|admin|pending), menus (allowed menu labels), branches (supervised branch names), sites (directly assigned site names; branch sites included for super admins), created',
+    fields: ['name', 'email', 'role', 'menus', 'branches', 'sites', 'created'],
+    defaultFields: ['name', 'role', 'menus', 'branches', 'sites'],
     defaultOrder: { field: 'name' },
     fetch: async () => {
-      const list = await dataApi.listProfiles();
+      const list = await dataApi.listAdminAccess();
       return {
-        rows: list.map((p) => ({ name: p.name, email: p.email, role: p.role, created: fmtDate(p.created_at) })),
+        rows: list.map((a) => ({
+          name: a.name,
+          email: a.email,
+          role: a.role,
+          menus: a.role === 'super_admin' ? 'ALL' : a.menus.join(', ') || '(defaults only)',
+          branches: a.role === 'super_admin' ? 'ALL' : a.branches.join(', ') || '(none)',
+          sites: a.role === 'super_admin' ? 'ALL' : a.sites.join(', ') || '(none)',
+          created: a.created,
+        })),
       };
     },
   },

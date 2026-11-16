@@ -22,6 +22,9 @@
 //     cancelled" with the exact reviewed_at timestamp
 //   • up to 3 directive rounds per question (LOOKUP + QUERY combined), so
 //     Pebby can chain queries across tables before answering
+//   • assistant answers render as rich markdown BLOCKS — pipe tables become
+//     real GUI tables that scroll inside the bubble (wide → horizontal,
+//     long → vertical with a sticky header), plus proper lists/headings
 //   • off-topic questions are routed by the /api/ai proxy: it sees the
 //     [[WEB: query]] directive, researches the web (news RSS + Wikipedia)
 //     and re-asks the provider, so Pebby answers current affairs too
@@ -74,8 +77,8 @@ interface LookupDirective {
 
 const SUGGESTIONS = [
   'When was Hassan cancelled, and why?',
-  "What's the nationality and emp code of Mohd Rafiq?",
-  'Show overdue advances sorted by amount',
+  "What's the amount paid as salary in October, and how much is pending?",
+  'Who supervises which branch, and what permissions do the admins have?',
   "What's the latest business news in the UAE?",
 ];
 
@@ -126,6 +129,185 @@ function InlineMarkdown({ text }: { text: string }) {
         return <span key={i}>{part}</span>;
       })}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Block-level markdown — real GUI tables (with overflow + scrolling), lists,
+// headings and paragraphs. The model is instructed (answer protocol #6) to
+// answer multi-record questions with markdown pipe tables; this renderer
+// turns them into styled <table> elements that scroll INSIDE the bubble:
+//   • wide tables → horizontal scroll (overflow-x-auto, nowrap cells)
+//   • long tables → vertical scroll (max-h + overflow-y-auto) with a sticky
+//     header row so column titles stay visible
+// ---------------------------------------------------------------------------
+
+type MdBlock =
+  | { kind: 'p'; lines: string[] }
+  | { kind: 'h'; text: string }
+  | { kind: 'ul'; items: string[] }
+  | { kind: 'ol'; items: string[] }
+  | { kind: 'table'; head: string[]; rows: string[][] };
+
+const isUlItem = (t: string): boolean => /^[-*•]\s+/.test(t);
+const isOlItem = (t: string): boolean => /^\d+[.)]\s+/.test(t);
+
+/** "| a | b |" → ['a','b'] (leading/trailing pipes optional). */
+const splitRow = (t: string): string[] =>
+  t.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+
+/** A table separator line: every cell is :--- / --- / ---: / :---:. */
+const isTableSep = (t: string): boolean =>
+  t.startsWith('|') && splitRow(t).length > 0 && splitRow(t).every((c) => /^:?-{3,}:?$/.test(c));
+
+function parseBlocks(text: string): MdBlock[] {
+  const lines = text.split('\n');
+  const blocks: MdBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (!t) { i++; continue; }
+
+    // markdown pipe table: header row + separator row + body rows
+    if (t.startsWith('|') && i + 1 < lines.length && isTableSep(lines[i + 1].trim())) {
+      const head = splitRow(t);
+      const rows: string[][] = [];
+      let j = i + 2;
+      while (j < lines.length && lines[j].trim().startsWith('|')) {
+        rows.push(splitRow(lines[j].trim()));
+        j++;
+      }
+      blocks.push({ kind: 'table', head, rows });
+      i = j;
+      continue;
+    }
+
+    // heading
+    const h = /^(#{1,4})\s+(.*)$/.exec(t);
+    if (h) { blocks.push({ kind: 'h', text: h[2] }); i++; continue; }
+
+    // unordered list
+    if (isUlItem(t)) {
+      const items: string[] = [];
+      while (i < lines.length && isUlItem(lines[i].trim())) {
+        items.push(lines[i].trim().replace(/^[-*•]\s+/, ''));
+        i++;
+      }
+      blocks.push({ kind: 'ul', items });
+      continue;
+    }
+
+    // ordered list
+    if (isOlItem(t)) {
+      const items: string[] = [];
+      while (i < lines.length && isOlItem(lines[i].trim())) {
+        items.push(lines[i].trim().replace(/^\d+[.)]\s+/, ''));
+        i++;
+      }
+      blocks.push({ kind: 'ol', items });
+      continue;
+    }
+
+    // paragraph — consecutive plain lines merged with spaces
+    const plines: string[] = [];
+    while (i < lines.length) {
+      const lt = lines[i].trim();
+      if (
+        !lt || lt.startsWith('|') || /^#{1,4}\s/.test(lt)
+        || isUlItem(lt) || isOlItem(lt)
+      ) break;
+      plines.push(lt);
+      i++;
+    }
+    blocks.push({ kind: 'p', lines: plines });
+  }
+  return blocks;
+}
+
+/** One rendered markdown table — the scrollable GUI table for chat bubbles. */
+function MarkdownTable({ head, rows }: { head: string[]; rows: string[][] }) {
+  return (
+    <div
+      className={
+        'my-1 max-h-72 overscroll-contain overflow-auto rounded-lg border border-border/70 bg-background/50 shadow-sm ' +
+        // thin but VISIBLE scrollbar — signals that wide/long tables scroll
+        '[scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 ' +
+        '[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border ' +
+        '[&::-webkit-scrollbar-track]:bg-transparent'
+      }
+    >
+      <table className="w-full border-separate border-spacing-0 text-[11.5px] leading-snug">
+        <thead>
+          <tr>
+            {head.map((h, j) => (
+              <th
+                key={j}
+                scope="col"
+                className="sticky top-0 z-10 whitespace-nowrap border-b border-border bg-muted px-2 py-1.5 text-left font-semibold text-foreground"
+              >
+                <InlineMarkdown text={h} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, j) => (
+            <tr key={j} className="odd:bg-muted/20">
+              {row.map((cell, k) => (
+                <td key={k} className="whitespace-nowrap border-b border-border/40 px-2 py-1.5 align-top">
+                  <InlineMarkdown text={cell} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Assistant message body: blocks (tables / lists / headings / paragraphs)
+ *  with inline **bold** + `code` spans everywhere. */
+function MessageMarkdown({ text }: { text: string }) {
+  const blocks = parseBlocks(text);
+  if (blocks.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      {blocks.map((b, i) => {
+        switch (b.kind) {
+          case 'h':
+            return (
+              <p key={i} className="pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <InlineMarkdown text={b.text} />
+              </p>
+            );
+          case 'ul':
+            return (
+              <ul key={i} className="ml-4 list-disc space-y-0.5">
+                {b.items.map((it, j) => (
+                  <li key={j} className="leading-relaxed"><InlineMarkdown text={it} /></li>
+                ))}
+              </ul>
+            );
+          case 'ol':
+            return (
+              <ol key={i} className="ml-4 list-decimal space-y-0.5">
+                {b.items.map((it, j) => (
+                  <li key={j} className="leading-relaxed"><InlineMarkdown text={it} /></li>
+                ))}
+              </ol>
+            );
+          case 'table':
+            return <MarkdownTable key={i} head={b.head} rows={b.rows} />;
+          default:
+            return (
+              <p key={i} className="leading-relaxed">
+                <InlineMarkdown text={b.lines.join(' ')} />
+              </p>
+            );
+        }
+      })}
+    </div>
   );
 }
 
@@ -374,8 +556,9 @@ export function AiChatWidget() {
                     <p className="text-sm font-semibold">Hi, I&apos;m {BOT_NAME} — Smart Assistant</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       I search the whole {settings.project_name} database on every question — employees,
-                      attendance, payroll, advances, cancellations and more — and I can run complex
-                      queries on any table. For anything else, I research the web.
+                      attendance, payroll, advances, cancellations, admin permissions and more — and
+                      I can run complex queries on any table. Multi-record answers render as scrollable
+                      tables. For anything else, I research the web.
                     </p>
                   </div>
                   <div className="mt-1 flex w-full flex-col gap-1.5">
@@ -394,14 +577,19 @@ export function AiChatWidget() {
                   {messages.map((m, i) => (
                     <div key={i} className={cn('flex', m.role === 'user' ? 'justify-end' : 'justify-start')}>
                       <div
+                        data-role={m.role}
                         className={cn(
-                          'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed',
+                          'break-words rounded-2xl px-3.5 py-2 text-[13px]',
                           m.role === 'user'
-                            ? 'brand-gradient rounded-br-md text-brand-foreground shadow-sm'
-                            : 'rounded-bl-md bg-muted text-foreground',
+                            ? 'max-w-[85%] whitespace-pre-wrap leading-relaxed brand-gradient rounded-br-md text-brand-foreground shadow-sm'
+                            // assistant bubbles render markdown BLOCKS — wide or
+                            // long tables scroll inside the bubble, not the page
+                            : 'max-w-[95%] rounded-bl-md bg-muted text-foreground',
                         )}
                       >
-                        <InlineMarkdown text={m.content} />
+                        {m.role === 'user'
+                          ? <InlineMarkdown text={m.content} />
+                          : <MessageMarkdown text={m.content} />}
                       </div>
                     </div>
                   ))}

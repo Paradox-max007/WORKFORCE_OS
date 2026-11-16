@@ -9,6 +9,12 @@
 //    when the lookup result arrives, answers from it (proves the lookup loop)
 //  - "overdue advances" → replies with a [[QUERY]] directive against the
 //    advance_book table with filters + sorting (proves complex querying)
+//  - "salary paid/pending in October" → [[QUERY]] against salary_sheet
+//    (month param + filter + sort), then answers WITH a markdown pipe table
+//    (proves the GUI table renderer + scrolling in the chat bubble)
+//  - admin supervision/permission questions → reads the enriched ADMINS
+//    section of the snapshot and answers with a markdown pipe table
+//    (proves admin access knowledge: menus, branches, sites)
 //  - news questions → replies with a [[WEB: query]] directive; when the web
 //    research arrives, answers from it (proves the proxy loop)
 import http from 'node:http';
@@ -46,9 +52,23 @@ const server = http.createServer((req, res) => {
           const reason = /reason: "?([^"\n·]+)"?/.exec(lastUser)?.[1]?.trim() ?? 'unknown';
           reply = `MOCK QUERY ANSWER: ${name} (${code}) was cancelled on ${reviewed} — the cancellation request was approved by ${reviewedBy}. It was raised ${requested} by ${requestedBy} ("${reason}").`;
         } else if (lastUser.includes('advance_book')) {
-          const rows = (lastUser.match(/^- /gm) ?? []).length;
+          const rows = /\u00b7 (\d+) row\(s\) matched/.exec(lastUser)?.[1]
+            ?? String((lastUser.match(/^- /gm) ?? []).length);
           const total = /sum\(amount\) = ([\d.]+)/.exec(lastUser)?.[1] ?? 'unknown';
           reply = `MOCK QUERY ANSWER: ${rows} advance record(s) matched the filters; total overdue amount AED ${total}.`;
+        } else if (lastUser.includes('salary_sheet')) {
+          // answer with a markdown TABLE — exercises the GUI table renderer
+          const rows = [...lastUser.matchAll(
+            /^- employee_code: ([A-Z]+-\d{4}-\d+) · full_name: ([^·]+?) ·.*?net_salary: (-?[\d.]+) · payment_status: (\w+)/gm,
+          )];
+          const sum = (st) => rows.filter((r) => r[4] === st)
+            .reduce((n, r) => n + Number(r[3]), 0);
+          const table = [
+            '| Employee | Net (AED) | Status |',
+            '|---|---|---|',
+            ...rows.slice(0, 6).map((r) => `| ${r[1]} · ${r[2].trim()} | ${r[3]} | ${r[4]} |`),
+          ].join('\n');
+          reply = `MOCK QUERY ANSWER: October salary — paid AED ${sum('paid')}, pending AED ${sum('unpaid')} net across ${rows.length} settlement rows. Top pending rows:\n\n${table}`;
         } else {
           reply = 'MOCK QUERY ANSWER: the query engine returned rows (unparsed test path).';
         }
@@ -67,6 +87,27 @@ const server = http.createServer((req, res) => {
       } else if (/overdue advance/i.test(lastUser)) {
         // exercise complex querying: filter + sort + aggregate
         reply = '[[QUERY]] {"table":"advance_book","where":[{"field":"overdue","op":"eq","value":true}],"order_by":"amount","desc":true,"aggregate":"sum","on":"amount"}';
+      } else if (/salary|paid|pending|october/i.test(lastUser)) {
+        // exercise the month-parameterized salary query, then the table answer
+        reply = '[[QUERY]] {"table":"salary_sheet","month":"2026-10","where":[{"field":"net_salary","op":"gt","value":0}],"order_by":"net_salary","desc":true}';
+      } else if (/supervis|permission/i.test(lastUser)) {
+        // read the enriched ADMINS snapshot section → markdown table answer
+        const sec = /ADMINS \(\d+\)\n([\s\S]*?)(?:\n\n|$)/.exec(system);
+        const lines = (sec ? sec[1] : '').split('\n').filter((l) => l.startsWith('- '));
+        const table = [
+          '| Admin | Role | Menus | Branches | Direct sites |',
+          '|---|---|---|---|---|',
+          ...lines.map((l) => {
+            const p = l.replace(/^- /, '').split(' · ');
+            const name = p[0];
+            const role = p[1];
+            const menus = /menus: ([^·]+)/.exec(l)?.[1] ?? 'ALL (super admin)';
+            const branches = /supervises branches: ([^·]+)/.exec(l)?.[1] ?? 'ALL';
+            const sites = /direct site access: ([^\n]+)/.exec(l)?.[1] ?? 'ALL';
+            return `| ${name} | ${role} | ${menus.trim()} | ${branches.trim()} | ${sites.trim()} |`;
+          }),
+        ].join('\n');
+        reply = `MOCK DB ANSWER: here is the admin access overview:\n\n${table}`;
       } else if (/passport/i.test(lastUser)) {
         const line = findEmployeeLine(system, 'Muhammad Iqbal');
         const code = line ? /- (PUL-\d{4}-\d+)/.exec(line)[1] : 'PUL-2026-002';

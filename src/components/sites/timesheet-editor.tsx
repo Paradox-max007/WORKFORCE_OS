@@ -253,13 +253,17 @@ const EXCEL_BORDER_TO_CSS: Record<string, string> = {
 function cssBorderToExcel(v: string | undefined): { style: string; color: { argb: string } } | null {
   if (!v || v.includes('none') || v.trim() === '') return null;
   const color = cssColorToHex((v.match(/(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))/) ?? [])[1] ?? '') ?? '000000';
+  // widths arrive pre-normalised from canonicalCss ('thin'/'medium'/'thick'
+  // keywords → px), but accept them here as well (defensive)
+  const w = normalizeBorderWidth(/^([^\s]+)/.exec(v)?.[1]);
   let style: string | null = null;
   if (/^3px double/.test(v)) style = 'double';
   else if (dottedCheck(v)) style = 'dotted';
   else if (dashedCheck(v)) style = 'dashed';
-  else if (/^2px/.test(v)) style = 'medium';
-  else if (/^([3-9]|\d{2})px/.test(v)) style = 'thick';
-  else if (/^1px/.test(v)) style = 'thin';
+  else if (w === '2px') style = 'medium';
+  else if (/^([3-9]|\d{2})px$/.test(w)) style = 'thick';
+  else if (w === '1px') style = 'thin';
+  else if (w === '0px') return null;
   if (!style) return null;
   return { style, color: { argb: `FF${color}` } };
 }
@@ -279,13 +283,118 @@ function parseCss(css: string): Record<string, string> {
   return out;
 }
 
+// ---- borders --------------------------------------------------------------
+// The CSSOM plays tricks with border serialisation: setting the four sides to
+// the SAME value ('All borders' — by far the most used preset) collapses the
+// style attribute into the box shorthands
+//     'border-width: 1px; border-style: solid; border-color: rgb(0, 0, 0);'
+// (with multi-value forms like 'border-width: 2px 1px 1px' when sides differ
+// only partially, and per-side longhands 'border-top-width', …, plus the full
+// 'border' shorthand). The canonical form the save pipeline understands is
+// one 'border-<side>: <width> <style> #<hex>' entry per side — everything the
+// browser throws at us is resolved into that below, so borders survive the
+// DOM → snapshot → xlsx round-trip bit-for-bit.
+
+type BorderSide = 'top' | 'right' | 'bottom' | 'left';
+const BORDER_SIDES: BorderSide[] = ['top', 'right', 'bottom', 'left'];
+
+/** Split a declaration value on whitespace OUTSIDE parentheses —
+ *  'rgb(255, 0, 0)' is ONE value, not three. */
+function splitTopLevel(v: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of v.trim()) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (depth === 0 && /\s/.test(ch)) {
+      if (cur) parts.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) parts.push(cur);
+  return parts;
+}
+
+/** CSS box shorthand expansion: '1px' | '1px 2px' | '1px 2px 3px' |
+ *  '1px 2px 3px 4px' (top right bottom left) → one value per side. */
+function expandCssBox(v: string): [string, string, string, string] {
+  const p = splitTopLevel(v);
+  if (p.length <= 1) return [p[0] ?? '', p[0] ?? '', p[0] ?? '', p[0] ?? ''];
+  if (p.length === 2) return [p[0], p[1], p[0], p[1]];
+  if (p.length === 3) return [p[0], p[1], p[2], p[1]];
+  return [p[0], p[1], p[2], p[3]];
+}
+
+/** CSS width keywords → px, so canonical strings stay stable and comparable
+ *  ('medium' is what the CSSOM emits for a side reset back to its default). */
+function normalizeBorderWidth(w: string | undefined): string {
+  const t = (w ?? '').trim().toLowerCase();
+  if (t === 'thin') return '1px';
+  if (t === 'medium') return '2px';
+  if (t === 'thick') return '3px';
+  if (/^0(?:[a-z]+)?$/.test(t)) return '0px';
+  const m = /^([\d.]+)px$/.exec(t);
+  return m ? `${m[1]}px` : t;
+}
+
+/** '1px solid #000' / '1px solid rgb(0, 0, 0)' → { width, style, color }. */
+function splitBorderShorthand(v: string): { width: string; style: string; color: string } {
+  let width = '';
+  let style = '';
+  let color = '';
+  for (const t of v.trim().split(/\s+/)) {
+    if (!width && /^([\d.]+px|thin|medium|thick)$/i.test(t)) width = t;
+    else if (!style && /^(solid|dotted|dashed|double|none|hidden|groove|ridge|inset|outset)$/i.test(t)) style = t.toLowerCase();
+    else color = color ? `${color} ${t}` : t;
+  }
+  return { width, style, color };
+}
+
+/** Parse a style declaration record and produce ONE canonical
+ *  '<width> <style> #<hex>' string per bordered side ('none'/0-width sides
+ *  are omitted). Inputs may come in any CSSOM shape — collapsed box
+ *  shorthands, per-side longhands, per-side shorthands or the full shorthand. */
+function resolveBorderSides(d: Record<string, string>): Partial<Record<BorderSide, string>> {
+  const boxW = d['border-width'] ? expandCssBox(d['border-width']) : null;
+  const boxS = d['border-style'] ? expandCssBox(d['border-style']) : null;
+  const boxC = d['border-color'] ? expandCssBox(d['border-color']) : null;
+  const full = d['border'] ? splitBorderShorthand(d['border']) : null;
+  const out: Partial<Record<BorderSide, string>> = {};
+  BORDER_SIDES.forEach((side, i) => {
+    // per-side shorthand wins, then per-side longhands, then the collapsed
+    // box shorthands, then the full 'border' shorthand
+    const sh = d[`border-${side}`] ? splitBorderShorthand(d[`border-${side}`]) : null;
+    const width = normalizeBorderWidth(d[`border-${side}-width`] ?? sh?.width ?? boxW?.[i] ?? full?.width);
+    const style = (d[`border-${side}-style`] ?? sh?.style ?? boxS?.[i] ?? full?.style ?? '').toLowerCase();
+    const color = d[`border-${side}-color`] ?? sh?.color ?? boxC?.[i] ?? full?.color ?? '';
+    if (!style || style === 'none' || style === 'hidden') return; // no border
+    if (!width || width === '0px') return;
+    const hex = cssColorToHex(color) ?? '000000'; // 'currentcolor' etc. → black
+    out[side] = `${width} ${style} #${hex}`;
+  });
+  return out;
+}
+
 /** Canonical serialisation of a cell's CSS so that load-time and DOM-time
- *  strings compare equal (the browser re-serialises rgb()/spacing/case). */
+ *  strings compare equal (the browser re-serialises rgb()/spacing/case and
+ *  COLLAPSES equal border sides into border-width/style/color shorthands). */
 function canonicalCss(css: string): string {
   const d = parseCss(css);
   const out: Record<string, string> = {};
+
+  // borders first — every CSSOM form resolved into per-side entries
+  const borders = resolveBorderSides(d);
+  for (const side of BORDER_SIDES) {
+    const b = borders[side];
+    if (b) out[`border-${side}`] = b; // 'none'/empty borders are dropped entirely
+  }
+
   for (const [k, v] of Object.entries(d)) {
     if (k === 'display') continue; // grid-internal (merged hidden cells)
+    if (k.startsWith('border')) continue; // handled above
     if (k === 'background-color' || k === 'color') {
       const hex = cssColorToHex(v);
       // "no fill" / "automatic text" — drop the key so a cleared fill or
@@ -302,9 +411,6 @@ function canonicalCss(css: string): string {
     } else if (k === 'text-decoration') {
       const set = ['underline', 'line-through'].filter((t) => v.includes(t));
       if (set.length) out[k] = set.join(' ');
-    } else if (k === 'border-top' || k === 'border-right' || k === 'border-bottom' || k === 'border-left') {
-      const b = canonicalBorder(v);
-      if (b) out[k] = b; // 'none' / empty borders are dropped entirely
     } else {
       // the grid renders every cell with the column default 'left' (Excel's
       // own default) — drop it so untouched cells never look "changed"
@@ -313,17 +419,6 @@ function canonicalCss(css: string): string {
     }
   }
   return Object.keys(out).sort().map((k) => `${k}:${out[k]}`).join(';');
-}
-
-function canonicalBorder(v: string): string | null {
-  if (!v || v.includes('none') || v.trim() === '') return null; // no border
-  const width = /^(\d+)px/.exec(v)?.[1] ?? '1';
-  let style = 'solid';
-  if (v.includes('double')) style = 'double';
-  else if (v.includes('dotted')) style = 'dotted';
-  else if (v.includes('dashed')) style = 'dashed';
-  const hex = cssColorToHex((v.match(/(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))/) ?? [])[1] ?? '') ?? '000000';
-  return `${width}px ${style} #${hex}`;
 }
 
 function stripHtml(s: string): string {

@@ -34,7 +34,7 @@ import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { EmptyState, PageHeader } from '@/components/shared/primitives';
+import { EmptyState } from '@/components/shared/primitives';
 import { dataApi } from '@/lib/data';
 import {
   deleteSiteDoc, downloadSiteDoc, isEditableTimesheet, listSiteDocs, monthLabel,
@@ -315,15 +315,30 @@ export function SiteTimesheetsPage() {
 
   return (
     <>
-      <PageHeader
-        title="Timesheets / Time Cards"
-        description={`Monthly document archive of ${site.name}`}
-        actions={
-          <Button variant="outline" className="gap-2" onClick={() => navigateTo('sites')}>
-            <ArrowLeft className="size-4" /> Back to Sites
+      {/* ---- header: back button on the LEFT, same pattern as the site and
+           camp detail pages (icon button + title block) ---- */}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex items-start gap-3">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => navigateTo('sites')}
+            aria-label="Back to sites"
+            className="size-10 shrink-0"
+          >
+            <ArrowLeft size={17} />
           </Button>
-        }
-      />
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-brand/10 p-2.5 text-brand">
+            <FileSpreadsheet size={20} />
+          </div>
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Timesheets / Time Cards</h1>
+            <p className="mt-1 truncate text-sm text-muted-foreground">
+              Monthly document archive of {site.name}
+            </p>
+          </div>
+        </div>
+      </div>
 
       {/* ---- Row 1: site identity ---- */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

@@ -183,6 +183,59 @@ async function prodList(siteId: string, months: string[]): Promise<SiteDoc[]> {
 // Public facade
 // ---------------------------------------------------------------------------
 
+/** Compact document line — everything Pebby needs to know about an uploaded
+ *  site file, without blobs or signed URLs. */
+export interface SiteDocSummary {
+  siteId: string;
+  /** 'YYYY-MM' */
+  month: string;
+  kind: SiteDocKind;
+  name: string;
+  ext: string;
+  size: number;
+  updatedAt: string;
+}
+
+/** Document summaries of EVERY site at once — powers Pebby's knowledge base
+ *  ("which media files are uploaded for each site?").
+ *
+ *  DEMO: one IndexedDB read for all sites. PROD: one bucket list per site
+ *  folder, capped to the newest `monthsBack` months per site (default 3) so
+ *  the knowledge base stays cheap to rebuild before every question. */
+export async function listAllSiteDocSummaries(
+  sites: { id: string; created_at: string }[],
+  monthsBack = 3,
+  now = new Date(),
+): Promise<SiteDocSummary[]> {
+  if (sites.length === 0) return [];
+
+  if (isDemoMode) {
+    const all = await idbTx<DemoRecord[]>('readonly', (s) => s.getAll() as IDBRequest<DemoRecord[]>);
+    const bySite = new Set(sites.map((s) => s.id));
+    return all
+      .filter((r) => bySite.has(r.siteId))
+      .map((r): SiteDocSummary => ({
+        siteId: r.siteId, month: r.month, kind: r.kind, name: r.name,
+        ext: r.ext, size: r.size, updatedAt: r.updatedAt,
+      }))
+      .sort((a, b) => b.month.localeCompare(a.month) || a.kind.localeCompare(b.kind));
+  }
+
+  if (!supabase) return [];
+  const docs = await Promise.all(sites.map(async (site) => {
+    const months = monthsSince(site.created_at, now).slice(0, Math.max(1, monthsBack));
+    const list = await prodList(site.id, months).catch(() => [] as SiteDoc[]);
+    return list;
+  }));
+  return docs
+    .flat()
+    .map((d): SiteDocSummary => ({
+      siteId: d.siteId, month: d.month, kind: d.kind, name: d.name,
+      ext: d.ext, size: d.size, updatedAt: d.updatedAt,
+    }))
+    .sort((a, b) => b.month.localeCompare(a.month) || a.kind.localeCompare(b.kind));
+}
+
 /** All documents of one site (pass the months the page displays). */
 export async function listSiteDocs(siteId: string, months: string[]): Promise<SiteDoc[]> {
   if (isDemoMode) return demoList(siteId);

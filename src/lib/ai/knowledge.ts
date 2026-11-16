@@ -25,6 +25,12 @@
 
 import { dataApi } from '@/lib/data';
 import { queryableTablesDoc } from '@/lib/ai/query-engine';
+import {
+  listAllSiteDocSummaries,
+  listSiteDocs,
+  monthsSince,
+  type SiteDocSummary,
+} from '@/lib/files/site-docs';
 import type {
   AdminAccess, Attendance, EmployeeVM, LeaveRequestVM, Notification, SalarySheetReport,
   SiteSettings, UniformEntry, WarningVM, FineVM, CancellationRequestVM,
@@ -51,6 +57,7 @@ MODULES
 - Cancelled employees: archived workforce (Employees page → status filter "Cancelled"). Their attendance, salary history, advances, uniforms, warnings and fines remain readable everywhere for future reference.
 - Branches: regional groups owning sites; admins are granted branches (or direct site access).
 - Sites: work sites (client, project, supervisor, team leader, live status); printable A4 Daily Attendance paper per site.
+- Site Timesheets / Time Cards: per-site monthly document archive — for every month since a site started there are two OPTIONAL slots: a Time Card (PDF) and a Timesheet (XLSX or PDF). Excel timesheets open in the in-app editor and save back with all formatting. The snapshot's SITE DOCUMENTS section lists the uploaded files per site; for a site's full history use the [[LOOKUP]] site-docs directive.
 - Camps: accommodation with block/room assignments.
 - Attendance: per-site monthly marking. Markers: 'A' = absent, a number (e.g. 8 / 8.5) = worked hours, blank = no record. Free text can also count as present.
 - Working Hours: total & monthly history per employee; lifetime hours drive the experience tier.
@@ -117,6 +124,12 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
   const val = <T,>(r: PromiseSettledResult<T>, fallback: T): T =>
     r.status === 'fulfilled' ? r.value : fallback;
 
+  // site documents (uploaded timesheets / time cards) — depends on the sites
+  // list, so it runs as a second (still cheap) round: demo = one IndexedDB
+  // read, prod = one bucket list per site capped to the newest 3 months
+  const sitesList = val(sites, [] as { id: string; name: string; created_at: string }[]);
+  const siteDocs = await listAllSiteDocSummaries(sitesList, 3).catch(() => [] as SiteDocSummary[]);
+
   const data: Record<string, unknown> = {
     admins: val(adminAccess, []),
     branches: val(branches, []),
@@ -141,6 +154,7 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
     },
     advance_book: val(advanceBook, null),
     deduction_settings: val(deductionSettings, null),
+    site_documents: siteDocs,
   };
 
   const counts: Record<string, number> = Object.fromEntries(
@@ -158,6 +172,7 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
         return [k, Array.isArray(rep) ? rep.length : 0];
       }
       if (k === 'deduction_settings') return [k, v ? 1 : 0];
+      if (k === 'site_documents') return [k, Array.isArray(v) ? v.length : 0];
       return [k, Array.isArray(v) ? v.length : 0];
     }),
   );
@@ -292,7 +307,7 @@ export function formatSalarySheetPeriod(
 interface SnapshotInput {
   admins: AdminAccess[];
   branches: { name: string; location: string | null; is_active: boolean; site_count: number; employee_count: number }[];
-  sites: { name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean; employee_count: number }[];
+  sites: { id: string; name: string; client_name: string | null; project_name: string | null; supervisor: string | null; is_active: boolean; employee_count: number }[];
   camps: { name: string; location: string | null; capacity: number | null; is_active: boolean; employee_count: number }[];
   employees: EmployeeVM[];
   cancelledEmployees: EmployeeVM[];
@@ -309,11 +324,79 @@ interface SnapshotInput {
   salarySheet: { year: number; month: number; report: SalarySheetReport | null };
   advanceBook: { records: { full_name: string; employee_code: string; amount: number; given_date: string; cut_year: number; cut_month: number; note: string | null; cleared: boolean; overdue: boolean; from_time_card?: boolean }[]; totals: { due_count: number; due_amount: number; overdue_count: number; overdue_amount: number; cleared_count: number; cleared_amount: number } } | null;
   deductionSettings: { absent_free_days: number; absent_deduction_amount: number; updated_by_name: string | null } | null;
+  siteDocuments: SiteDocSummary[];
 }
 
 /** Soft ceiling for the snapshot text. The /api/ai proxy accepts messages up
  *  to 150k chars; the guide + framing need headroom, so trim at ~110k. */
 const MAX_SNAPSHOT_CHARS = 110_000;
+
+/** '45 KB' / '1.2 MB' — compact human file size for snapshot lines. */
+function fmtDocSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '—';
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+/** One uploaded file → one compact line part:
+ *  'time-card 2026-11 (PDF · 1.2 MB · updated 2026-11-15)'. */
+function siteDocLinePart(doc: SiteDocSummary): string {
+  const kind = doc.kind === 'time-card' ? 'time-card' : 'timesheet';
+  const bits = [doc.ext.toUpperCase(), fmtDocSize(doc.size)];
+  if (doc.updatedAt) bits.push(`updated ${fmtDateTime(doc.updatedAt)}`);
+  return `${kind} ${doc.month} (${bits.join(' · ')})`;
+}
+
+/** Snapshot section: the media files uploaded per site, one line per site. */
+function formatSiteDocumentsGrouped(
+  docs: SiteDocSummary[],
+  sites: { id: string; name: string }[],
+): string {
+  const nameOf = new Map(sites.map((s) => [s.id, s.name]));
+  const perSite = new Map<string, SiteDocSummary[]>();
+  for (const doc of docs) {
+    const list = perSite.get(doc.siteId) ?? [];
+    list.push(doc);
+    perSite.set(doc.siteId, list);
+  }
+  const lines: string[] = [];
+  for (const [siteId, list] of perSite) {
+    const name = nameOf.get(siteId) ?? siteId.slice(0, 8);
+    const parts = list
+      .slice()
+      .sort((a, b) => b.month.localeCompare(a.month) || a.kind.localeCompare(b.kind))
+      .map(siteDocLinePart);
+    lines.push(`- ${name}: ${parts.join(' · ')}`);
+  }
+  if (lines.length === 0) {
+    return `SITE DOCUMENTS (uploaded files per site — 0): no Time Card or Timesheet has been uploaded for any site yet (both slots are optional each month).`;
+  }
+  const total = docs.length;
+  return [
+    `SITE DOCUMENTS (uploaded files per site — ${total} file(s) across ${perSite.size} site(s); every month has two OPTIONAL slots: a Time Card PDF and a Timesheet XLSX/PDF)`,
+    ...lines,
+  ].join('\n');
+}
+
+/** On-demand [[LOOKUP]] site-docs=<site name> result — the site's FULL month
+ *  history of uploaded files (the snapshot only carries the newest months). */
+export function formatSiteDocuments(
+  siteName: string,
+  docs: SiteDocSummary[],
+): string {
+  if (docs.length === 0) {
+    return `SITE DOCUMENTS for "${siteName}": no Time Card or Timesheet uploaded in any month.`;
+  }
+  return [
+    `SITE DOCUMENTS for "${siteName}" — ${docs.length} file(s), full month history:`,
+    ...docs
+      .slice()
+      .sort((a, b) => b.month.localeCompare(a.month) || a.kind.localeCompare(b.kind))
+      .map((doc) => `- ${siteDocLinePart(doc)}${doc.name ? ` · file: ${doc.name}` : ''}`),
+  ].join('\n');
+}
+
 
 function buildSnapshotText(d: SnapshotInput): string {
   const sections: string[] = [];
@@ -341,6 +424,9 @@ function buildSnapshotText(d: SnapshotInput): string {
     `SITES (${d.sites.length})`,
     ...d.sites.map((s) => `- ${s.name}${s.client_name ? ` · client: ${s.client_name}` : ''}${s.project_name ? ` · project: ${s.project_name}` : ''}${s.supervisor ? ` · supervisor: ${s.supervisor}` : ''} · ${s.is_active ? 'active' : 'inactive'} · crew ${s.employee_count}`),
   ].join('\n'));
+
+  // uploaded media files per site (Time Cards / Timesheets) — grouped per site
+  sections.push(formatSiteDocumentsGrouped(d.siteDocuments, d.sites));
 
   sections.push([
     `CAMPS (${d.camps.length})`,
@@ -463,6 +549,7 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     salarySheet: (raw.salary_sheet_current_month as SnapshotInput['salarySheet']) ?? { year: 0, month: 0, report: null },
     advanceBook: (raw.advance_book as SnapshotInput['advanceBook']) ?? null,
     deductionSettings: (raw.deduction_settings as SnapshotInput['deductionSettings']) ?? null,
+    siteDocuments: list<SiteDocSummary>('site_documents'),
   };
   const snapshot = buildSnapshotText(d);
 
@@ -482,10 +569,11 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     '=== ANSWER PROTOCOL ===',
     '1. App/workforce/payroll questions: SEARCH the snapshot carefully first — match names, employee codes (e.g. PUL-2026-NNN), sites, dates — then answer precisely; compute sums, counts and averages when asked. The snapshot carries every request\'s timestamps (requested_at / reviewed_at): e.g. "when was X cancelled" = the reviewed_at of X\'s APPROVED cancellation request, and the CANCELLED EMPLOYEES directory line already carries it.',
     '2. [[QUERY]] — when the snapshot omits the detail you need (exact timestamps of a specific row, other months, filtered / sorted / aggregated / cross-table views), reply with EXACTLY one directive line (see the query engine section for syntax and examples). The system executes it and asks you again — then answer. You may chain up to 3 query rounds (e.g. resolve a name to a code, then pull that employee\'s records from another table, then aggregate).',
-    '3. [[LOOKUP]] — pre-formatted deep records, same one-line style, when you need: full employee documents (passport & ID numbers/status, date of birth, email, home address, emergency contact), a whole attendance month, or a whole salary-sheet month:',
+    '3. [[LOOKUP]] — pre-formatted deep records, same one-line style, when you need: full employee documents (passport & ID numbers/status, date of birth, email, home address, emergency contact), a whole attendance month, a whole salary-sheet month, or a site\'s FULL uploaded-document history (every month, not just the newest ones in the snapshot):',
     '   [[LOOKUP]] employees=PUL-2026-015,PUL-2026-003',
     '   [[LOOKUP]] attendance=2026-10',
     '   [[LOOKUP]] salary=2026-09',
+    '   [[LOOKUP]] site-docs=Marina Tower',
     '4. Anything UNRELATED to this app (news, weather, sports, general knowledge, current affairs): reply with EXACTLY one directive line and nothing else:',
     '   [[WEB: short search query]]',
     '   The system researches the web and asks you again — then answer the user using the results.',

@@ -74,9 +74,25 @@ const server = http.createServer((req, res) => {
         }
       } else if (lastUser.includes('DATABASE LOOKUP RESULT')) {
         seen.lookups += 1;
-        const pass = /passport: ([^\n(]+?)(?: \()/.exec(lastUser);
-        const code = /(?:^|\n)- (PUL-\d{4}-\d+)/.exec(lastUser);
-        reply = `MOCK LOOKUP ANSWER: passport is ${pass ? pass[1].trim() : 'unknown'} for ${code ? code[1] : 'unknown code'}.`;
+        if (lastUser.includes('SITE DOCUMENTS')) {
+          // [[LOOKUP]] site-docs=<name> round — answer from the full history
+          const site = /SITE DOCUMENTS for "([^"]+)"/.exec(lastUser)?.[1] ?? 'unknown site';
+          const rows = [...lastUser.matchAll(/^- (time-card|timesheet) (\d{4}-\d{2}) \(([^)]+)\)/gm)];
+          if (rows.length === 0 && !lastUser.includes('no Time Card or Timesheet')) {
+            reply = `MOCK LOOKUP PARSE ERROR: unparsed site-docs payload:\n${lastUser.slice(0, 500)}`;
+          } else {
+            const table = [
+              '| Month | Kind | Details |',
+              '|---|---|---|',
+              ...rows.map((r) => `| ${r[2]} | ${r[1]} | ${r[3].trim()} |`),
+            ].join('\n');
+            reply = `MOCK LOOKUP ANSWER: full uploaded-document history of ${site} — ${rows.length} file(s):\n\n${table}`;
+          }
+        } else {
+          const pass = /passport: ([^\n(]+?)(?: \()/.exec(lastUser);
+          const code = /(?:^|\n)- (PUL-\d{4}-\d+)/.exec(lastUser);
+          reply = `MOCK LOOKUP ANSWER: passport is ${pass ? pass[1].trim() : 'unknown'} for ${code ? code[1] : 'unknown code'}.`;
+        }
       } else if (lastUser.includes('WEB RESEARCH')) {
         seen.webs += 1;
         const first = /- ([^—\n]+)\s*\(.*?\)\s*—/.exec(lastUser);
@@ -112,6 +128,22 @@ const server = http.createServer((req, res) => {
         const line = findEmployeeLine(system, 'Muhammad Iqbal');
         const code = line ? /- (PUL-\d{4}-\d+)/.exec(line)[1] : 'PUL-2026-002';
         reply = `[[LOOKUP]] employees=${code}`;
+      } else if (/full document history of|all documents of|complete document/i.test(lastUser)) {
+        // prove the [[LOOKUP]] site-docs=<name> directive loop
+        const name = /history of ([A-Za-z][A-Za-z ]+?)(?:,|\?|$)/i.exec(lastUser)?.[1]?.trim() ?? 'Marina Heights Tower';
+        reply = `[[LOOKUP]] site-docs=${name}`;
+      } else if (/timesheets? and time cards uploaded|uploaded files|site documents|time cards?\?/i.test(lastUser)) {
+        // answer straight from the SITE DOCUMENTS snapshot section
+        const sec = /SITE DOCUMENTS \(([\s\S]*?)(?:\n\n|$)/.exec(system)?.[1] ?? '';
+        const header = /uploaded files per site — (\d+) file\(s\) across (\d+) site\(s\)/.exec(system);
+        const lines = system.split('\n').filter((l) => l.startsWith('- ') && /(?:time-card|timesheet) \d{4}-\d{2}/.test(l));
+        reply = [
+          `MOCK DB ANSWER: the snapshot's SITE DOCUMENTS section says ${header ? header[1] + ' file(s) across ' + header[2] + ' site(s)' : 'nothing'}:`,
+          '',
+          '| Site | Files |',
+          '|---|---|',
+          ...lines.map((l) => '| ' + l.replace(/^- /, '').split(': ')[0] + ' | ' + (l.split(': ')[1] ?? '') + ' |'),
+        ].join('\n');
       } else if (/news|weather|current affair/i.test(lastUser)) {
         reply = '[[WEB: latest UAE business news]]';
       } else if (/how many employees are (in the directory|on the roster)/i.test(lastUser)) {

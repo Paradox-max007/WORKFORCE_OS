@@ -77,6 +77,7 @@ const SCOPE_LABELS: Record<string, string> = {
   fines: 'Fines',
   notifications: 'Notifications',
   deduction_settings: 'Deduction rule',
+  site_documents: 'Site documents (timesheets & time cards)',
 };
 
 /** Read an image file → a compact square-fitting PNG data URL (max 256px) —

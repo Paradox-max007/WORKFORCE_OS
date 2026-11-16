@@ -45,7 +45,9 @@ import { aiProxyHeaders } from '@/lib/ai/client';
 import {
   BOT_NAME, buildAiKnowledgeBase, buildAiSystemPrompt,
   formatAttendanceMonth, formatEmployeeDeepDive, formatSalarySheetPeriod,
+  formatSiteDocuments,
 } from '@/lib/ai/knowledge';
+import { listSiteDocs, monthsSince } from '@/lib/files/site-docs';
 import {
   parseAiQueryDirective, runAiQuery, type AiQuerySpec,
 } from '@/lib/ai/query-engine';
@@ -70,14 +72,16 @@ interface ChatBubble {
 
 /** One parsed [[LOOKUP]] directive (the model replies with exactly one). */
 interface LookupDirective {
-  kind: 'employees' | 'attendance' | 'salary';
+  kind: 'employees' | 'attendance' | 'salary' | 'site-docs';
   codes?: string[];
   month?: string; // YYYY-MM
+  siteName?: string; // free-text site name (site-docs)
 }
 
 const SUGGESTIONS = [
   'When was Hassan cancelled, and why?',
   "What's the amount paid as salary in October, and how much is pending?",
+  'Which sites have their timesheets and time cards uploaded?',
   'Who supervises which branch, and what permissions do the admins have?',
   "What's the latest business news in the UAE?",
 ];
@@ -87,6 +91,9 @@ const SUGGESTIONS = [
  *  for the directive alone. */
 function parseLookupDirective(reply: string): LookupDirective | null {
   const text = reply.trim();
+  // site names contain spaces — this form needs its own, looser value match
+  const siteDocs = /^\[\[LOOKUP\]\]\s*site-docs\s*=\s*(.+?)\s*$/i.exec(text);
+  if (siteDocs) return { kind: 'site-docs', siteName: siteDocs[1] };
   const m = /^\[\[LOOKUP\]\]\s*(\w+)=([\w,\-]+)\s*$/i.exec(text);
   if (!m) return null;
   const [, kindRaw, value] = m;
@@ -397,6 +404,19 @@ export function AiChatWidget() {
       const matched = [...active, ...cancelled].filter((e) => wanted.has(e.employee_code.toUpperCase()));
       return `DATABASE LOOKUP RESULT — full records of ${matched.length} employee(s):\n${formatEmployeeDeepDive(matched)}`;
     }
+    if (dir.kind === 'site-docs') {
+      // a site's FULL uploaded-document history (every month since it started)
+      const sites = await dataApi.listSites();
+      const needle = (dir.siteName ?? '').trim().toLowerCase();
+      const site = sites.find((s) => s.name.toLowerCase() === needle)
+        ?? sites.find((s) => s.name.toLowerCase().includes(needle));
+      if (!site) {
+        return `DATABASE LOOKUP ERROR — no site named "${dir.siteName}" exists. The snapshot's SITES section lists every site; pick the exact name and re-run the [[LOOKUP]].`;
+      }
+      const months = monthsSince(site.created_at);
+      const docs = await listSiteDocs(site.id, months).catch(() => []);
+      return `DATABASE LOOKUP RESULT:\n${formatSiteDocuments(site.name, docs)}`;
+    }
     const month = dir.month ?? '';
     if (dir.kind === 'attendance') {
       const [records, active, cancelled] = await Promise.all([
@@ -580,7 +600,8 @@ export function AiChatWidget() {
                     <p className="text-sm font-semibold">Hi, I&apos;m {BOT_NAME} — Smart Assistant</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       I search the whole {settings.project_name} database on every question — employees,
-                      attendance, payroll, advances, cancellations, admin permissions and more — and
+                      attendance, payroll, advances, cancellations, admin permissions, site documents
+                      (timesheets &amp; time cards) and more — and
                       I can run complex queries on any table. Multi-record answers render as scrollable
                       tables. For anything else, I research the web.
                     </p>

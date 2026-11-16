@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="/node_modules/jspreadsheet-ce/dist/jspreadsheet.css">
+  <script src="/node_modules/jsuites/dist/jsuites.js"></script>
+  <script src="/node_modules/jspreadsheet-ce/dist/index.js"></script>
+</head>
+<body>
+  <div id="host"></div>
+  <pre id="out" style="white-space:pre-wrap"></pre>
+  <script>
+    window.runTest = () => {
+      const host = document.getElementById('host');
+      const out = document.getElementById('out');
+      const lines = [];
+      const log = (...a) => lines.push(a.join(' '));
+
+      // ==== 1) grid init like the editor builds it (reload path) ====
+      const inst = jspreadsheet(host, {
+        root: host,
+        data: [['h1', 'h2'], [1, 2], [3, 4]],
+        minDimensions: [8, 20],
+        columns: Array.from({ length: 8 }, () => ({ align: 'left' })),
+        // what fromExcelSheet/cssOfExcel produces for a bordered cell A1
+        style: { A1: 'background-color:#FFFF00;border-top:1px solid #000000;border-left:1px solid #000000;border-right:1px solid #000000;border-bottom:1px solid #000000' },
+        tableOverflow: true,
+        about: false,
+      });
+
+      log('--- after init with style option ---');
+      const a1Attr = inst.records[0][0].getAttribute('style');
+      log('A1 style attr:', JSON.stringify(a1Attr));
+      log('A1 borderTop computed:', getComputedStyle(inst.records[0][0]).borderTopWidth, getComputedStyle(inst.records[0][0]).borderTopStyle);
+
+      // ==== 2) toolbar flow: applyBorders('all') on selection B2:C3 ====
+      // simulate selection via the internal API the grid itself uses
+      inst.updateSelectionFromCoords(1, 1, 2, 2); // B2..C3
+      const cells = inst.getHighlighted();
+      log('highlighted:', cells.length, 'cells');
+      const B = '1px solid #000000';
+      for (const s of ['top', 'right', 'bottom', 'left']) {
+        inst.setStyle(cells, 'border-' + s, B);
+      }
+      log('--- after toolbar applyBorders on B2:C3 ---');
+      const b2Attr = inst.records[1][1].getAttribute('style');
+      log('B2 style attr:', JSON.stringify(b2Attr));
+      log('B2 borderTop computed:', getComputedStyle(inst.records[1][1]).borderTopWidth, getComputedStyle(inst.records[1][1]).borderTopStyle);
+
+      // ==== 3) captureSnapshot flow: getStyle() ====
+      const styleMap = inst.getStyle();
+      log('--- getStyle() map (only non-empty) ---');
+      for (const [k, v] of Object.entries(styleMap)) log(' ', k, '=>', JSON.stringify(v));
+
+      return lines.join('\n');
+    };
+  </script>
+</body>
+</html>

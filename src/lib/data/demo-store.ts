@@ -318,7 +318,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 15,
+    version: 16,
     profiles: [],
     sites: [],
     camps: [],
@@ -718,7 +718,7 @@ function seedDB(): DemoDB {
     },
   ];
 
-  // ---- cancellation request ------------------------------------------------------
+  // ---- cancellation requests ------------------------------------------------------
   db.cancellationRequests = [
     {
       id: uid(), employee_id: emp('Omar Farooq').id, reason: 'Project headcount reduction requested by client.',
@@ -726,6 +726,60 @@ function seedDB(): DemoDB {
       is_hidden: false, created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
     },
   ];
+
+  // ---- cancelled employee (archived-workforce showcase) ----------------------------
+  // Ahmed Hassan was demobilized at the end of the Red Coast Tower snagging
+  // phase: an APPROVED cancellation request (raised by Ravi Kumar, reviewed by
+  // Amira Sultan) cancelled him 10 days ago — status 'cancelled', site cleared,
+  // a site-transfer log keeps his past hours attributed to Red Coast Tower,
+  // and every record (attendance, salary, uniforms…) stays readable in the
+  // Cancelled filter. This also gives Pebby a real cancellation date to answer
+  // "when was Hassan cancelled?" (reviewed_at of the approved request).
+  const hassan = emp('Ahmed Hassan');
+  hassan.status = 'cancelled';
+  hassan.current_site_id = null;
+  db.cancellationRequests.unshift({
+    id: uid(), employee_id: hassan.id,
+    reason: 'Project demobilization — end of snagging phase, visa cancellation required.',
+    status: 'approved',
+    requested_by: raviP.id, reviewed_by: superP.id,
+    reviewed_at: new Date(Date.now() - 10 * 86400000).toISOString(),
+    is_hidden: false,
+    created_at: new Date(Date.now() - 12 * 86400000).toISOString(),
+  });
+  db.siteTransfers.push({
+    id: uid(), employee_id: hassan.id,
+    from_site_id: redCoast.id, to_site_id: null,
+    effective_date: addDaysStr(toYMD(today), -10),
+    created_at: new Date(Date.now() - 10 * 86400000).toISOString(),
+  });
+
+  // ---- advance ledger (Advance Book showcase) ---------------------------------------
+  // A small ledger: one OVERDUE advance (the cut month already passed without
+  // the salary being paid), one due next month, and one born from a time-card
+  // carryover — gives the Advance Book page and Pebby's advance_book queries
+  // real rows to work with.
+  const mkAdv = (
+    name: string, amount: number, givenDaysAgo: number,
+    cut: { y: number; m: number }, note: string | null, fromTimeCard = false,
+  ): void => {
+    const e = emp(name);
+    db.advanceRecords.push({
+      id: uid(), employee_id: e.id, amount,
+      given_date: addDaysStr(toYMD(today), -givenDaysAgo),
+      cut_year: cut.y, cut_month: cut.m,
+      applied_amount: 0, note,
+      source_period_id: fromTimeCard ? uid() : null,
+      created_by: superP.id,
+      created_at: new Date(Date.now() - givenDaysAgo * 86400000).toISOString(),
+      updated_at: new Date(Date.now() - givenDaysAgo * 86400000).toISOString(),
+    });
+  };
+  const prevM = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  const nextM = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+  mkAdv('Rajesh Kumar', 800, 40, { y: prevM.getFullYear(), m: prevM.getMonth() + 1 }, 'Family emergency — flight tickets');
+  mkAdv('Suresh Patel', 1500, 25, { y: nextM.getFullYear(), m: nextM.getMonth() + 1 }, 'School fees advance');
+  mkAdv('John Mwangi', 640, 12, { y: today.getFullYear(), m: today.getMonth() + 1 }, 'Time-card carryover (Marina Bay weekend work)', true);
 
   // ---- warnings + fines -----------------------------------------------------------
   db.warnings = [
@@ -815,7 +869,7 @@ function seedDB(): DemoDB {
 // Persistence + cross-tab realtime sync
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'pulse_demo_db_v7';
+const STORAGE_KEY = 'pulse_demo_db_v8';
 const SESSION_KEY = 'pulse_demo_session';
 const CHANNEL = 'pulse-demo-realtime';
 
@@ -843,7 +897,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 15) {
+      if (parsed.version === 16) {
         // heal fields added after this DB was seeded (no version bump → no
         // reseed, existing demo data stays)
         if (!parsed.deductionSettings) {

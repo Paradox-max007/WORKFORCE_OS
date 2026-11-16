@@ -13,9 +13,17 @@
 //     (see src/lib/ai/knowledge.ts) — a real database search per message
 //   • when Pebby needs deeper records it replies with a [[LOOKUP]]
 //     directive; the widget fetches the rows (full employee documents,
-//     other attendance / salary months) and re-asks — up to 2 hops
+//     other attendance / salary months) and re-asks
+//   • complex questions run through the [[QUERY]] engine (src/lib/ai/
+//     query-engine.ts): the model asks for filtered / sorted / grouped /
+//     aggregated views of ANY table — employees, cancellation requests,
+//     advances, trade rates, past months… — the widget executes the query
+//     and re-asks, so Pebby answers questions like "when was Hassan
+//     cancelled" with the exact reviewed_at timestamp
+//   • up to 3 directive rounds per question (LOOKUP + QUERY combined), so
+//     Pebby can chain queries across tables before answering
 //   • off-topic questions are routed by the /api/ai proxy: it sees the
-//     [[WEB: query]] directive, researches the web (DuckDuckGo + Wikipedia)
+//     [[WEB: query]] directive, researches the web (news RSS + Wikipedia)
 //     and re-asks the provider, so Pebby answers current affairs too
 //   • the connection (base URL + key + model) comes from Site Settings —
 //     demo mode supplies the key from the local demo store, Supabase mode
@@ -35,6 +43,9 @@ import {
   BOT_NAME, buildAiKnowledgeBase, buildAiSystemPrompt,
   formatAttendanceMonth, formatEmployeeDeepDive, formatSalarySheetPeriod,
 } from '@/lib/ai/knowledge';
+import {
+  parseAiQueryDirective, runAiQuery, type AiQuerySpec,
+} from '@/lib/ai/query-engine';
 import type { Attendance, EmployeeVM, SalarySheetReport } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -45,8 +56,9 @@ import { cn } from '@/lib/utils';
  *  proxy caps the whole conversation at 40 messages incl. the system prompt) */
 const MAX_HISTORY = 24;
 
-/** max [[LOOKUP]] rounds per question — enough for any follow-up data */
-const MAX_LOOKUP_HOPS = 2;
+/** max [[LOOKUP]] / [[QUERY]] rounds per question — enough to chain across
+ *  tables (name → code → records → aggregate) */
+const MAX_LOOKUP_HOPS = 3;
 
 interface ChatBubble {
   role: 'user' | 'assistant';
@@ -61,8 +73,9 @@ interface LookupDirective {
 }
 
 const SUGGESTIONS = [
+  'When was Hassan cancelled, and why?',
   "What's the nationality and emp code of Mohd Rafiq?",
-  'Who was absent the most this month?',
+  'Show overdue advances sorted by amount',
   "What's the latest business news in the UAE?",
 ];
 
@@ -82,6 +95,16 @@ function parseLookupDirective(reply: string): LookupDirective | null {
     return /^\d{4}-\d{2}$/.test(value) ? { kind, month: value } : null;
   }
   return null;
+}
+
+/** The final answer must never leak a raw directive to the user. A reply made
+ *  of directive lines only (hops exhausted) becomes a graceful fallback;
+ *  otherwise stray directive tokens are stripped in place. */
+function cleanFinalReply(reply: string): string {
+  const lines = reply.split('\n').map((l) => l.trim()).filter(Boolean);
+  const isDirectiveLine = (l: string): boolean => /^\[\[\s*(QUERY|LOOKUP|WEB)\b/i.test(l);
+  if (lines.length > 0 && lines.every(isDirectiveLine)) return '';
+  return reply.replace(/\[\[\s*(?:QUERY|LOOKUP|WEB)\s*:?[^\]]*\]\]/gi, '').trim();
 }
 
 /** Light inline markdown: **bold** and `code` spans (React escapes the rest). */
@@ -194,6 +217,12 @@ export function AiChatWidget() {
     return `DATABASE LOOKUP RESULT:\n${formatSalarySheetPeriod(year, mon, report)}`;
   };
 
+  /** Execute a [[QUERY]] directive (or feed its parse error back). */
+  const runQueryRound = async (parsed: { spec: AiQuerySpec } | { error: string }): Promise<string> => {
+    if ('spec' in parsed) return runAiQuery(parsed.spec);
+    return `DATABASE QUERY ERROR — ${parsed.error}`;
+  };
+
   const send = async (raw?: string) => {
     const text = (raw ?? input).trim();
     if (!text || sending || preparing || digging) return;
@@ -249,24 +278,36 @@ export function AiChatWidget() {
         }
         reply = json.reply;
 
-        const directive = parseLookupDirective(reply);
-        if (!directive || hop === MAX_LOOKUP_HOPS) break;
+        // directives the model uses to pull more data before answering
+        const queryParsed = parseAiQueryDirective(reply);
+        const lookup = parseLookupDirective(reply);
+        const needsRound = (queryParsed !== null || lookup !== null) && hop < MAX_LOOKUP_HOPS;
+        if (!needsRound) break;
 
-        // fetch the requested rows and ask again with the result appended
+        // fetch the requested data (query result / lookup rows / parse
+        // error) and ask again with it appended
         setDigging(true);
         try {
-          const context = await runLookup(directive);
+          const context = queryParsed !== null
+            ? await runQueryRound(queryParsed)
+            : await runLookup(lookup as LookupDirective);
+          const guidance = queryParsed !== null
+            ? "system-provided query result — now answer the user's question with this data; if it is a QUERY ERROR, re-run a corrected [[QUERY]]; do not print any directive in the final answer"
+            : "system-provided lookup result — now answer the user's question with this data; do not print any directive";
           thread = [
             ...thread,
             { role: 'assistant', content: reply },
-            { role: 'user', content: `${context}\n\n( system-provided lookup result — now answer the user's question with this data; do not print any directive )` },
+            { role: 'user', content: `${context}\n\n( ${guidance} )` },
           ];
         } finally {
           setDigging(false);
         }
       }
 
-      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+      // the visible answer must never leak a raw directive
+      const finalText = cleanFinalReply(reply) ||
+        'I pulled the records but hit my data-retrieval limit for this question — please ask again or narrow it down (e.g. ask for a specific employee or month).';
+      setMessages((m) => [...m, { role: 'assistant', content: finalText }]);
     } catch (e) {
       // roll the optimistic bubble back and hand the text back for editing
       setMessages((m) => (m[m.length - 1] === bubble ? m.slice(0, -1) : m));
@@ -333,7 +374,8 @@ export function AiChatWidget() {
                     <p className="text-sm font-semibold">Hi, I&apos;m {BOT_NAME} — Smart Assistant</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       I search the whole {settings.project_name} database on every question — employees,
-                      attendance, payroll, advances and more. For anything else, I research the web.
+                      attendance, payroll, advances, cancellations and more — and I can run complex
+                      queries on any table. For anything else, I research the web.
                     </p>
                   </div>
                   <div className="mt-1 flex w-full flex-col gap-1.5">

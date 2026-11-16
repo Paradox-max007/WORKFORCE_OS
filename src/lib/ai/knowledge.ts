@@ -9,20 +9,22 @@
 //   • buildAiKnowledgeBase()  — fetches every readable entity of the system
 //   • buildAiSystemPrompt()   — identity + app guide + a COMPACT, COMPLETE
 //                               text snapshot (employee directory never
-//                               dropped) + the answer protocol below
+//                               dropped, every request carries its dates) +
+//                               the table dictionary + answer protocol below
 //   • formatEmployeeDeepDive / formatAttendanceMonth / formatSalarySheetPeriod
-//                             — on-demand deep records. When the model needs
-//                               data the snapshot omits (passport/ID details,
-//                               other attendance/salary months) it replies
-//                               with a [[LOOKUP]] directive; the widget fetches
-//                               the rows with these formatters and re-asks.
+//                             — on-demand deep records for [[LOOKUP]] rounds
+//   • complex querying       — the [[QUERY]] directive (query-engine.ts) lets
+//                               Pebby filter / sort / group / aggregate EVERY
+//                               table of the database on demand; the widget
+//                               runs the query and re-asks (up to 3 hops)
 //   • off-topic questions     — the model replies with a [[WEB: query]]
 //                               directive; the /api/ai proxy researches the
-//                               web (DuckDuckGo + Wikipedia) and re-asks, so
+//                               web (news RSS + Wikipedia) and re-asks, so
 //                               Pebby can answer current-affairs questions too.
 // ============================================================================
 
 import { dataApi } from '@/lib/data';
+import { queryableTablesDoc } from '@/lib/ai/query-engine';
 import type {
   Attendance, EmployeeVM, LeaveRequestVM, Notification, SalarySheetReport,
   SiteSettings, UniformEntry, WarningVM, FineVM, CancellationRequestVM,
@@ -45,7 +47,7 @@ export const AI_APP_GUIDE = `PULSE Workforce OS — workforce & payroll manageme
 
 MODULES
 - Dashboard: branch-scoped overview (employees, present/absent, monthly attendance, site breakdown).
-- Employees: full directory (name, code, nationality, position, trade, company, passport/ID status, camp, site, rating, team-leader flags). Deletion goes through Cancellation Requests — an APPROVED request CANCELS the employee (status 'cancelled'): they leave every working list but keep ALL records; super admins can restore them (status 'active') from the Cancelled filter.
+- Employees: full directory (name, code, nationality, position, trade, company, passport/ID status, camp, site, rating, team-leader flags). Deletion goes through Cancellation Requests — an APPROVED request CANCELS the employee (status 'cancelled'): they leave every working list but keep ALL records; super admins can restore them (status 'active') from the Cancelled filter. Every request stores exact timestamps: requested_at (who raised it, when) and reviewed_at (who approved/rejected it, when) — reviewed_at of an APPROVED request IS the employee's cancellation date.
 - Cancelled employees: archived workforce (Employees page → status filter "Cancelled"). Their attendance, salary history, advances, uniforms, warnings and fines remain readable everywhere for future reference.
 - Branches: regional groups owning sites; admins are granted branches (or direct site access).
 - Sites: work sites (client, project, supervisor, team leader, live status); printable A4 Daily Attendance paper per site.
@@ -75,6 +77,12 @@ PAYROLL RULES
 // Knowledge base fetch — every readable entity (same keys as before so the
 // Site Settings scope grid keeps working)
 // ---------------------------------------------------------------------------
+// NOTE: request dates. Every request table carries exact timestamps:
+//   cancellation_requests.requested_at (raised) / reviewed_at (decision —
+//   for an APPROVED request reviewed_at IS the employee's cancellation date)
+//   leave_requests.requested_at / reviewed_at
+// They are serialized into the snapshot below and are also queryable via
+// the [[QUERY]] engine (src/lib/ai/query-engine.ts).
 
 export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
   const now = new Date();
@@ -171,6 +179,12 @@ const dayOf = (date: string): string => date.slice(8, 10); // YYYY-MM-DD → DD
 function fmtDateShort(iso: string | null | undefined): string {
   if (!iso) return '—';
   return iso.slice(0, 10);
+}
+
+/** ISO datetime → "YYYY-MM-DD HH:MM" (the precision "when" questions need). */
+function fmtDateTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  return iso.length >= 16 ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}` : iso.slice(0, 10);
 }
 
 /** One employee → one compact directory line (the fields people ask about). */
@@ -332,9 +346,15 @@ function buildSnapshotText(d: SnapshotInput): string {
   sections.push(dir);
 
   if (d.cancelledEmployees.length > 0) {
+    // join with APPROVED cancellation requests so the directory line itself
+    // answers "when was X cancelled" without any extra round-trip
+    const cancelledOn = new Map<string, string>();
+    for (const c of d.cancellationRequests) {
+      if (c.status === 'approved' && c.reviewed_at) cancelledOn.set(c.employee_code, fmtDateTime(c.reviewed_at));
+    }
     sections.push([
       `CANCELLED EMPLOYEES (${d.cancelledEmployees.length} — records kept for reference)`,
-      ...d.cancelledEmployees.map((e) => employeeLine(e)),
+      ...d.cancelledEmployees.map((e) => employeeLine(e, cancelledOn.has(e.employee_code) ? ` · cancelled ${cancelledOn.get(e.employee_code)}` : '')),
     ].join('\n'));
   }
 
@@ -352,12 +372,14 @@ function buildSnapshotText(d: SnapshotInput): string {
 
   sections.push([
     `LEAVE REQUESTS (${d.leaveRequests.length})`,
-    ...d.leaveRequests.map((l) => `- ${l.employee_name} (${l.employee_code}) · ${l.other_type_text || l.leave_type} · ${l.start_date}→${l.end_date} (${l.total_days}d) · ${l.status}${l.reviewed_by_name ? ` by ${l.reviewed_by_name}` : ''}${l.reason ? ` · "${l.reason}"` : ''}`),
+    ...d.leaveRequests.map((l) => `- ${l.employee_name} (${l.employee_code}) · ${l.other_type_text || l.leave_type} · ${l.start_date}→${l.end_date} (${l.total_days}d) · ${l.status} · requested ${fmtDateTime(l.created_at)}${l.reviewed_at ? ` · reviewed ${fmtDateTime(l.reviewed_at)}${l.reviewed_by_name ? ` by ${l.reviewed_by_name}` : ''}` : ''}${l.reason ? ` · "${l.reason}"` : ''}`),
   ].join('\n'));
 
+  // dates included by design: "when was X cancelled" = reviewed_at of the
+  // APPROVED request (requested_at = when it was raised)
   sections.push([
     `CANCELLATION REQUESTS (${d.cancellationRequests.length})`,
-    ...d.cancellationRequests.map((c) => `- ${c.employee_name} (${c.employee_code}) · ${c.status}${c.requested_by_name ? ` · requested by ${c.requested_by_name}` : ''}${c.reviewed_by_name ? ` · reviewed by ${c.reviewed_by_name}` : ''}${c.reason ? ` · "${c.reason}"` : ''}`),
+    ...d.cancellationRequests.map((c) => `- ${c.employee_name} (${c.employee_code}) · ${c.status} · requested ${fmtDateTime(c.created_at)}${c.requested_by_name ? ` by ${c.requested_by_name}` : ''}${c.reviewed_at ? ` · reviewed ${fmtDateTime(c.reviewed_at)}${c.reviewed_by_name ? ` by ${c.reviewed_by_name}` : ''}` : ''}${c.reason ? ` · "${c.reason}"` : ''}`),
   ].join('\n'));
 
   sections.push([
@@ -370,17 +392,17 @@ function buildSnapshotText(d: SnapshotInput): string {
 
   sections.push([
     `WARNINGS (${d.warnings.length})`,
-    ...d.warnings.map((w) => `- ${w.employee_name} (${w.employee_code}) · ${w.is_auto_generated ? 'auto' : 'manual'} · "${w.reason}" · by ${w.issued_by_name || '—'}`),
+    ...d.warnings.map((w) => `- ${w.employee_name} (${w.employee_code}) · ${w.is_auto_generated ? 'auto' : 'manual'} · "${w.reason}" · by ${w.issued_by_name || '—'} · ${fmtDateTime(w.created_at)}`),
   ].join('\n'));
 
   sections.push([
     `FINES (${d.fines.length})`,
-    ...d.fines.map((f) => `- ${f.employee_name} (${f.employee_code}) · AED ${f.amount} · "${f.reason}" · by ${f.issued_by_name || '—'}`),
+    ...d.fines.map((f) => `- ${f.employee_name} (${f.employee_code}) · AED ${f.amount} · "${f.reason}" · by ${f.issued_by_name || '—'} · ${fmtDateTime(f.created_at)}`),
   ].join('\n'));
 
   sections.push([
     `NOTIFICATIONS (${d.notifications.length} — latest 30)`,
-    ...d.notifications.slice(-30).reverse().map((n) => `- [${n.type}] ${n.title} — ${n.message} · ${n.read ? 'read' : 'unread'}`),
+    ...d.notifications.slice(-30).reverse().map((n) => `- [${n.type}] ${n.title} — ${n.message} · ${n.read ? 'read' : 'unread'} · ${fmtDateTime(n.created_at)}`),
   ].join('\n'));
 
   sections.push(formatAttendanceMonth(d.attendance.month, d.attendance.records, [...d.employees, ...d.cancelledEmployees]));
@@ -437,7 +459,7 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
 
   return [
     `You are Pebby — the Smart Assistant built into "${settings.project_name}" (${settings.company_name}), a workforce & payroll operations app. When you refer to yourself, use the name Pebby.`,
-    'You know the ENTIRE application — every module, rule and record — and the database snapshot below is refreshed before EVERY question, so treat it as current.',
+    'You know the ENTIRE application — every module, rule and record — and the database snapshot below is refreshed before EVERY question, so treat it as current. You are a senior workforce-operations analyst: reason across tables, compute precisely, and always cite names with employee codes.',
     '',
     '=== APPLICATION GUIDE ===',
     AI_APP_GUIDE,
@@ -445,17 +467,20 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     `=== LIVE DATABASE SNAPSHOT (text, currency AED, generated ${kb.generated_at}) ===`,
     snapshot,
     '',
+    '=== DATABASE QUERY ENGINE — complex querying on EVERY table ===',
+    queryableTablesDoc(),
+    '',
     '=== ANSWER PROTOCOL ===',
-    '1. App/workforce/payroll questions: SEARCH the snapshot carefully — match names, employee codes (PUL-YYYY-NNN), sites, dates — then answer precisely; compute sums, counts and averages when asked. Never say data "was omitted": the employee directory above is complete.',
-    `2. Deeper records on demand: the snapshot omits per-employee document/personal fields (passport & ID numbers/status, date of birth, email, home address, emergency contact) and attendance/salary months OTHER than the current one. If — and only if — the answer needs them, reply with EXACTLY one directive line and nothing else:`,
+    '1. App/workforce/payroll questions: SEARCH the snapshot carefully first — match names, employee codes (e.g. PUL-2026-NNN), sites, dates — then answer precisely; compute sums, counts and averages when asked. The snapshot carries every request\'s timestamps (requested_at / reviewed_at): e.g. "when was X cancelled" = the reviewed_at of X\'s APPROVED cancellation request, and the CANCELLED EMPLOYEES directory line already carries it.',
+    '2. [[QUERY]] — when the snapshot omits the detail you need (exact timestamps of a specific row, other months, filtered / sorted / aggregated / cross-table views), reply with EXACTLY one directive line (see the query engine section for syntax and examples). The system executes it and asks you again — then answer. You may chain up to 3 query rounds (e.g. resolve a name to a code, then pull that employee\'s records from another table, then aggregate).',
+    '3. [[LOOKUP]] — pre-formatted deep records, same one-line style, when you need: full employee documents (passport & ID numbers/status, date of birth, email, home address, emergency contact), a whole attendance month, or a whole salary-sheet month:',
     '   [[LOOKUP]] employees=PUL-2026-015,PUL-2026-003',
     '   [[LOOKUP]] attendance=2026-10',
     '   [[LOOKUP]] salary=2026-09',
-    '   The system fetches the data and asks you again — then answer the user normally.',
-    '3. Anything UNRELATED to this app (news, weather, sports, general knowledge, current affairs): reply with EXACTLY one directive line and nothing else:',
+    '4. Anything UNRELATED to this app (news, weather, sports, general knowledge, current affairs): reply with EXACTLY one directive line and nothing else:',
     '   [[WEB: short search query]]',
     '   The system researches the web and asks you again — then answer the user using the results.',
-    '4. Never invent data. If the snapshot (plus any lookup) cannot answer, say so plainly and point to the right module of the app.',
-    '5. Keep answers concise and well formatted: short paragraphs, compact lists, amounts in AED. Mention employee codes with names so answers are verifiable.',
+    '5. Never invent data. If the snapshot (plus queries/lookups) cannot answer, say so plainly and point to the right module of the app.',
+    '6. Keep answers concise and well formatted: short paragraphs, compact lists, amounts in AED, dates as YYYY-MM-DD. Mention employee codes with names so answers are verifiable. When a question involves a date, state the exact date (and time when useful) from the record.',
   ].join('\n');
 }

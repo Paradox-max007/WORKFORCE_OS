@@ -52,7 +52,7 @@ agent-browser find role button click --name "Site Settings"
 agent-browser wait 1000
 agent-browser find role switch click --name "Enable the AI assistant"
 agent-browser wait 1200
-agent-browser eval "(() => ({ fabGone: !document.querySelector('button[aria-label=\"Open the AI assistant\"]') && !document.querySelector('button[aria-label=\"Collapse the AI assistant\"]'), enabled: JSON.parse(localStorage.getItem('pulse_demo_db_v7')).siteSettings.ai_enabled }))()"
+agent-browser eval "(() => ({ fabGone: !document.querySelector('button[aria-label=\"Open the AI assistant\"]') && !document.querySelector('button[aria-label=\"Collapse the AI assistant\"]'), enabled: JSON.parse(localStorage.getItem('pulse_demo_db_v8')).siteSettings.ai_enabled }))()"
 
 echo; echo "### STEP 8: re-enable for the final look + browser console errors"
 agent-browser find role switch click --name "Enable the AI assistant"

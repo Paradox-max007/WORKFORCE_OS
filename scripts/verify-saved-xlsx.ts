@@ -1,0 +1,14 @@
+import * as XLSX from 'xlsx';
+import { readFileSync } from 'fs';
+const wb = XLSX.read(readFileSync('/tmp/saved-timesheet.xlsx'), { type: 'buffer' });
+console.log('sheets:', wb.SheetNames);
+const ws = wb.Sheets['November'];
+const a1 = ws['A1']; const a3 = ws['A3']; const c1 = ws['C1']; const d1 = ws['D1'];
+console.log('A1:', JSON.stringify(a1));
+console.log('A3:', JSON.stringify(a3));
+console.log('C1:', JSON.stringify(c1));
+console.log('D1:', JSON.stringify(d1));
+console.log('!cols:', JSON.stringify(ws['!cols']?.slice(0,3)));
+console.log('!merges:', JSON.stringify(ws['!merges']));
+const ws2 = wb.Sheets['Notes'];
+console.log('Notes A1:', JSON.stringify(ws2['A1']));

@@ -31,6 +31,7 @@ import { PayrollPage } from '@/components/payroll/payroll-page';
 import { SalarySheetPage } from '@/components/salary-sheet/salary-sheet-page';
 import { SiteSettingsPage } from '@/components/settings/site-settings-page';
 import { SitesPage } from '@/components/sites/sites-page';
+import { SiteTimesheetsPage } from '@/components/sites/site-timesheets-page';
 import { TradePage } from '@/components/trades/trade-page';
 import { UniformRegistryPage } from '@/components/uniform-registry/uniform-registry-page';
 import { WorkingHoursPage } from '@/components/working-hours/working-hours-page';
@@ -96,6 +97,7 @@ function MainLayout() {
     notifications: <NotificationPage />,
     admins: <AdminPage />,
     site_settings: <SiteSettingsPage />,
+    site_timesheets: <SiteTimesheetsPage />,
   };
 
   return (

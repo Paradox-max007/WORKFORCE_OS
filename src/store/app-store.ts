@@ -29,7 +29,8 @@ export type AppView =
   | 'cancellation_requests'
   | 'notifications'
   | 'admins'
-  | 'site_settings';
+  | 'site_settings'
+  | 'site_timesheets';
 
 export const VIEW_TITLES: Record<AppView, string> = {
   dashboard: 'Dashboard',
@@ -54,6 +55,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   notifications: 'Notifications Hub',
   admins: 'Admin Management',
   site_settings: 'Site Settings',
+  site_timesheets: 'Site Timesheets / Time Cards',
 };
 
 interface AppStore {
@@ -110,6 +112,9 @@ interface AppStore {
     /** true → focus the record(s) born from a time-card carryover */
     timeCard?: boolean;
   } | null;
+  /** Site whose Timesheets / Time Cards page is open (deep link from the
+   *  Sites page "Timesheet / Time Cards" button on each site card). */
+  selectedSiteId: string | null;
   navigateTo: (view: AppView) => void;
   navigateToNotifications: (tab?: 'requests' | 'warnings' | 'fines') => void;
   navigateToEmployees: (filter?: string) => void;
@@ -145,6 +150,9 @@ interface AppStore {
     employeeName: string;
     timeCard?: boolean;
   }) => void;
+  /** Site Timesheets / Time Cards page — opens the monthly document archive
+   *  of one site (time card PDF + timesheet XLSX/PDF per month). */
+  navigateToSiteTimesheets: (siteId: string) => void;
   setSidebarOpen: (open: boolean) => void;
   consumeEmployeeFilter: () => string;
 }
@@ -167,6 +175,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setSalaryPeriodBranch: (branchId) => set({ salaryPeriodBranchId: branchId }),
   notificationsTab: 'requests' as const,
   advanceBookFocus: null,
+  selectedSiteId: null,
   navigateTo: (view) => set(
     // plain sidebar navigation to the hub always opens the default Requests
     // tab — only the deep links (navigateToNotifications) preselect a tab
@@ -192,6 +201,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ currentView: 'attendance_calendar', attendanceCalendar: { employee, year, month } }),
   navigateToAdvanceBook: (focus) =>
     set({ currentView: 'advance_book', advanceBookFocus: focus }),
+  navigateToSiteTimesheets: (siteId) =>
+    set({ currentView: 'site_timesheets', selectedSiteId: siteId }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   consumeEmployeeFilter: () => {
     const f = get().employeeFilter;

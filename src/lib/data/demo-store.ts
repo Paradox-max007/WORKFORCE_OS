@@ -319,7 +319,7 @@ const seededRand = (a: number, b: number): number => {
 
 function seedDB(): DemoDB {
   const db: DemoDB = {
-    version: 16,
+    version: 17,
     profiles: [],
     sites: [],
     camps: [],
@@ -405,14 +405,20 @@ function seedDB(): DemoDB {
   const mkSite = (
     name: string, client: string, project: string, supervisor: string | null = null,
     active = true, branchId: string | null = null,
+    startedMonthsAgo = 0,
   ): Site =>
     ({
       id: uid(), name, client_name: client, project_name: project, supervisor,
-      branch_id: branchId, is_active: active, created_at: nowISO(),
+      branch_id: branchId, is_active: active,
+      // sites started in the past → the Timesheets page shows a real month
+      // history from the very first month of the site
+      created_at: startedMonthsAgo > 0
+        ? new Date(Date.now() - startedMonthsAgo * 31 * 24 * 3600 * 1000).toISOString()
+        : nowISO(),
     });
-  const npc = mkSite('NPC – Umm Al Quwain', 'NPC', 'Warehouse Expansion', 'Ibrahim Khalil', true, northEmirates.id);
-  const redCoast = mkSite('Red Coast Compound', 'Red Coast Dev.', 'Villa Cluster B', 'Deepak Nair', true, dubaiCentral.id);
-  const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works', 'Carlos Reyes', true, dubaiCentral.id);
+  const npc = mkSite('NPC – Umm Al Quwain', 'NPC', 'Warehouse Expansion', 'Ibrahim Khalil', true, northEmirates.id, 10);
+  const redCoast = mkSite('Red Coast Compound', 'Red Coast Dev.', 'Villa Cluster B', 'Deepak Nair', true, dubaiCentral.id, 5);
+  const marina = mkSite('Marina Heights Tower', 'Marina Holdings', 'Facade Works', 'Carlos Reyes', true, dubaiCentral.id, 3);
   const depot = mkSite('Old Depot Project', 'NPC', 'Depot Refit', 'Deepak Nair', false, northEmirates.id);
   const oasis = mkSite('Oasis Mall Fitout', 'Oasis Group', 'Interior Fitout', null, true, null);
   db.sites = [npc, redCoast, marina, depot, oasis];
@@ -920,7 +926,7 @@ function loadDB(): DemoDB {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DemoDB;
-      if (parsed.version === 16) {
+      if (parsed.version === 17) {
         // heal fields added after this DB was seeded (no version bump → no
         // reseed, existing demo data stays)
         if (!parsed.deductionSettings) {

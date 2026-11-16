@@ -16,7 +16,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowLeft, Building2, ChevronDown, Crown, Download, Eye, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil,
+  ArrowLeft, Building2, ChevronDown, Crown, Download, Eye, FileClock, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil,
   Plus, Power, PowerOff, Printer, Search, Trash2, TriangleAlert, UserMinus,
   Users, X,
 } from 'lucide-react';
@@ -50,6 +50,7 @@ import { gridCellKeyDown, type GridNavConfig } from '@/lib/grid-nav';
 import { exportElementToPdf, printElement } from '@/lib/pdf';
 import { cn } from '@/lib/utils';
 import type { BranchWithCount, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useSettingsStore } from '@/store/settings-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -253,6 +254,7 @@ function AttLogo({ src }: { src?: string | null }) {
 export function SitesPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
+  const navigateToSiteTimesheets = useAppStore((s) => s.navigateToSiteTimesheets);
   const version = useRealtimeVersion(['site', 'employee', 'site_transfer', 'branch', 'admin_branch']);
 
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
@@ -474,6 +476,7 @@ export function SitesPage() {
       onDelete={setDeleteTarget}
       onViewEmployees={openEmployees}
       onAttendance={(s) => setAttendanceSiteId(s.id)}
+      onTimesheets={(s) => navigateToSiteTimesheets(s.id)}
     />
   );
 
@@ -913,7 +916,7 @@ export function SitesPage() {
 // Site card (grid tile)
 // ---------------------------------------------------------------------------
 function SiteCard({
-  site, index, branchName, canDelete, busy, onToggle, onEdit, onDelete, onViewEmployees, onAttendance,
+  site, index, branchName, canDelete, busy, onToggle, onEdit, onDelete, onViewEmployees, onAttendance, onTimesheets,
 }: {
   site: SiteWithCount;
   index: number;
@@ -925,6 +928,7 @@ function SiteCard({
   onDelete: (site: SiteWithCount) => void;
   onViewEmployees: (site: SiteWithCount) => void;
   onAttendance: (site: SiteWithCount) => void;
+  onTimesheets: (site: SiteWithCount) => void;
 }) {
   return (
     <motion.div
@@ -1053,23 +1057,34 @@ function SiteCard({
       </div>
 
       {/* main actions */}
-      <div className="mt-auto flex gap-2 border-t pt-4">
+      <div className="mt-auto space-y-2 border-t pt-4">
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            className="h-9 flex-1 gap-2 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+            onClick={() => onViewEmployees(site)}
+          >
+            <Eye size={15} /> View Employees
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="h-9 w-9 shrink-0 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+            onClick={() => onAttendance(site)}
+            title="Attendance sheet"
+            aria-label={`Open attendance sheet for ${site.name}`}
+          >
+            <FileSpreadsheet size={15} />
+          </Button>
+        </div>
         <Button
           variant="outline"
-          className="h-9 flex-1 gap-2 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
-          onClick={() => onViewEmployees(site)}
+          className="h-9 w-full gap-2 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
+          onClick={() => onTimesheets(site)}
+          title="Monthly time cards & timesheets"
+          aria-label={`Open timesheets and time cards for ${site.name}`}
         >
-          <Eye size={15} /> View Employees
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-9 w-9 shrink-0 hover:border-brand/40 hover:bg-brand/10 hover:text-brand"
-          onClick={() => onAttendance(site)}
-          title="Attendance sheet"
-          aria-label={`Open attendance sheet for ${site.name}`}
-        >
-          <FileSpreadsheet size={15} />
+          <FileClock size={15} /> Timesheet / Time Cards
         </Button>
       </div>
     </motion.div>

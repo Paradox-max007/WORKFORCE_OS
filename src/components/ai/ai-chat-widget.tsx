@@ -540,10 +540,10 @@ export function AiChatWidget() {
             exit={{ opacity: 0, y: 12, scale: 0.97 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             style={{ transformOrigin: 'bottom right' }}
-            className="fixed bottom-[5.75rem] right-5 z-50 flex h-[min(34rem,72dvh)] w-[min(24rem,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
+            className="fixed bottom-[5.75rem] right-5 z-50 flex h-[min(34rem,72dvh)] w-[min(24rem,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border border-border/70 bg-card/70 shadow-2xl shadow-black/25 backdrop-blur-2xl backdrop-saturate-150"
           >
             {/* header */}
-            <div className="flex items-center gap-3 border-b border-border bg-muted/40 px-4 py-3">
+            <div className="flex items-center gap-3 border-b border-border/70 bg-gradient-to-r from-brand/10 via-brand/5 to-transparent px-4 py-3 backdrop-blur-sm">
               <div className="relative flex size-9 shrink-0 items-center justify-center rounded-xl brand-gradient text-brand-foreground">
                 <Bot className="size-5" />
                 <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-card bg-emerald-500" />
@@ -570,7 +570,7 @@ export function AiChatWidget() {
             </div>
 
             {/* thread */}
-            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto bg-gradient-to-b from-brand/[0.06] to-brand/[0.02] px-4 py-4">
               {messages.length === 0 && !preparing ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-2 text-center">
                   <div className="flex size-12 items-center justify-center rounded-2xl brand-gradient text-brand-foreground shadow-lg">
@@ -608,7 +608,7 @@ export function AiChatWidget() {
                             ? 'max-w-[85%] whitespace-pre-wrap leading-relaxed brand-gradient rounded-br-md text-brand-foreground shadow-sm'
                             // assistant bubbles render markdown BLOCKS — wide or
                             // long tables scroll inside the bubble, not the page
-                            : 'max-w-[95%] rounded-bl-md bg-muted text-foreground',
+                            : 'max-w-[95%] rounded-bl-md border border-border/50 bg-card/80 text-foreground shadow-sm backdrop-blur-sm',
                         )}
                       >
                         {m.role === 'user'
@@ -619,7 +619,7 @@ export function AiChatWidget() {
                   ))}
                   {(preparing || digging || sending) && (
                     <div className="flex justify-start">
-                      <div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-muted px-3.5 py-2 text-[13px] text-muted-foreground">
+                      <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-border/50 bg-card/70 px-3.5 py-2 text-[13px] text-muted-foreground backdrop-blur-sm">
                         <Loader2 className="size-3.5 animate-spin" />
                         {preparing
                           ? 'Searching the database…'
@@ -638,7 +638,7 @@ export function AiChatWidget() {
 
             {/* composer — or a friendly pointer when the key is missing */}
             {!hasKey ? (
-              <div className="border-t border-border px-4 py-4 text-center">
+              <div className="border-t border-border/70 bg-card/50 px-4 py-4 text-center backdrop-blur-sm">
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   The AI connection has no API key yet.{' '}
                   {isSuperAdmin
@@ -658,7 +658,7 @@ export function AiChatWidget() {
                 )}
               </div>
             ) : (
-              <div className="border-t border-border p-3">
+              <div className="border-t border-border/70 bg-card/60 p-3 backdrop-blur-md">
                 {error && (
                   <p className="mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                     {error}
@@ -686,7 +686,7 @@ export function AiChatWidget() {
                     }}
                     rows={1}
                     placeholder="Ask about employees, payroll…"
-                    className="min-h-[2.5rem] flex-1 resize-none rounded-xl border border-border bg-background px-3 py-2 text-[13px] leading-snug outline-none placeholder:text-muted-foreground focus-visible:border-ring"
+                    className="min-h-[2.5rem] flex-1 resize-none rounded-xl border border-border/70 bg-background/75 px-3 py-2 text-[13px] leading-snug outline-none placeholder:text-muted-foreground focus-visible:border-ring"
                   />
                   <Button
                     type="submit" size="icon" aria-label="Send message"

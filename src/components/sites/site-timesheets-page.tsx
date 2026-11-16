@@ -21,11 +21,12 @@
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import { motion } from 'framer-motion';
 import {
   ArrowLeft, Briefcase, Building2, CalendarDays, Download, Eye, FileClock,
-  FileSpreadsheet, Loader2, Pencil, Trash2, TriangleAlert, Upload, Users,
+  FileSpreadsheet, Loader2, Pencil, Trash2, TriangleAlert, Upload, Users, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -40,6 +41,7 @@ import {
   monthsSince, siteDocUrl, TIME_CARD_ACCEPT, TIMESHEET_ACCEPT,
   uploadSiteDoc, type SiteDoc, type SiteDocKind,
 } from '@/lib/files/site-docs';
+import { useIsMobile } from '@/hooks/use-mobile';
 import type { SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { cn } from '@/lib/utils';
@@ -168,6 +170,12 @@ function DocSlot({
 export function SiteTimesheetsPage() {
   const siteId = useAppStore((s) => s.selectedSiteId);
   const navigateTo = useAppStore((s) => s.navigateTo);
+  const sidebarOpen = useAppStore((s) => s.sidebarOpen);
+  const isMobile = useIsMobile();
+
+  // the preview fills the whole screen EXCEPT the side menu (it matches the
+  // sidebar's animated width — 264px open / 76px collapsed, 0 on mobile)
+  const edge = { left: isMobile ? 0 : sidebarOpen ? 264 : 76 };
 
   const [site, setSite] = useState<SiteWithCount | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -419,23 +427,29 @@ export function SiteTimesheetsPage() {
         </div>
       )}
 
-      {/* ---- PDF preview ---- */}
-      {previewDoc && previewUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-label="Document preview">
-          <div className="flex h-full max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
+      {/* ---- PDF preview — full screen area next to the sidebar ---- */}
+      {previewDoc && previewUrl && createPortal(
+        <div
+          className="fixed inset-y-0 right-0 z-50 flex flex-col bg-background transition-[left] duration-300"
+          style={edge}
+          role="dialog"
+          aria-label="Document preview"
+        >
+          <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden border-l border-border bg-card">
             <div className="flex items-center gap-3 border-b border-border px-4 py-3">
               <FileClock className="size-5 shrink-0 text-brand" />
               <p className="min-w-0 flex-1 truncate text-sm font-semibold">{previewDoc.name}</p>
               <Button size="sm" className="h-8 gap-1.5" onClick={() => void download(previewDoc)}>
                 <Download className="size-4" /> Download
               </Button>
-              <Button variant="ghost" size="icon" className="size-8" aria-label="Close preview" onClick={() => { setPreviewDoc(null); setPreviewUrl(null); }}>
-                <ArrowLeft className="size-4 rotate-180" />
+              <Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label="Close preview" onClick={() => { setPreviewDoc(null); setPreviewUrl(null); }}>
+                <X className="size-4" />
               </Button>
             </div>
             <iframe src={previewUrl} title={previewDoc.name} className="min-h-0 flex-1 bg-white" />
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* ---- Excel editor ---- */}

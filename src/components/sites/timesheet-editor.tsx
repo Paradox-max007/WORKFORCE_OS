@@ -23,6 +23,7 @@
 // ============================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import type {
   Cell as XCell,
@@ -35,8 +36,11 @@ import jspreadsheet from 'jspreadsheet-ce';
 import 'jspreadsheet-ce/dist/jspreadsheet.css';
 import {
   AlignCenter,
+  AlignCenterVertical,
+  AlignEndVertical,
   AlignLeft,
   AlignRight,
+  AlignStartVertical,
   Baseline,
   Bold,
   Italic,
@@ -51,8 +55,10 @@ import {
   X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { uploadSiteDoc, type SiteDoc } from '@/lib/files/site-docs';
 import { cn } from '@/lib/utils';
+import { useAppStore } from '@/store/app-store';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -60,6 +66,24 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
  *  in the areas that are not shown; saving never touches what is hidden). */
 const MAX_ROWS = 3000;
 const MAX_COLS = 150;
+
+/** toolbar font families (Excel-friendly, present on Windows/macOS/web) */
+const FONT_FAMILIES = [
+  'Calibri', 'Arial', 'Helvetica', 'Times New Roman', 'Georgia',
+  'Courier New', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Impact', 'Comic Sans MS',
+];
+const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 36];
+
+const BORDER_MODES = [
+  { id: 'all', label: 'All borders' },
+  { id: 'outer', label: 'Outer borders' },
+  { id: 'top', label: 'Top border' },
+  { id: 'bottom', label: 'Bottom border' },
+  { id: 'left', label: 'Left border' },
+  { id: 'right', label: 'Right border' },
+  { id: 'none', label: 'No borders' },
+] as const;
+type BorderMode = (typeof BORDER_MODES)[number]['id'];
 
 // ---------------------------------------------------------------------------
 // Small helpers — cell names, units, colours
@@ -154,7 +178,9 @@ const NAMED_COLORS: Record<string, string> = {
   brown: 'A52A2A', beige: 'F5F5DC', ivory: 'FFFFF0',
 };
 
-/** rgb() / #hex / named css colour → 6-digit hex (null = none/transparent). */
+/** rgb() / #hex / named css colour → 6-digit hex (null = none/transparent).
+ *  NOTE: alpha-0 rgba() (how browsers serialise 'transparent') counts as
+ *  "no colour" — otherwise clearing a fill would round-trip as black. */
 function cssColorToHex(v: string | undefined): string | null {
   if (!v) return null;
   const s = v.trim().toLowerCase();
@@ -164,8 +190,10 @@ function cssColorToHex(v: string | undefined): string | null {
     if (h.length === 3 || h.length === 4) h = h.slice(0, 3).split('').map((c) => c + c).join('');
     return /^[0-9a-f]{6}$/.test(h) ? h.toUpperCase() : null;
   }
-  const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(s);
+  const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/.exec(s);
   if (m) {
+    // Excel fills have no alpha — anything (semi-)transparent is "no fill"
+    if (m[4] !== undefined && Number(m[4]) < 1) return null;
     const hex = [1, 2, 3].map((i) => Math.min(255, Number(m[i])).toString(16).padStart(2, '0')).join('');
     return hex.toUpperCase();
   }
@@ -260,14 +288,23 @@ function canonicalCss(css: string): string {
     if (k === 'display') continue; // grid-internal (merged hidden cells)
     if (k === 'background-color' || k === 'color') {
       const hex = cssColorToHex(v);
-      out[k] = hex ? `#${hex}` : v.toLowerCase();
+      // "no fill" / "automatic text" — drop the key so a cleared fill or
+      // colour never round-trips as black (or 'transparent'/'inherit')
+      if (!hex) continue;
+      out[k] = `#${hex}`;
     } else if (k === 'font-weight') {
       out[k] = v === 'normal' || v === '400' ? 'normal' : 'bold';
+    } else if (k === 'font-family') {
+      // browsers re-quote font names — strip the quotes, keep the letter case
+      // (Excel stores font names with their proper case)
+      const fam = v.replace(/["']/g, '').trim();
+      if (fam && fam !== 'inherit' && fam !== 'initial') out[k] = fam;
     } else if (k === 'text-decoration') {
       const set = ['underline', 'line-through'].filter((t) => v.includes(t));
       if (set.length) out[k] = set.join(' ');
     } else if (k === 'border-top' || k === 'border-right' || k === 'border-bottom' || k === 'border-left') {
-      out[k] = canonicalBorder(v);
+      const b = canonicalBorder(v);
+      if (b) out[k] = b; // 'none' / empty borders are dropped entirely
     } else {
       // the grid renders every cell with the column default 'left' (Excel's
       // own default) — drop it so untouched cells never look "changed"
@@ -278,7 +315,8 @@ function canonicalCss(css: string): string {
   return Object.keys(out).sort().map((k) => `${k}:${out[k]}`).join(';');
 }
 
-function canonicalBorder(v: string): string {
+function canonicalBorder(v: string): string | null {
+  if (!v || v.includes('none') || v.trim() === '') return null; // no border
   const width = /^(\d+)px/.exec(v)?.[1] ?? '1';
   let style = 'solid';
   if (v.includes('double')) style = 'double';
@@ -783,6 +821,9 @@ interface ToolState {
   italic: boolean;
   underline: boolean;
   align?: 'left' | 'center' | 'right';
+  vAlign?: 'top' | 'middle' | 'bottom';
+  fontFamily?: string;
+  fontSize?: string;
   count: number;
   merged: boolean;
   canMerge: boolean;
@@ -806,6 +847,12 @@ export function TimesheetEditorDialog({
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [tools, setTools] = useState<ToolState | null>(null);
+
+  // the editor fills the whole screen EXCEPT the side menu — it matches the
+  // sidebar's animated width (264px open / 76px collapsed, 0 on mobile)
+  const sidebarOpen = useAppStore((s) => s.sidebarOpen);
+  const isMobile = useIsMobile();
+  const edge = { left: isMobile ? 0 : sidebarOpen ? 264 : 76 };
 
   const gridHostRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<JssInstance | null>(null);
@@ -849,6 +896,8 @@ export function TimesheetEditorDialog({
     if (!first) { setTools(null); return; }
     const d = parseCss(String(inst.getStyle(first) ?? ''));
     const merged = findMergeAnchor(inst, cells[0]) !== null;
+    const sizeM = /^([\d.]+)pt$/i.exec(d['font-size'] ?? '');
+    const va = d['vertical-align'];
     setTools({
       fill: cssColorToHex(d['background-color']),
       color: cssColorToHex(d.color),
@@ -856,6 +905,9 @@ export function TimesheetEditorDialog({
       italic: d['font-style'] === 'italic',
       underline: (d['text-decoration'] ?? '').includes('underline'),
       align: d['text-align'] === 'left' || d['text-align'] === 'center' || d['text-align'] === 'right' ? d['text-align'] : undefined,
+      vAlign: va === 'top' || va === 'middle' || va === 'bottom' ? va : undefined,
+      fontFamily: d['font-family'] ? d['font-family'].replace(/["']/g, '').trim() : undefined,
+      fontSize: sizeM ? `${Number(sizeM[1])}pt` : undefined,
       count: cells.length,
       merged,
       canMerge: cells.length > 1,
@@ -879,10 +931,16 @@ export function TimesheetEditorDialog({
     // jspreadsheet stamps the column alignment on every cell — use 'left'
     // (Excel's default) so canonicalCss can tell "grid default" apart from
     // a real centre/right alignment coming from the file or the toolbar.
+    //
+    // `root: host` scopes the grid's document-level mouse handlers to the
+    // grid area itself. Without it jspreadsheet attaches them to `document`,
+    // and every click on the formatting toolbar cleared the cell selection
+    // before the style could be applied (fills / alignment "did nothing").
     let initializing = true;
     const markDirty = () => { if (!initializing) setDirty(true); };
     try {
       instanceRef.current = jspreadsheet(host, {
+        root: host,
         data: snap.grid.map((r) => [...r]) as unknown as (string | number | boolean)[][],
         minDimensions: [padCols, padRows],
         columns: Array.from({ length: padCols }, (_, i) => ({
@@ -983,6 +1041,42 @@ export function TimesheetEditorDialog({
     });
   };
 
+  /** apply a border preset to the current selection ('outer' walks the
+   *  selection rectangle and only borders its perimeter). */
+  const applyBorders = (mode: BorderMode) => {
+    withSelection((inst, cells) => {
+      const B = '1px solid #000000';
+      const SIDES = ['top', 'right', 'bottom', 'left'] as const;
+      if (mode === 'all' || mode === 'none') {
+        for (const s of SIDES) inst.setStyle(cells, `border-${s}`, mode === 'all' ? B : 'none');
+      } else if (mode === 'outer') {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const td of cells) {
+          const x = Number(td.getAttribute('data-x'));
+          const y = Number(td.getAttribute('data-y'));
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+        for (const td of cells) {
+          const x = Number(td.getAttribute('data-x'));
+          const y = Number(td.getAttribute('data-y'));
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          const sides: string[] = [];
+          if (y === minY) sides.push('border-top');
+          if (y === maxY) sides.push('border-bottom');
+          if (x === minX) sides.push('border-left');
+          if (x === maxX) sides.push('border-right');
+          for (const p of sides) inst.setStyle([td], p, B);
+        }
+      } else {
+        inst.setStyle(cells, `border-${mode}`, B);
+      }
+      setDirty(true);
+      refreshTools();
+    });
+  };
+
   const save = async () => {
     const p = parsedRef.current;
     if (!p) return;
@@ -1012,19 +1106,20 @@ export function TimesheetEditorDialog({
 
   // ---- render ----
   if (parsed === undefined) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+    return createPortal(
+      <div className="fixed inset-y-0 right-0 z-50 flex items-center justify-center bg-background transition-[left] duration-300" style={edge}>
         <div className="flex items-center gap-3 rounded-2xl border border-border bg-card px-6 py-4 shadow-2xl">
           <Loader2 className="size-5 animate-spin text-brand" />
           <p className="text-sm font-medium">Opening the spreadsheet…</p>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
   if (parsed === null || parsed.sheets.length === 0) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+    return createPortal(
+      <div className="fixed inset-y-0 right-0 z-50 flex items-center justify-center bg-background p-4 transition-[left] duration-300" style={edge}>
         <div className="w-full max-w-md rounded-2xl border border-destructive/30 bg-card p-6 text-center shadow-2xl">
           <TriangleAlert className="mx-auto size-10 text-amber-500" />
           <p className="mt-3 text-sm font-semibold">This file is not a readable spreadsheet</p>
@@ -1033,22 +1128,28 @@ export function TimesheetEditorDialog({
           </p>
           <Button variant="outline" className="mt-4" onClick={onClose}>Close</Button>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
   const sheetNames = parsed.sheets.map((s) => s.name);
 
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/60 p-2 backdrop-blur-sm md:p-6" role="dialog" aria-label="Timesheet editor">
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
+  return createPortal(
+    <div
+      className="fixed inset-y-0 right-0 z-50 flex flex-col bg-background transition-[left] duration-300"
+      style={edge}
+      role="dialog"
+      aria-label="Timesheet editor"
+    >
+      <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden border-l border-border bg-card">
         {/* header */}
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
           <SheetIcon className="size-5 shrink-0 text-emerald-500" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold" title={doc.name}>{doc.name}</p>
             <p className="text-[11px] text-muted-foreground">
-              Editable spreadsheet — formulas like <code className="rounded bg-muted px-1">=SUM(A1:A31)</code> recalculate live; colours, merges and sizes are saved
+              Editable spreadsheet — formulas like <code className="rounded bg-muted px-1">=SUM(A1:A31)</code> recalculate live; colours, fonts, borders, merges and sizes are saved
             </p>
           </div>
           {sheetNames.length > 1 && (
@@ -1075,14 +1176,32 @@ export function TimesheetEditorDialog({
         </div>
 
         {/* style toolbar */}
-        {/* onMouseDown stopPropagation: jspreadsheet listens for mousedown on
-            document and clears the cell selection whenever the press is
-            outside the grid — swallow it so the selection survives toolbar
-            clicks (bold / colours / merge act on the selected cells). */}
+        {/* The mousedown guard is belt-and-braces (grid events are scoped to
+            the grid host via the `root` option); the keydown guard stops the
+            grid from hijacking arrow keys while a toolbar dropdown is focused. */}
         <div
           className="flex flex-wrap items-center gap-1 border-b border-border bg-muted/30 px-2 py-1.5"
           onMouseDown={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.nativeEvent.stopImmediatePropagation()}
         >
+          <ToolbarSelect
+            title="Font"
+            value={tools?.fontFamily ?? ''}
+            placeholder="Font"
+            options={FONT_FAMILIES.map((f) => ({ value: f, label: f, style: { fontFamily: f } }))}
+            disabled={!tools}
+            onPick={(v) => applyStyle('font-family', `'${v}'`)}
+          />
+          <ToolbarSelect
+            title="Font size"
+            value={tools?.fontSize ?? ''}
+            placeholder="Size"
+            options={FONT_SIZES.map((s) => ({ value: `${s}pt`, label: String(s) }))}
+            disabled={!tools}
+            onPick={(v) => applyStyle('font-size', v)}
+            className="w-[4.25rem]"
+          />
+          <ToolbarDivider />
           <ColorSwatchButton
             title="Fill colour"
             icon={<PaintBucket className="size-3.5" />}
@@ -1119,7 +1238,24 @@ export function TimesheetEditorDialog({
           <ToolbarToggle title="Align right" active={tools?.align === 'right'} disabled={!tools} onClick={() => applyStyle('text-align', 'right')}>
             <AlignRight className="size-3.5" />
           </ToolbarToggle>
+          <ToolbarToggle title="Align top" active={tools?.vAlign === 'top'} disabled={!tools} onClick={() => applyStyle('vertical-align', 'top')}>
+            <AlignStartVertical className="size-3.5" />
+          </ToolbarToggle>
+          <ToolbarToggle title="Align middle" active={tools?.vAlign === 'middle'} disabled={!tools} onClick={() => applyStyle('vertical-align', 'middle')}>
+            <AlignCenterVertical className="size-3.5" />
+          </ToolbarToggle>
+          <ToolbarToggle title="Align bottom" active={tools?.vAlign === 'bottom'} disabled={!tools} onClick={() => applyStyle('vertical-align', 'bottom')}>
+            <AlignEndVertical className="size-3.5" />
+          </ToolbarToggle>
           <ToolbarDivider />
+          <ToolbarSelect
+            title="Borders"
+            value=""
+            placeholder="Borders"
+            options={BORDER_MODES.map((m) => ({ value: m.id, label: m.label }))}
+            disabled={!tools}
+            onPick={(v) => applyBorders(v as BorderMode)}
+          />
           <ToolbarToggle
             title={tools?.merged ? 'Unmerge cells' : 'Merge selected cells'}
             active={!!tools?.merged}
@@ -1157,7 +1293,8 @@ export function TimesheetEditorDialog({
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1166,6 +1303,45 @@ export function TimesheetEditorDialog({
 // ---------------------------------------------------------------------------
 function ToolbarDivider() {
   return <span className="mx-1 h-5 w-px bg-border" aria-hidden />;
+}
+
+/** compact native <select> for font / size / borders — reliable, keyboard
+ *  friendly and opens in place (no portal z-index fights with the overlay). */
+function ToolbarSelect({
+  title, value, placeholder, options, onPick, disabled, className,
+}: {
+  title: string;
+  value: string;
+  placeholder: string;
+  options: { value: string; label: string; style?: React.CSSProperties }[];
+  onPick: (value: string) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <select
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      value={value}
+      onChange={(e) => {
+        const v = e.target.value;
+        e.target.value = value || ''; // action selects snap back to the label
+        e.currentTarget.blur(); // return focus to the page, not the dropdown
+        if (v) onPick(v);
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+      className={cn(
+        'h-7 max-w-[8.5rem] cursor-pointer truncate rounded-md border border-border bg-background px-1.5 text-[11px] font-medium text-foreground transition-colors hover:border-brand/40 disabled:pointer-events-none disabled:opacity-40',
+        className,
+      )}
+    >
+      <option value="">{placeholder}</option>
+      {options.map((o) => (
+        <option key={o.value} value={o.value} style={o.style}>{o.label}</option>
+      ))}
+    </select>
+  );
 }
 
 function ToolbarToggle({

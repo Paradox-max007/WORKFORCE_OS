@@ -35,7 +35,7 @@ import { Switch } from '@/components/ui/switch';
 import { dataApi, isDemoMode } from '@/lib/data';
 import { db as demoDb } from '@/lib/data/demo-store';
 import { aiProxyHeaders } from '@/lib/ai/client';
-import { buildAiKnowledgeBase } from '@/lib/ai/knowledge';
+import { BOT_TITLE, buildAiKnowledgeBase } from '@/lib/ai/knowledge';
 import type { AccentColor, SiteSettings, ThemeMode } from '@/lib/types';
 import { fmtTimeAgo } from '@/lib/format';
 import { useAuthStore } from '@/store/auth-store';
@@ -269,7 +269,7 @@ export function SiteSettingsPage() {
   const toggleAi = async (enabled: boolean) => {
     try {
       await updateSettings({ ai_enabled: enabled });
-      toast.success(enabled ? 'AI assistant enabled' : 'AI assistant disabled');
+      toast.success(enabled ? `${BOT_TITLE} enabled` : `${BOT_TITLE} disabled`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Could not toggle the AI assistant');
     }
@@ -506,14 +506,14 @@ export function SiteSettingsPage() {
             </CardContent>
           </Card>
 
-          {/* ---- AI assistant connection ---- */}
+          {/* ---- Pebby (AI assistant) connection ---- */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
-                <Bot size={16} className="text-brand" /> AI assistant
+                <Bot size={16} className="text-brand" /> {BOT_TITLE}
               </CardTitle>
               <CardDescription>
-                Connection for the upcoming in-app AI bot. Pick a preset or switch to a CUSTOM provider
+                Connection for Pebby, the in-app AI bot. Pick a preset or switch to a CUSTOM provider
                 and point it at any OpenAI-compatible endpoint (Groq, Together, DeepSeek, Ollama, LM
                 Studio, your own gateway…). The API key is stored write-only and never shown again.
               </CardDescription>
@@ -521,15 +521,15 @@ export function SiteSettingsPage() {
             <CardContent className="space-y-5">
               <div className="flex items-center justify-between gap-4 rounded-xl border border-border/60 bg-brand/5 px-4 py-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold">Enable the AI assistant</p>
+                  <p className="text-sm font-semibold">Enable {BOT_TITLE}</p>
                   <p className="text-[11px] text-muted-foreground">
-                    Requires a saved API key. The bot reads the whole database — see the scope below.
+                    Requires a saved API key. Pebby searches the whole database on every question — see the scope below.
                   </p>
                 </div>
                 <Switch
                   checked={settings.ai_enabled}
                   onCheckedChange={toggleAi}
-                  aria-label="Enable the AI assistant"
+                  aria-label="Enable Pebby — Smart Assistant"
                 />
               </div>
 
@@ -664,15 +664,15 @@ export function SiteSettingsPage() {
             </CardContent>
           </Card>
 
-          {/* ---- AI knowledge scope ---- */}
+          {/* ---- Pebby's knowledge scope ---- */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
-                <Eye size={16} className="text-brand" /> AI knowledge scope
+                <Eye size={16} className="text-brand" /> Pebby&apos;s knowledge scope
               </CardTitle>
               <CardDescription>
-                When the bot ships it will be able to read and query ALL of this data — every module of the
-                system, A to Z. Counts are live from the database.
+                Pebby reads and queries ALL of this data — every module of the system, A to Z — with
+                every question it answers. Counts are live from the database.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -693,8 +693,9 @@ export function SiteSettingsPage() {
                 </div>
               )}
               <p className="mt-3 text-[11px] text-muted-foreground">
-                The AI receives the full application guide (payroll rules, advance cutting, attendance
-                markers…) plus this live data snapshot with every question it answers.
+                With every question, Pebby receives the full application guide (payroll rules, advance
+                cutting, attendance markers…) plus a fresh live data snapshot — and can fetch deeper
+                records or research the web on demand.
               </p>
             </CardContent>
           </Card>

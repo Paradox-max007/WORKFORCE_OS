@@ -1,7 +1,7 @@
 'use client';
 
 // ============================================================================
-// PULSE Workforce OS — AI assistant floating chat widget
+// PULSE Workforce OS — Pebby, the floating Smart Assistant
 // ----------------------------------------------------------------------------
 // A bubble button pinned to the bottom-right corner, visible for every
 // signed-in admin while the AI assistant is ENABLED (Site Settings → AI Bot).
@@ -9,15 +9,17 @@
 // panel's ✕ / Escape) collapses it — the conversation survives the collapse.
 //
 // The chat:
-//   • the FIRST message builds the full knowledge base (every readable entity
-//     of the database — see src/lib/ai/knowledge.ts) and caches it as the
-//     system prompt for the session; "New chat" re-reads the database
-//   • DEMO mode supplies the connection (base URL + key + model) from the
-//     local demo store; SUPABASE mode sends no key — the /api/ai proxy reads
-//     the stored connection server-side after verifying the caller
-//   • answers render with light markdown (bold + inline code)
-//   • without an API key the panel turns into a friendly pointer to the
-//     Site Settings page (super admins jump straight there)
+//   • EVERY question rebuilds the knowledge base from the live database
+//     (see src/lib/ai/knowledge.ts) — a real database search per message
+//   • when Pebby needs deeper records it replies with a [[LOOKUP]]
+//     directive; the widget fetches the rows (full employee documents,
+//     other attendance / salary months) and re-asks — up to 2 hops
+//   • off-topic questions are routed by the /api/ai proxy: it sees the
+//     [[WEB: query]] directive, researches the web (DuckDuckGo + Wikipedia)
+//     and re-asks the provider, so Pebby answers current affairs too
+//   • the connection (base URL + key + model) comes from Site Settings —
+//     demo mode supplies the key from the local demo store, Supabase mode
+//     keeps it server-side (aiProxyHeaders)
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
@@ -26,10 +28,14 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { isDemoMode } from '@/lib/data';
+import { dataApi, isDemoMode } from '@/lib/data';
 import { db as demoDb } from '@/lib/data/demo-store';
 import { aiProxyHeaders } from '@/lib/ai/client';
-import { buildAiKnowledgeBase, buildAiSystemPrompt } from '@/lib/ai/knowledge';
+import {
+  BOT_NAME, buildAiKnowledgeBase, buildAiSystemPrompt,
+  formatAttendanceMonth, formatEmployeeDeepDive, formatSalarySheetPeriod,
+} from '@/lib/ai/knowledge';
+import type { Attendance, EmployeeVM, SalarySheetReport } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useSettingsStore } from '@/store/settings-store';
@@ -39,16 +45,44 @@ import { cn } from '@/lib/utils';
  *  proxy caps the whole conversation at 40 messages incl. the system prompt) */
 const MAX_HISTORY = 24;
 
+/** max [[LOOKUP]] rounds per question — enough for any follow-up data */
+const MAX_LOOKUP_HOPS = 2;
+
 interface ChatBubble {
   role: 'user' | 'assistant';
   content: string;
 }
 
+/** One parsed [[LOOKUP]] directive (the model replies with exactly one). */
+interface LookupDirective {
+  kind: 'employees' | 'attendance' | 'salary';
+  codes?: string[];
+  month?: string; // YYYY-MM
+}
+
 const SUGGESTIONS = [
-  'How many employees are on the roster right now?',
+  "What's the nationality and emp code of Mohd Rafiq?",
   'Who was absent the most this month?',
-  'Explain the absent-deduction rule in simple terms',
+  "What's the latest business news in the UAE?",
 ];
+
+/** Parse a model reply that is a lookup directive; null when it is a normal
+ *  answer. Tolerates minor surrounding whitespace only — the protocol asks
+ *  for the directive alone. */
+function parseLookupDirective(reply: string): LookupDirective | null {
+  const text = reply.trim();
+  const m = /^\[\[LOOKUP\]\]\s*(\w+)=([\w,\-]+)\s*$/i.exec(text);
+  if (!m) return null;
+  const [, kindRaw, value] = m;
+  const kind = kindRaw.toLowerCase();
+  if (kind === 'employees') {
+    return { kind: 'employees', codes: value.split(',').map((c) => c.trim().toUpperCase()).filter(Boolean) };
+  }
+  if (kind === 'attendance' || kind === 'salary') {
+    return /^\d{4}-\d{2}$/.test(value) ? { kind, month: value } : null;
+  }
+  return null;
+}
 
 /** Light inline markdown: **bold** and `code` spans (React escapes the rest). */
 function InlineMarkdown({ text }: { text: string }) {
@@ -83,10 +117,12 @@ export function AiChatWidget() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  /** "Searching the database…" — building the fresh knowledge base */
   const [preparing, setPreparing] = useState(false);
+  /** "Digging deeper…" — running a [[LOOKUP]] round */
+  const [digging, setDigging] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const systemPromptRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -94,7 +130,7 @@ export function AiChatWidget() {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [messages, preparing, sending, open]);
+  }, [messages, preparing, digging, sending, open]);
 
   // Escape collapses the panel
   useEffect(() => {
@@ -119,10 +155,9 @@ export function AiChatWidget() {
   });
 
   const resetChat = () => {
-    if (sending || preparing) return;
+    if (sending || preparing || digging) return;
     setMessages([]);
     setError(null);
-    systemPromptRef.current = null; // the next message re-reads the database
   };
 
   const autoSize = () => {
@@ -132,22 +167,36 @@ export function AiChatWidget() {
     el.style.height = `${Math.min(el.scrollHeight, 112)}px`;
   };
 
-  /** Build (once per session) the A→Z database knowledge system prompt. */
-  const ensureSystemPrompt = async (): Promise<string> => {
-    if (systemPromptRef.current) return systemPromptRef.current;
-    setPreparing(true);
-    try {
-      const kb = await buildAiKnowledgeBase();
-      systemPromptRef.current = buildAiSystemPrompt(kb, settings);
-      return systemPromptRef.current;
-    } finally {
-      setPreparing(false);
+  /** Fetch the data a [[LOOKUP]] directive asks for, formatted for the model. */
+  const runLookup = async (dir: LookupDirective): Promise<string> => {
+    if (dir.kind === 'employees') {
+      const [active, cancelled] = await Promise.all([
+        dataApi.listEmployees(),
+        dataApi.listCancelledEmployees(),
+      ]);
+      const wanted = new Set(dir.codes ?? []);
+      const matched = [...active, ...cancelled].filter((e) => wanted.has(e.employee_code.toUpperCase()));
+      return `DATABASE LOOKUP RESULT — full records of ${matched.length} employee(s):\n${formatEmployeeDeepDive(matched)}`;
     }
+    const month = dir.month ?? '';
+    if (dir.kind === 'attendance') {
+      const [records, active, cancelled] = await Promise.all([
+        dataApi.getMonthAttendance(month),
+        dataApi.listEmployees(),
+        dataApi.listCancelledEmployees(),
+      ]);
+      return `DATABASE LOOKUP RESULT:\n${formatAttendanceMonth(month, records, [...active, ...cancelled])}`;
+    }
+    // salary=YYYY-MM
+    const year = Number(month.slice(0, 4));
+    const mon = Number(month.slice(5, 7));
+    const report = await dataApi.getSalarySheet(year, mon);
+    return `DATABASE LOOKUP RESULT:\n${formatSalarySheetPeriod(year, mon, report)}`;
   };
 
   const send = async (raw?: string) => {
     const text = (raw ?? input).trim();
-    if (!text || sending || preparing) return;
+    if (!text || sending || preparing || digging) return;
     if (!hasKey) {
       setError('The AI connection has no API key yet — set it on the Site Settings page.');
       return;
@@ -157,41 +206,75 @@ export function AiChatWidget() {
     setMessages((m) => [...m, bubble]);
     setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
+
+    // fresh database read BEFORE every question — the snapshot is always current
+    setPreparing(true);
     setSending(true);
     try {
-      const system = await ensureSystemPrompt();
-      const history = [...messages, bubble]
-        .slice(-MAX_HISTORY)
-        .map(({ role, content }) => ({ role, content }));
-      const body: Record<string, unknown> = {
-        action: 'chat',
-        baseUrl: settings.ai_base_url,
-        model: settings.ai_model,
-        // demo mode: the raw key lives in the local demo store; in Supabase
-        // mode no key is sent — the proxy reads the stored one server-side
-        ...(isDemoMode ? { apiKey: demoDb.siteSettings.ai_api_key } : {}),
-        messages: [{ role: 'system', content: system }, ...history],
-        maxTokens: 1024,
-        temperature: 0.3,
-      };
-      const res = await fetch('/api/ai', {
-        method: 'POST',
-        // Supabase mode: the bearer token lets the proxy verify the caller
-        // and read the STORED connection (key stays server-side)
-        headers: await aiProxyHeaders(),
-        body: JSON.stringify(body),
-      });
-      const json = (await res.json()) as { ok: boolean; reply?: string; error?: string };
-      if (!json.ok || typeof json.reply !== 'string') {
-        throw new Error(json.error || 'The assistant could not answer that.');
+      let system: string;
+      try {
+        const kb = await buildAiKnowledgeBase();
+        system = buildAiSystemPrompt(kb, settings);
+      } finally {
+        setPreparing(false);
       }
-      setMessages((m) => [...m, { role: 'assistant', content: json.reply as string }]);
+
+      // the thread forwarded to the provider; [[LOOKUP]] rounds extend it
+      // with hidden assistant directive + lookup-result exchanges
+      let thread: ChatBubble[] = [...messages, bubble].slice(-MAX_HISTORY);
+      let reply = '';
+
+      for (let hop = 0; hop <= MAX_LOOKUP_HOPS; hop++) {
+        const body: Record<string, unknown> = {
+          action: 'chat',
+          baseUrl: settings.ai_base_url,
+          model: settings.ai_model,
+          // demo mode: the raw key lives in the local demo store; in Supabase
+          // mode no key is sent — the proxy reads the stored one server-side
+          ...(isDemoMode ? { apiKey: demoDb.siteSettings.ai_api_key } : {}),
+          messages: [{ role: 'system', content: system }, ...thread],
+          maxTokens: 1024,
+          temperature: 0.3,
+        };
+        const res = await fetch('/api/ai', {
+          method: 'POST',
+          // Supabase mode: the bearer token lets the proxy verify the caller
+          // and read the STORED connection (key stays server-side)
+          headers: await aiProxyHeaders(),
+          body: JSON.stringify(body),
+        });
+        const json = (await res.json()) as { ok: boolean; reply?: string; error?: string };
+        if (!json.ok || typeof json.reply !== 'string') {
+          throw new Error(json.error || 'The assistant could not answer that.');
+        }
+        reply = json.reply;
+
+        const directive = parseLookupDirective(reply);
+        if (!directive || hop === MAX_LOOKUP_HOPS) break;
+
+        // fetch the requested rows and ask again with the result appended
+        setDigging(true);
+        try {
+          const context = await runLookup(directive);
+          thread = [
+            ...thread,
+            { role: 'assistant', content: reply },
+            { role: 'user', content: `${context}\n\n( system-provided lookup result — now answer the user's question with this data; do not print any directive )` },
+          ];
+        } finally {
+          setDigging(false);
+        }
+      }
+
+      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
     } catch (e) {
       // roll the optimistic bubble back and hand the text back for editing
       setMessages((m) => (m[m.length - 1] === bubble ? m.slice(0, -1) : m));
       setInput(text);
       setError(e instanceof Error ? e.message : 'The chat request failed.');
     } finally {
+      setPreparing(false);
+      setDigging(false);
       setSending(false);
     }
   };
@@ -204,7 +287,7 @@ export function AiChatWidget() {
           <motion.div
             key="ai-panel"
             role="dialog"
-            aria-label="AI assistant chat"
+            aria-label="Pebby chat"
             initial={{ opacity: 0, y: 18, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.97 }}
@@ -219,15 +302,15 @@ export function AiChatWidget() {
                 <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-card bg-emerald-500" />
               </div>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold leading-tight">AI Assistant</p>
+                <p className="truncate text-sm font-semibold leading-tight">{BOT_NAME}</p>
                 <p className="truncate text-[11px] text-muted-foreground">
-                  {hasKey ? `Knows the whole database · ${settings.ai_model}` : 'Connection not configured'}
+                  {hasKey ? `Smart Assistant · ${settings.ai_model}` : 'Connection not configured'}
                 </p>
               </div>
               <Button
                 variant="ghost" size="icon" className="size-8 shrink-0" onClick={resetChat}
-                disabled={messages.length === 0 || sending || preparing} aria-label="Start a new chat"
-                title="New chat (re-reads the database)"
+                disabled={messages.length === 0 || sending || preparing || digging} aria-label="Start a new chat"
+                title="New chat"
               >
                 <RotateCcw className="size-4" />
               </Button>
@@ -247,9 +330,10 @@ export function AiChatWidget() {
                     <Sparkles className="size-6" />
                   </div>
                   <div>
-                    <p className="text-sm font-semibold">Ask me anything about {settings.project_name}</p>
+                    <p className="text-sm font-semibold">Hi, I&apos;m {BOT_NAME} — Smart Assistant</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      I can read the entire database — employees, sites, attendance, payroll, advances and more.
+                      I search the whole {settings.project_name} database on every question — employees,
+                      attendance, payroll, advances and more. For anything else, I research the web.
                     </p>
                   </div>
                   <div className="mt-1 flex w-full flex-col gap-1.5">
@@ -279,11 +363,11 @@ export function AiChatWidget() {
                       </div>
                     </div>
                   ))}
-                  {(preparing || sending) && (
+                  {(preparing || digging || sending) && (
                     <div className="flex justify-start">
                       <div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-muted px-3.5 py-2 text-[13px] text-muted-foreground">
                         <Loader2 className="size-3.5 animate-spin" />
-                        {preparing ? 'Reading the database…' : 'Thinking…'}
+                        {preparing ? 'Searching the database…' : digging ? 'Digging deeper into the records…' : 'Thinking…'}
                       </div>
                     </div>
                   )}
@@ -346,9 +430,9 @@ export function AiChatWidget() {
                   <Button
                     type="submit" size="icon" aria-label="Send message"
                     className="size-10 shrink-0 rounded-xl brand-gradient text-brand-foreground"
-                    disabled={!input.trim() || sending || preparing}
+                    disabled={!input.trim() || sending || preparing || digging}
                   >
-                    {sending ? <Loader2 className="size-4 animate-spin" /> : <SendHorizonal className="size-4" />}
+                    {(sending || preparing || digging) ? <Loader2 className="size-4 animate-spin" /> : <SendHorizonal className="size-4" />}
                   </Button>
                 </form>
               </div>
@@ -363,7 +447,7 @@ export function AiChatWidget() {
         onClick={toggle}
         whileHover={{ scale: 1.06 }}
         whileTap={{ scale: 0.94 }}
-        aria-label={open ? 'Collapse the AI assistant' : 'Open the AI assistant'}
+        aria-label={open ? `Collapse ${BOT_NAME}` : `Open ${BOT_NAME} — Smart Assistant`}
         className="fixed bottom-5 right-5 z-50 flex size-14 items-center justify-center rounded-full brand-gradient text-brand-foreground shadow-xl shadow-black/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       >
         {!hasOpened && !open && (

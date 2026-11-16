@@ -1,8 +1,8 @@
 // ============================================================================
 // PULSE Workforce OS — AI proxy (/api/ai)
 // ----------------------------------------------------------------------------
-// Server-side bridge for the AI assistant configured on the Site Settings
-// page (OpenAI-compatible base URL + API key + model). Actions:
+// Server-side bridge for Pebby, the in-app Smart Assistant configured on the
+// Site Settings page (OpenAI-compatible base URL + API key + model). Actions:
 //
 //   test — pings the provider with the given (or stored) connection and
 //          reports success / latency. Used by the settings page button.
@@ -14,8 +14,15 @@
 //          super-admin only); in DEMO mode the caller supplies the
 //          connection from its local demo store.
 //
+//          WEB RESEARCH: when the model decides a question is outside the
+//          workforce database it replies with a [[WEB: query]] directive;
+//          the proxy searches the web (DuckDuckGo Instant Answers +
+//          Wikipedia — keyless public APIs), appends the results and re-asks
+//          the provider, then returns the final answer. Works with any
+//          OpenAI-compatible provider — no tool-calling support needed.
+//
 // Security: same-origin only, http(s) base URLs, hard caps on sizes and a
-// 45s timeout. The raw API key is never logged.
+// 45s per-call timeout. The raw API key is never logged.
 // ============================================================================
 
 import { createClient } from '@supabase/supabase-js';
@@ -36,8 +43,14 @@ interface AiRequestBody {
 }
 
 const MAX_MESSAGES = 40;
-const MAX_CONTENT_CHARS = 24_000;
+/** the system prompt carries the whole compact database snapshot, so the
+ *  per-message ceiling is generous (≈ 150k chars ≈ 40k tokens) */
+const MAX_CONTENT_CHARS = 150_000;
 const MAX_TOKENS_CAP = 4096;
+
+/** Directive the model uses to request web research: [[WEB: query]] */
+const WEB_DIRECTIVE = /\[\[WEB:\s*([^\]]+?)\s*\]\]/i;
+const WEB_DIRECTIVE_ALL = /\[\[WEB:\s*[^\]]+?\s*\]\]/gi;
 
 function bad(error: string, status = 400): Response {
   return Response.json({ ok: false, error }, { status });
@@ -91,6 +104,129 @@ async function callProvider(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Web research — keyless public endpoints, all fetched server-side:
+//   1. Google News RSS  — current affairs / news questions
+//   2. Bing RSS         — general web search results
+//   3. Wikipedia API    — encyclopedic answers (policy-compliant UA with
+//                         contact info, otherwise Wikimedia answers 403)
+// Composed into one results block for the model. Every tier degrades
+// gracefully — an unreachable source is simply skipped.
+// ---------------------------------------------------------------------------
+
+/** Wikimedia requires a descriptive User-Agent with contact information. */
+const WEB_UA = 'PULSE-WorkforceOS/1.0 (workforce management app; contact: admin@pulse.app)';
+
+async function fetchWeb(url: string, timeoutMs = 8_000): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': WEB_UA, Accept: '*/*' },
+    });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+interface RssItem { title: string; link: string; date: string | null; desc: string | null }
+
+/** Parse the <item> blocks of an RSS document (Google News / Bing format). */
+function parseRssItems(xml: string, limit: number): RssItem[] {
+  const items: RssItem[] = [];
+  const re = /<item>([\s\S]*?)<\/item>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null && items.length < limit) {
+    const block = m[1];
+    const title = /<title>([\s\S]*?)<\/title>/.exec(block)?.[1];
+    const link = /<link>([\s\S]*?)<\/link>/.exec(block)?.[1];
+    const date = /<pubDate>([\s\S]*?)<\/pubDate>/.exec(block)?.[1] ?? null;
+    const desc = /<description>([\s\S]*?)<\/description>/.exec(block)?.[1] ?? null;
+    if (title && link) {
+      items.push({
+        title: decodeEntities(title).slice(0, 200),
+        link: decodeEntities(link),
+        date: date ? decodeEntities(date) : null,
+        desc: desc ? decodeEntities(desc).slice(0, 300) : null,
+      });
+    }
+  }
+  return items;
+}
+
+/** Search Google News (RSS) + Bing (RSS) + Wikipedia and compose a block. */
+async function webSearch(query: string): Promise<string> {
+  const q = query.trim().slice(0, 200);
+  if (!q) return 'No web results (empty query).';
+
+  const [newsXml, bingXml, wikiSearchRaw] = await Promise.all([
+    fetchWeb(`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`),
+    fetchWeb(`https://www.bing.com/search?q=${encodeURIComponent(q)}&format=rss`),
+    fetchWeb(`https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srlimit=3&srsearch=${encodeURIComponent(q)}`),
+  ]);
+
+  const blocks: string[] = [];
+
+  // 1. Google News — current affairs
+  const news = newsXml ? parseRssItems(newsXml, 6) : [];
+  if (news.length > 0) {
+    blocks.push(`Google News (newest first):\n${news.map((n) => `- ${n.title}${n.date ? ` (${n.date})` : ''} — ${n.link}`).join('\n')}`);
+  }
+
+  // 2. Bing — general web results
+  const bing = bingXml ? parseRssItems(bingXml, 6) : [];
+  if (bing.length > 0) {
+    blocks.push(`Bing web results:\n${bing.map((b) => `- ${b.title}${b.desc ? `: ${b.desc}` : ''} — ${b.link}`).join('\n')}`);
+  }
+
+  // 3. Wikipedia — encyclopedic context (search + intro extracts)
+  try {
+    const ws = wikiSearchRaw ? JSON.parse(wikiSearchRaw) as { query?: { search?: { title: string; snippet?: string }[] } } : null;
+    const hits = ws?.query?.search ?? [];
+    if (hits.length > 0) {
+      const titles = hits.map((h) => h.title).join('|');
+      const extractsRaw = await fetchWeb(
+        `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(titles)}`,
+      );
+      const ex = extractsRaw ? JSON.parse(extractsRaw) as { query?: { pages?: Record<string, { title?: string; extract?: string }> } } : null;
+      const pages = Object.values(ex?.query?.pages ?? {});
+      const wikiLines: string[] = [];
+      hits.forEach((h) => {
+        const page = pages.find((p) => p.title === h.title);
+        const text = (page?.extract ?? h.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 600);
+        if (text) wikiLines.push(`- ${h.title} (en.wikipedia.org/wiki/${encodeURIComponent(h.title.replaceAll(' ', '_'))}): ${text}`);
+      });
+      if (wikiLines.length) blocks.push(`Wikipedia:\n${wikiLines.join('\n')}`);
+    }
+  } catch {
+    // a malformed Wikipedia response never breaks the whole search
+  }
+
+  if (blocks.length === 0) {
+    return 'No usable web results were found for this query.';
+  }
+  return blocks.join('\n\n').slice(0, 12_000);
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -209,7 +345,31 @@ export async function POST(request: Request): Promise<Response> {
     const maxTokens = Math.min(Math.max(1, Math.round(body.maxTokens ?? 1024)), MAX_TOKENS_CAP);
     const temperature = Math.min(Math.max(0, body.temperature ?? 0.3), 2);
 
-    const { reply, usage } = await callProvider(url, apiKey, model, messages, maxTokens, temperature);
+    let { reply, usage } = await callProvider(url, apiKey, model, messages, maxTokens, temperature);
+
+    // --- web research round: the model asked for [[WEB: query]] ----------
+    // One round only — the follow-up must be a final answer. Any directive
+    // tokens surviving in the final reply are stripped so the protocol never
+    // leaks into the chat UI.
+    const webMatch = reply.match(WEB_DIRECTIVE);
+    if (webMatch) {
+      const query = webMatch[1].trim();
+      const research = await webSearch(query);
+      const researched: ChatMessage[] = [
+        ...messages,
+        { role: 'assistant', content: reply },
+        {
+          role: 'user',
+          content: `WEB RESEARCH for "${query}" (fetched just now, ${new Date().toISOString()}):\n${research}\n\n( system-provided research — now answer the user's question using these results; briefly mention the source(s); if the results are thin or irrelevant, say you could not verify current data and answer from general knowledge; do not print any directive )`,
+        },
+      ];
+      const second = await callProvider(url, apiKey, model, researched, maxTokens, temperature);
+      reply = second.reply.replace(WEB_DIRECTIVE_ALL, '').trim();
+      usage = second.usage ?? usage;
+    } else {
+      reply = reply.replace(WEB_DIRECTIVE_ALL, '').trim();
+    }
+
     return Response.json({ ok: true, model, reply, usage });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'The AI request failed';

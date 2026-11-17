@@ -132,6 +132,53 @@ export function normalizeHexColor(v: unknown): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Theme-aware "paper & ink" normalisation (upload → dark mode)
+// ---------------------------------------------------------------------------
+// A real Excel upload stamps an explicit WHITE fill and/or explicit BLACK font
+// on nearly every cell. Explicit colours beat the canvas theme, so in dark mode
+// those cells would stay white chips (light text on a light chip = unreadable).
+// The @fortune-sheet/core patch already folds such colours at RENDER time, but
+// a patch only reaches node_modules when `bun install` runs — so the SAME
+// rules are applied here, at IMPORT time, in app source, where a plain
+// `git pull` is enough (the two layers are idempotent together):
+//
+//   • white-ish GREY fills  (min channel ≥ 225) → no fill  → theme paper
+//     (light: white, exactly like the original file · dark: #13131c)
+//   • black-ish GREY fonts  (max channel ≤ 72)  → no font colour → theme ink
+//     (light: black, like the original · dark: #f2f2f7) — only on paper cells
+//   • on a KEPT fill (a chosen colour/grey) the file's font colour is pinned
+//     as-is (even black), so the chip stays readable in BOTH themes
+//   • deliberate greys (D9D9D9…) and chromatic colours always survive verbatim
+//
+// Thresholds mirror the patched renderer 1:1 (`__pulseFortunePaperFill` /
+// `__pulseFortuneDarkInk`), so both layers always agree.
+function hexRgbChannels(hex: string): [number, number, number] | null {
+  const h = hex.replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
+  return [
+    parseInt(h.slice(0, 2), 16),
+    parseInt(h.slice(2, 4), 16),
+    parseInt(h.slice(4, 6), 16),
+  ];
+}
+
+function isNeutralGrey([r, g, b]: [number, number, number]): boolean {
+  return Math.max(r, g, b) - Math.min(r, g, b) <= 10;
+}
+
+/** White-ish grey fill → renders as the theme paper instead of a white chip. */
+function isPaperFillHex(hex: string): boolean {
+  const rgb = hexRgbChannels(hex);
+  return !!rgb && isNeutralGrey(rgb) && Math.min(rgb[0], rgb[1], rgb[2]) >= 225;
+}
+
+/** Black-ish grey font → renders as the theme ink instead of black-on-dark. */
+function isDarkInkHex(hex: string): boolean {
+  const rgb = hexRgbChannels(hex);
+  return !!rgb && isNeutralGrey(rgb) && Math.max(rgb[0], rgb[1], rgb[2]) <= 72;
+}
+
+// ---------------------------------------------------------------------------
 // Border style mapping — OOXML names ⇄ FortuneSheet numeric codes (0-13)
 // ---------------------------------------------------------------------------
 const EXCEL_BORDER_TO_CODE: Record<string, number> = {
@@ -327,6 +374,21 @@ function xlsxCellToFortune(cell: XCell, r: number, c: number): FCell | null {
   }
   if (qp) fc.qp = qp;
 
+  // fill FIRST — the paper/ink rules below depend on whether a fill survives.
+  // White-ish "paper" fills (Excel stamps them on nearly every cell) are folded
+  // back to NO fill so the canvas theme shows through: light mode renders white
+  // paper exactly like the original file, dark mode renders #13131c instead of
+  // an unreadable white chip. Deliberate greys and chromatic fills survive.
+  const fill = style?.fill as unknown as { type?: string; pattern?: string; fgColor?: unknown } | undefined;
+  let keptFill: string | null = null;
+  if (fill?.type === 'pattern' && fill.pattern === 'solid') {
+    const bg = excelColorToHex(fill.fgColor);
+    if (bg && !isPaperFillHex(bg)) {
+      fc.bg = `#${bg}`;
+      keptFill = bg;
+    }
+  }
+
   const font = style?.font;
   if (font) {
     const fnt = font as unknown as Record<string, unknown>;
@@ -340,13 +402,17 @@ function xlsxCellToFortune(cell: XCell, r: number, c: number): FCell | null {
     if (typeof fnt.size === 'number' && fnt.size > 0 && fnt.size !== 11) fc.fs = fnt.size;
     if (typeof fnt.name === 'string' && fnt.name && fnt.name !== 'Calibri') fc.ff = fnt.name;
     const colorHex = excelColorToHex(fnt.color);
-    if (colorHex && colorHex !== '000000') fc.fc = `#${colorHex}`;
-  }
-
-  const fill = style?.fill as unknown as { type?: string; pattern?: string; fgColor?: unknown } | undefined;
-  if (fill?.type === 'pattern' && fill.pattern === 'solid') {
-    const bg = excelColorToHex(fill.fgColor);
-    if (bg) fc.bg = `#${bg}`;
+    if (colorHex) {
+      if (keptFill) {
+        // a kept fill carries its own contrast — pin the file's font colour
+        // (even black) so the chip reads well in BOTH themes
+        fc.fc = `#${colorHex}`;
+      } else if (!isDarkInkHex(colorHex)) {
+        // paper cell: black-ish GREY inks fold back to the theme ink
+        // (light: black — identical to the file · dark: #f2f2f7)
+        fc.fc = `#${colorHex}`;
+      }
+    }
   }
 
   const align = style?.alignment;

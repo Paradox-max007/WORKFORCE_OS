@@ -9,6 +9,8 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@fortune-sheet/core": "^1.0.4",
+    "@fortune-sheet/react": "^1.0.4",
     "@hookform/resolvers": "^5.1.1",
     "@mdxeditor/editor": "^3.39.1",
     "@radix-ui/react-accordion": "^1.2.11",
@@ -58,6 +60,7 @@
     "next-auth": "^4.24.11",
     "next-intl": "^4.3.4",
     "next-themes": "^0.4.6",
+    "pdfjs-dist": "^6.5.438",
     "react": "^19.0.0",
     "react-day-picker": "^9.8.0",
     "react-dom": "^19.0.0",
@@ -94,5 +97,8 @@
     "core-js",
     "es5-ext",
     "unrs-resolver"
-  ]
+  ],
+  "patchedDependencies": {
+    "@fortune-sheet/react@1.0.4": "patches/@fortune-sheet%2Freact@1.0.4.patch"
+  }
 }

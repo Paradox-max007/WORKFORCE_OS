@@ -76,3 +76,6 @@ scripts/pgdata_share_dedup/
 # local test postgres clusters + agent tool artifacts
 scripts/pgdata_*/
 tool-results/
+
+# user-uploaded source files (sandbox only, never part of the repo)
+upload/

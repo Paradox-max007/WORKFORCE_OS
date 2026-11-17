@@ -26,7 +26,7 @@ import dynamic from 'next/dynamic';
 import { motion } from 'framer-motion';
 import {
   ArrowLeft, Briefcase, Building2, CalendarDays, Download, Eye, FileClock,
-  FileSpreadsheet, Loader2, Pencil, Trash2, TriangleAlert, Upload, Users, X,
+  FileSpreadsheet, Loader2, Pencil, Trash2, TriangleAlert, Upload, Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -46,10 +46,16 @@ import type { SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { cn } from '@/lib/utils';
 
-/** the full spreadsheet stack (jspreadsheet + SheetJS + ExcelJS) is a big
+/** the full spreadsheet stack (FortuneSheet + ExcelJS + SheetJS) is a big
  *  chunk — load it only when an Excel file is actually opened for editing. */
 const TimesheetEditorDialog = dynamic(
   () => import('@/components/sites/timesheet-editor').then((m) => m.TimesheetEditorDialog),
+  { ssr: false, loading: () => null },
+);
+
+/** the PDF.js stack is likewise lazily loaded for the zoomable preview. */
+const PdfZoomViewer = dynamic(
+  () => import('@/components/sites/pdf-zoom-viewer').then((m) => m.PdfZoomViewer),
   { ssr: false, loading: () => null },
 );
 
@@ -442,7 +448,8 @@ export function SiteTimesheetsPage() {
         </div>
       )}
 
-      {/* ---- PDF preview — full screen area next to the sidebar ---- */}
+      {/* ---- PDF preview — full screen area next to the sidebar,
+             with independent zoom / fit / fullscreen / page navigation ---- */}
       {previewDoc && previewUrl && createPortal(
         <div
           className="fixed inset-y-0 right-0 z-50 flex flex-col bg-background transition-[left] duration-300"
@@ -450,31 +457,24 @@ export function SiteTimesheetsPage() {
           role="dialog"
           aria-label="Document preview"
         >
-          <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden border-l border-border bg-card">
-            <div className="flex items-center gap-3 border-b border-border px-4 py-3">
-              <FileClock className="size-5 shrink-0 text-brand" />
-              <p className="min-w-0 flex-1 truncate text-sm font-semibold">{previewDoc.name}</p>
-              <Button size="sm" className="h-8 gap-1.5" onClick={() => void download(previewDoc)}>
-                <Download className="size-4" /> Download
-              </Button>
-              <Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label="Close preview" onClick={() => { setPreviewDoc(null); setPreviewUrl(null); }}>
-                <X className="size-4" />
-              </Button>
-            </div>
-            <iframe src={previewUrl} title={previewDoc.name} className="min-h-0 flex-1 bg-white" />
-          </div>
+          <PdfZoomViewer
+            url={previewUrl}
+            fileName={previewDoc.name}
+            onDownload={() => void download(previewDoc)}
+            onClose={() => { setPreviewDoc(null); setPreviewUrl(null); }}
+          />
         </div>,
         document.body,
       )}
 
-      {/* ---- Excel editor ---- */}
+      {/* ---- Excel editor (stays open across saves — the page listing
+             refreshes behind it after every successful save) ---- */}
       {editor && (
         <TimesheetEditorDialog
           doc={editor.doc}
           bytes={editor.bytes}
           onClose={() => setEditor(null)}
           onSaved={async () => {
-            setEditor(null);
             if (siteId) await refreshDocs(siteId, months);
             toast.success('Timesheet saved back to the document store.');
           }}

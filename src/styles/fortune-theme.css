@@ -1,0 +1,125 @@
+/* ============================================================================
+   PULSE Workforce OS — FortuneSheet theme
+   ----------------------------------------------------------------------------
+   Re-skins the FortuneSheet chrome (toolbar / formula bar / sheet tabs /
+   context menus / dialogs) so the spreadsheet reads as a native part of the
+   app — light AND dark — instead of an embedded external tool.
+   All overrides are scoped under `.pulse-fortune` (the editor wrapper).
+   ========================================================================== */
+
+.pulse-fortune .fortune-container {
+  background: var(--card, #fff);
+  font-family: var(--font-sans, "Helvetica Neue", Helvetica, Arial, sans-serif);
+}
+
+/* ---- toolbar ---- */
+.pulse-fortune .fortune-toolbar {
+  background: color-mix(in srgb, var(--muted, #eee) 45%, var(--card, #fff));
+  border-bottom: 1px solid var(--border, #e4e4e7);
+  padding: 4px 8px;
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.pulse-fortune .fortune-toolbar-button {
+  color: hsl(240 5% 34%);
+}
+.dark .pulse-fortune .fortune-toolbar-button {
+  color: hsl(240 5% 78%);
+}
+.pulse-fortune .fortune-toolbar-button:hover {
+  background: color-mix(in srgb, var(--brand, #7c3aed) 10%, transparent);
+  color: var(--brand, #7c3aed);
+}
+.dark .pulse-fortune .fortune-toolbar-button:hover {
+  color: hsl(268 90% 80%);
+}
+.pulse-fortune .fortune-toolbar-divider {
+  background: var(--border, #d4d4d4);
+}
+
+/* combo/select popups (font family, size, borders, …) */
+.pulse-fortune .fortune-toolbar-combo-popup,
+.pulse-fortune .fortune-toolbar-more-container {
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.25);
+}
+.pulse-fortune .fortune-toolbar-select-option:hover {
+  background: color-mix(in srgb, var(--brand, #7c3aed) 8%, transparent);
+}
+
+/* ---- formula bar (name box + fx input) ---- */
+.pulse-fortune .fortune-fx-editor {
+  background: var(--card, #fff);
+  border-bottom: 1px solid var(--border, #e4e4e7);
+}
+.pulse-fortune .fortune-fx-input {
+  color: inherit;
+}
+.pulse-fortune .fortune-fx-input:focus {
+  outline: none;
+}
+
+/* ---- sheet tab bar (bottom) ---- */
+.pulse-fortune .fortune-sheettab-container {
+  background: color-mix(in srgb, var(--muted, #eee) 40%, var(--card, #fff));
+  border-top: 1px solid var(--border, #e4e4e7);
+  color: inherit;
+}
+.pulse-fortune .fortune-sheettab-button {
+  color: inherit;
+  border-radius: 6px;
+}
+.pulse-fortune .fortune-sheettab-placeholder {
+  color: hsl(240 4% 55%);
+}
+
+/* ---- context menus & dropdowns ---- */
+.pulse-fortune .fortune-context-menu,
+.pulse-fortune .fortune-filter-menu,
+.pulse-fortune .fortune-color-picker {
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+  border-radius: 10px;
+  box-shadow: 0 14px 38px -12px rgb(0 0 0 / 0.3);
+}
+.pulse-fortune .fortune-context-menu-item:hover {
+  background: color-mix(in srgb, var(--brand, #7c3aed) 9%, transparent);
+}
+
+/* ---- dialogs / message boxes / search & replace ---- */
+.pulse-fortune .fortune-modal-dialog,
+.pulse-fortune .fortune-dialog,
+.pulse-fortune .fortune-message-box,
+.pulse-fortune .fortune-search-replace {
+  background: var(--card, #fff);
+  color: inherit;
+  border: 1px solid var(--border, #e4e4e7);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px -16px rgb(0 0 0 / 0.35);
+}
+.pulse-fortune .fortune-modal-dialog-header {
+  border-bottom: 1px solid var(--border, #e4e4e7);
+}
+.pulse-fortune .fortune-message-box-button {
+  background: color-mix(in srgb, var(--brand, #7c3aed) 10%, transparent);
+  color: var(--brand, #7c3aed);
+  border-radius: 8px;
+}
+
+/* ---- inputs inside fortune dialogs ---- */
+.pulse-fortune .fortune-link-modify-input,
+.pulse-fortune .fortune-link-modify-select,
+.pulse-fortune input.fortune-input {
+  background: var(--background, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+  border-radius: 8px;
+  color: inherit;
+}
+
+/* keep the sheet itself paper-white (a spreadsheet is a document) */
+.pulse-fortune .fortune-sheet-container canvas {
+  background: #fff;
+}

@@ -1,0 +1,44 @@
+diff --git a/dist/index.esm.js b/dist/index.esm.js
+index c4486a2b38bec4eff10cdfda4d3748d40bfb71ba..d03e706d5a11f354d844804b1caca094a30a9d5b 100644
+--- a/dist/index.esm.js
++++ b/dist/index.esm.js
+@@ -6302,7 +6302,7 @@ var Toolbar = function Toolbar(_ref) {
+         iconId: "merge-all",
+         key: name,
+         tooltip: tooltip,
+-        text: "\u5408\u5E76\u5355\u5143\u683C",
++        text: merge.mergeAll,
+         onClick: function onClick() {
+           return setContext(function (ctx) {
+             handleMerge(ctx, "merge-all");
+@@ -6379,7 +6379,7 @@ var Toolbar = function Toolbar(_ref) {
+         iconId: "border-all",
+         key: name,
+         tooltip: tooltip,
+-        text: "\u8FB9\u6846\u8BBE\u7F6E",
++        text: toolbar.border,
+         onClick: function onClick() {
+           return setContext(function (ctx) {
+             handleBorder(ctx, "border-all", customColor, customStyle);
+diff --git a/dist/index.js b/dist/index.js
+index e4045518773578e3faaa3a58985a5585f9683088..f02cbd73936b7d50aee386cfb69a5deee5ea7d09 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -6313,7 +6313,7 @@ var Toolbar = function Toolbar(_ref) {
+         iconId: "merge-all",
+         key: name,
+         tooltip: tooltip,
+-        text: "\u5408\u5E76\u5355\u5143\u683C",
++        text: merge.mergeAll,
+         onClick: function onClick() {
+           return setContext(function (ctx) {
+             core.handleMerge(ctx, "merge-all");
+@@ -6390,7 +6390,7 @@ var Toolbar = function Toolbar(_ref) {
+         iconId: "border-all",
+         key: name,
+         tooltip: tooltip,
+-        text: "\u8FB9\u6846\u8BBE\u7F6E",
++        text: toolbar.border,
+         onClick: function onClick() {
+           return setContext(function (ctx) {
+             core.handleBorder(ctx, "border-all", customColor, customStyle);

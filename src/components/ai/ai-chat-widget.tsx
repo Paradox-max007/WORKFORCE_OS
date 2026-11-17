@@ -35,9 +35,10 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Bot, Loader2, RotateCcw, SendHorizonal, Settings2, Sparkles, X,
+  Loader2, RotateCcw, SendHorizonal, Settings2, X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { PebbleAvatar } from '@/components/ai/pebby-avatar';
 import { Button } from '@/components/ui/button';
 import { dataApi, isDemoMode } from '@/lib/data';
 import { db as demoDb } from '@/lib/data/demo-store';
@@ -47,7 +48,8 @@ import {
   formatAttendanceMonth, formatEmployeeDeepDive, formatSalarySheetPeriod,
   formatSiteDocuments,
 } from '@/lib/ai/knowledge';
-import { listSiteDocs, monthsSince } from '@/lib/files/site-docs';
+import { extractSiteDocText, formatSiteDocContent } from '@/lib/files/doc-content';
+import { listSiteDocs, monthsSince, type SiteDocKind } from '@/lib/files/site-docs';
 import {
   parseAiQueryDirective, runAiQuery, type AiQuerySpec,
 } from '@/lib/ai/query-engine';
@@ -72,16 +74,18 @@ interface ChatBubble {
 
 /** One parsed [[LOOKUP]] directive (the model replies with exactly one). */
 interface LookupDirective {
-  kind: 'employees' | 'attendance' | 'salary' | 'site-docs';
+  kind: 'employees' | 'attendance' | 'salary' | 'site-docs' | 'doc-content';
   codes?: string[];
   month?: string; // YYYY-MM
-  siteName?: string; // free-text site name (site-docs)
+  siteName?: string; // free-text site name (site-docs / doc-content)
+  docKind?: SiteDocKind; // timesheet | time-card (doc-content)
 }
 
 const SUGGESTIONS = [
   'When was Hassan cancelled, and why?',
   "What's the amount paid as salary in October, and how much is pending?",
   'Which sites have their timesheets and time cards uploaded?',
+  'Read this month\u2019s uploaded timesheet of any site and summarize it.',
   'Who supervises which branch, and what permissions do the admins have?',
   "What's the latest business news in the UAE?",
 ];
@@ -91,9 +95,21 @@ const SUGGESTIONS = [
  *  for the directive alone. */
 function parseLookupDirective(reply: string): LookupDirective | null {
   const text = reply.trim();
-  // site names contain spaces — this form needs its own, looser value match
+  // site names contain spaces — these forms need their own, looser value match
   const siteDocs = /^\[\[LOOKUP\]\]\s*site-docs\s*=\s*(.+?)\s*$/i.exec(text);
   if (siteDocs) return { kind: 'site-docs', siteName: siteDocs[1] };
+  // doc-content=<site name>:<YYYY-MM>:<timesheet|time-card> — read INSIDE a file
+  const docContent = /^\[\[LOOKUP\]\]\s*doc-content\s*=\s*(.+?)\s*$/i.exec(text);
+  if (docContent) {
+    const m = /^(.*):\s*(\d{4}-\d{2})\s*:\s*(timesheet|time-card)\s*$/i.exec(docContent[1].trim());
+    if (!m) return null;
+    return {
+      kind: 'doc-content',
+      siteName: m[1].trim(),
+      month: m[2],
+      docKind: m[3].toLowerCase() as SiteDocKind,
+    };
+  }
   const m = /^\[\[LOOKUP\]\]\s*(\w+)=([\w,\-]+)\s*$/i.exec(text);
   if (!m) return null;
   const [, kindRaw, value] = m;
@@ -417,6 +433,31 @@ export function AiChatWidget() {
       const docs = await listSiteDocs(site.id, months).catch(() => []);
       return `DATABASE LOOKUP RESULT:\n${formatSiteDocuments(site.name, docs)}`;
     }
+    if (dir.kind === 'doc-content') {
+      // read the CONTENT of one uploaded file (timesheet XLSX/CSV or a PDF)
+      const sites = await dataApi.listSites();
+      const needle = (dir.siteName ?? '').trim().toLowerCase();
+      const site = sites.find((s) => s.name.toLowerCase() === needle)
+        ?? sites.find((s) => s.name.toLowerCase().includes(needle));
+      if (!site) {
+        return `DATABASE LOOKUP ERROR — no site named "${dir.siteName}" exists. The snapshot's SITES section lists every site; pick the exact name and re-run the [[LOOKUP]].`;
+      }
+      const months = monthsSince(site.created_at);
+      const docs = await listSiteDocs(site.id, months).catch(() => []);
+      const doc = docs.find((d) => d.month === dir.month && d.kind === dir.docKind);
+      if (!doc) {
+        const slots = docs.length > 0
+          ? docs.map((d) => `${d.month}:${d.kind}`).join(', ')
+          : 'no files uploaded at all';
+        return `DATABASE LOOKUP ERROR — no ${dir.docKind} exists for "${site.name}" in ${dir.month}. Uploaded slots (month:kind): ${slots}. Re-run with one of those, or suggest uploading the file in Site Timesheets.`;
+      }
+      try {
+        const content = await extractSiteDocText(doc);
+        return `DATABASE LOOKUP RESULT:\n${formatSiteDocContent(site.name, doc, content)}`;
+      } catch (err) {
+        return `DATABASE LOOKUP ERROR — "${doc.name}" could not be read: ${(err as Error).message}. Tell the user the file exists but its content is not readable, and answer from the rest of the data if possible.`;
+      }
+    }
     const month = dir.month ?? '';
     if (dir.kind === 'attendance') {
       const [records, active, cancelled] = await Promise.all([
@@ -565,7 +606,7 @@ export function AiChatWidget() {
             {/* header */}
             <div className="flex items-center gap-3 border-b border-border/70 bg-gradient-to-r from-brand/10 via-brand/5 to-transparent px-4 py-3 backdrop-blur-sm">
               <div className="relative flex size-9 shrink-0 items-center justify-center rounded-xl brand-gradient text-brand-foreground">
-                <Bot className="size-5" />
+                <PebbleAvatar className="size-6 drop-shadow-sm" />
                 <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-card bg-emerald-500" />
               </div>
               <div className="min-w-0 flex-1">
@@ -594,16 +635,16 @@ export function AiChatWidget() {
               {messages.length === 0 && !preparing ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-2 text-center">
                   <div className="flex size-12 items-center justify-center rounded-2xl brand-gradient text-brand-foreground shadow-lg">
-                    <Sparkles className="size-6" />
+                    <PebbleAvatar className="size-9 drop-shadow-sm" />
                   </div>
                   <div>
                     <p className="text-sm font-semibold">Hi, I&apos;m {BOT_NAME} — Smart Assistant</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       I search the whole {settings.project_name} database on every question — employees,
                       attendance, payroll, advances, cancellations, admin permissions, site documents
-                      (timesheets &amp; time cards) and more — and
-                      I can run complex queries on any table. Multi-record answers render as scrollable
-                      tables. For anything else, I research the web.
+                      (timesheets &amp; time cards) and more — I can even read INSIDE the uploaded
+                      timesheets and PDFs, and I can run complex queries on any table. Multi-record
+                      answers render as scrollable tables. For anything else, I research the web.
                     </p>
                   </div>
                   <div className="mt-1 flex w-full flex-col gap-1.5">
@@ -744,7 +785,7 @@ export function AiChatWidget() {
             transition={{ duration: 0.16 }}
             className="flex"
           >
-            {open ? <X className="size-6" /> : <Bot className="size-6" />}
+            {open ? <X className="size-6" /> : <PebbleAvatar className="size-9 drop-shadow-md" />}
           </motion.span>
         </AnimatePresence>
       </motion.button>

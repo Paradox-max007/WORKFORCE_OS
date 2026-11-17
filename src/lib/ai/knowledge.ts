@@ -57,7 +57,7 @@ MODULES
 - Cancelled employees: archived workforce (Employees page → status filter "Cancelled"). Their attendance, salary history, advances, uniforms, warnings and fines remain readable everywhere for future reference.
 - Branches: regional groups owning sites; admins are granted branches (or direct site access).
 - Sites: work sites (client, project, supervisor, team leader, live status); printable A4 Daily Attendance paper per site.
-- Site Timesheets / Time Cards: per-site monthly document archive — for every month since a site started there are two OPTIONAL slots: a Time Card (PDF) and a Timesheet (XLSX or PDF). Excel timesheets open in the in-app editor and save back with all formatting. The snapshot's SITE DOCUMENTS section lists the uploaded files per site; for a site's full history use the [[LOOKUP]] site-docs directive.
+- Site Timesheets / Time Cards: per-site monthly document archive — for every month since a site started there are two OPTIONAL slots: a Time Card (PDF) and a Timesheet (XLSX or PDF). Excel timesheets open in the in-app editor and save back with all formatting. The snapshot's SITE DOCUMENTS section lists the uploaded files per site; for a site's full history use the [[LOOKUP]] site-docs directive; to read the actual CONTENT of an uploaded timesheet (XLSX/XLS/CSV) or time-card/timesheet PDF use the [[LOOKUP]] doc-content directive.
 - Camps: accommodation with block/room assignments.
 - Attendance: per-site monthly marking. Markers: 'A' = absent, a number (e.g. 8 / 8.5) = worked hours, blank = no record. Free text can also count as present.
 - Working Hours: total & monthly history per employee; lifetime hours drive the experience tier.
@@ -374,7 +374,7 @@ function formatSiteDocumentsGrouped(
   }
   const total = docs.length;
   return [
-    `SITE DOCUMENTS (uploaded files per site — ${total} file(s) across ${perSite.size} site(s); every month has two OPTIONAL slots: a Time Card PDF and a Timesheet XLSX/PDF)`,
+    `SITE DOCUMENTS (uploaded files per site — ${total} file(s) across ${perSite.size} site(s); every month has two OPTIONAL slots: a Time Card PDF and a Timesheet XLSX/PDF; read a file's CONTENT with [[LOOKUP]] doc-content=<site>:<YYYY-MM>:<timesheet|time-card>)`,
     ...lines,
   ].join('\n');
 }
@@ -394,6 +394,7 @@ export function formatSiteDocuments(
       .slice()
       .sort((a, b) => b.month.localeCompare(a.month) || a.kind.localeCompare(b.kind))
       .map((doc) => `- ${siteDocLinePart(doc)}${doc.name ? ` · file: ${doc.name}` : ''}`),
+    `To read the content of any slot above, run: [[LOOKUP]] doc-content=${siteName}:<month>:<kind> (kind is timesheet or time-card).`,
   ].join('\n');
 }
 
@@ -574,6 +575,7 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     '   [[LOOKUP]] attendance=2026-10',
     '   [[LOOKUP]] salary=2026-09',
     '   [[LOOKUP]] site-docs=Marina Tower',
+    '   [[LOOKUP]] doc-content=Marina Tower:2026-10:timesheet   ← reads INSIDE one uploaded file (timesheet XLSX/XLS/CSV or a time-card/timesheet PDF) and returns its extracted text. Use it whenever the user asks about what a timesheet or time card CONTAINS (hours, names, totals, remarks). The slot is <site name>:<YYYY-MM>:<timesheet|time-card>.',
     '4. Anything UNRELATED to this app (news, weather, sports, general knowledge, current affairs): reply with EXACTLY one directive line and nothing else:',
     '   [[WEB: short search query]]',
     '   The system researches the web and asks you again — then answer the user using the results.',

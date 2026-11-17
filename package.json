@@ -99,6 +99,7 @@
     "unrs-resolver"
   ],
   "patchedDependencies": {
+    "@fortune-sheet/core@1.0.4": "patches/@fortune-sheet%2Fcore@1.0.4.patch",
     "@fortune-sheet/react@1.0.4": "patches/@fortune-sheet%2Freact@1.0.4.patch"
   }
 }

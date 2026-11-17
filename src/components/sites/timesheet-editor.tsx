@@ -273,6 +273,26 @@ export function TimesheetEditorDialog({
     if (!armedRef.current) markDirty();
   }, [markDirty]);
 
+  // ---- dark/light theme watcher ------------------------------------------
+  // the engine paints the grid on <canvas> with colours chosen at draw time
+  // (see the @fortune-sheet/core patch), so flipping the app theme needs a
+  // repaint nudge — the engine fully redraws on window resize.
+  useEffect(() => {
+    if (phase !== 'ready') return;
+    const root = document.documentElement;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const repaint = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => window.dispatchEvent(new Event('resize')), 60);
+    };
+    const observer = new MutationObserver(repaint);
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => {
+      observer.disconnect();
+      if (timer) clearTimeout(timer);
+    };
+  }, [phase]);
+
   // ---- Ctrl+S (real database save, not a download) ----
   useEffect(() => {
     if (phase !== 'ready') return;
@@ -354,36 +374,50 @@ export function TimesheetEditorDialog({
   };
 
   // ---- print — composite the engine's stacked canvases into one image ----
+  // printed pages stay on white paper even while the editor is in dark
+  // mode: the engine patch honours __PULSE_FORTUNE_LIGHT__, so we force a
+  // light repaint for the snapshot and switch back afterwards.
   const printSheet = async () => {
     try {
       const host = document.querySelector('.pulse-fortune .fortune-sheet-container');
       const canvases = host ? Array.from(host.querySelectorAll('canvas')) : [];
       if (canvases.length === 0) { setNotice('Nothing to print yet.'); return; }
-      const width = Math.max(...canvases.map((c) => c.width));
-      const height = Math.max(...canvases.map((c) => c.height));
-      const out = document.createElement('canvas');
-      out.width = width;
-      out.height = height;
-      const ctx = out.getContext('2d');
-      if (!ctx) return;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, width, height);
-      for (const c of canvases) ctx.drawImage(c, 0, 0);
-      const img = new Image();
-      const dataUrl = out.toDataURL('image/png');
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('render failed'));
-        img.src = dataUrl;
-      });
-      const w = window.open('', '_blank', 'width=900,height=700');
-      if (!w) { setNotice('The print window was blocked by the browser.'); return; }
-      w.document.write(
-        `<html><head><title>Timesheet ${docRef.current.month}</title><style>
-          @page { margin: 10mm; } body { margin: 0; } img { width: 100%; }
-        </style></head><body><img src="${dataUrl}" onload="setTimeout(() => { window.focus(); window.print(); }, 150)" /></body></html>`,
-      );
-      w.document.close();
+      const g = globalThis as unknown as { __PULSE_FORTUNE_LIGHT__?: boolean };
+      const wasLight = g.__PULSE_FORTUNE_LIGHT__ === true;
+      g.__PULSE_FORTUNE_LIGHT__ = true;
+      window.dispatchEvent(new Event('resize'));
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await new Promise((r) => setTimeout(r, 80));
+      try {
+        const width = Math.max(...canvases.map((c) => c.width));
+        const height = Math.max(...canvases.map((c) => c.height));
+        const out = document.createElement('canvas');
+        out.width = width;
+        out.height = height;
+        const ctx = out.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        for (const c of canvases) ctx.drawImage(c, 0, 0);
+        const img = new Image();
+        const dataUrl = out.toDataURL('image/png');
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('render failed'));
+          img.src = dataUrl;
+        });
+        const w = window.open('', '_blank', 'width=900,height=700');
+        if (!w) { setNotice('The print window was blocked by the browser.'); return; }
+        w.document.write(
+          `<html><head><title>Timesheet ${docRef.current.month}</title><style>
+            @page { margin: 10mm; } body { margin: 0; } img { width: 100%; }
+          </style></head><body><img src="${dataUrl}" onload="setTimeout(() => { window.focus(); window.print(); }, 150)" /></body></html>`,
+        );
+        w.document.close();
+      } finally {
+        g.__PULSE_FORTUNE_LIGHT__ = wasLight;
+        window.dispatchEvent(new Event('resize'));
+      }
     } catch {
       setNotice('Printing failed — try Download instead.');
     }
@@ -521,7 +555,7 @@ export function TimesheetEditorDialog({
 
         {/* ---- the spreadsheet engine ---- */}
         <div className="min-h-0 flex-1 bg-neutral-100 p-1.5 dark:bg-neutral-900">
-          <div className="pulse-fortune h-full overflow-hidden rounded-lg border border-border bg-white shadow-sm">
+          <div className="pulse-fortune h-full overflow-hidden rounded-lg border border-border bg-card shadow-sm">
             <FortuneWorkbook
               key={docKey}
               ref={workbookRef}

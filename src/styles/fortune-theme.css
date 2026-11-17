@@ -119,7 +119,192 @@
   color: inherit;
 }
 
-/* keep the sheet itself paper-white (a spreadsheet is a document) */
+/* keep the sheet paper-white in light mode; in dark mode the patched engine
+   paints the canvas dark itself (see patches/@fortune-sheet%2Fcore@…patch) —
+   this only colours the transparent canvas backing (cleared header corners) */
 .pulse-fortune .fortune-sheet-container canvas {
   background: #fff;
+}
+.dark .pulse-fortune .fortune-sheet-container canvas {
+  background: #13131c;
+}
+
+/* ============================================================================
+   Menus & pickers — readable in BOTH themes
+   (upstream hard-codes white popup surfaces and dark ink; re-point them at
+   the PULSE palette so light text never sits on white popups in dark mode)
+   ========================================================================== */
+
+/* base ink follows the app foreground everywhere inside the editor */
+.pulse-fortune .fortune-container {
+  color: var(--foreground, inherit);
+}
+
+/* icon sprite: ink strokes are currentColor (patched); muted two-tone parts
+   read this variable */
+.pulse-fortune {
+  --fortune-icon-muted: #cccED2;
+}
+.dark .pulse-fortune {
+  --fortune-icon-muted: rgba(255, 255, 255, 0.38);
+}
+
+/* font-family / font-size / border-preset dropdowns + colour pickers */
+.pulse-fortune .fortune-toolbar-select,
+.pulse-fortune .fortune-toolbar-color-picker {
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+}
+.dark .pulse-fortune .fortune-toolbar-select,
+.dark .pulse-fortune .fortune-toolbar-color-picker {
+  box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.6);
+}
+.pulse-fortune .fortune-toolbar-select-option,
+.pulse-fortune .fortune-toolbar-color-picker {
+  color: var(--foreground, inherit);
+}
+
+/* combo hovers (upstream: rgba(0,0,0,…)) */
+.pulse-fortune .fortune-toolbar-combo:hover,
+.pulse-fortune .fortune-toolbar-combo-arrow:hover,
+.pulse-fortune .fortune-link-modify-modal .fortune-toolbar-button:hover {
+  background: color-mix(in srgb, var(--foreground, #000) 7%, transparent);
+}
+.pulse-fortune .fortune-toolbar-combo:active {
+  background: color-mix(in srgb, var(--foreground, #000) 12%, transparent);
+}
+
+/* zoom control (bottom-right) — dark #1e1e1f text + white menu upstream */
+.pulse-fortune .fortune-zoom-ratio {
+  color: var(--muted-foreground, #525c6f);
+}
+.pulse-fortune .fortune-zoom-button:hover,
+.pulse-fortune .fortune-zoom-ratio-item:hover {
+  background: color-mix(in srgb, var(--foreground, #000) 8%, transparent);
+}
+.pulse-fortune .fortune-zoom-ratio-menu {
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+  color: var(--foreground, inherit);
+}
+.dark .pulse-fortune .fortune-zoom-ratio-menu {
+  box-shadow: 2px 2px 16px rgb(0 0 0 / 0.55);
+}
+
+/* quick-formula / more menus (items use var(--foreground) via patch) */
+.pulse-fortune .fortune-toolbar-menu-line {
+  color: var(--foreground, inherit);
+}
+
+/* formula bar: name box + fx input (upstream ships them white) */
+.pulse-fortune .fortune-name-box,
+.pulse-fortune .fortune-fx-input {
+  background: var(--background, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+  color: var(--foreground, rgb(38, 42, 51));
+}
+
+/* select-all corner box (top-left of the headers) */
+.pulse-fortune .fortune-left-top {
+  background: color-mix(in srgb, var(--muted, #eee) 40%, var(--card, #fff));
+}
+
+/* formula autocomplete list + function help panel */
+.pulse-fortune .luckysheet-formula-search-c,
+.pulse-fortune .luckysheet-formula-help-c {
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e4e4e7);
+  color: var(--foreground, #535353);
+}
+.pulse-fortune .luckysheet-formula-search-c .luckysheet-formula-search-item {
+  background: var(--card, #fff);
+  color: var(--foreground, #535353);
+}
+.pulse-fortune .luckysheet-formula-search-c .luckysheet-formula-search-item-active,
+.pulse-fortune .luckysheet-formula-search-c .luckysheet-formula-search-item:hover {
+  background: color-mix(in srgb, var(--brand, #7c3aed) 12%, transparent);
+}
+.dark .pulse-fortune .luckysheet-cs-draghandle {
+  background-color: #f2f2f7;
+  border-color: #0b0b10;
+}
+
+/* context-menu rows (upstream ships them as #333 ink + #efefef hovers) */
+.pulse-fortune .luckysheet-cols-menu .luckysheet-cols-menuitem,
+.pulse-fortune .luckysheet-cols-menu .luckysheet-cols-menuitem
+  .luckysheet-cols-menuitem-content {
+  color: var(--foreground, #333);
+}
+.pulse-fortune .luckysheet-cols-menu .luckysheet-cols-menuitem:hover,
+.pulse-fortune .luckysheet-cols-menu .luckysheet-cols-menuitem-hover {
+  background: color-mix(in srgb, var(--brand, #7c3aed) 10%, transparent);
+}
+
+/* filter + message-box default buttons (upstream: white chip, ink text) */
+.pulse-fortune .fortune-filter-menu .button-default,
+.pulse-fortune .fortune-message-box-button.button-default {
+  color: var(--foreground, rgb(38, 42, 51));
+  background: var(--secondary, #fff);
+  border: 1px solid var(--border, #ebebeb);
+}
+.pulse-fortune .fortune-filter-menu .button-default:hover,
+.pulse-fortune .fortune-message-box-button.button-default:hover {
+  background: color-mix(in srgb, var(--foreground, #000) 8%, transparent);
+}
+
+/* link-edit popover + its bits */
+.pulse-fortune .fortune-link-modify-modal {
+  background: var(--card, #fff);
+  color: var(--foreground, inherit);
+}
+.pulse-fortune .fortune-link-modify-modal .modal-title {
+  color: var(--foreground, rgba(0, 0, 0, 0.88));
+}
+.pulse-fortune .fortune-link-modify-modal .divider {
+  background: var(--border, #e0e0e0);
+}
+
+/* cell comments stay light "sticky notes" in both themes (their ink is
+   hard-coded inline), so force the paper back even where the app is dark */
+.pulse-fortune .luckysheet-postil-show-main {
+  background: #fff !important;
+}
+
+/* ---- dark mode: the spreadsheet surface ---- */
+
+/* inline cell editor (the DOM textarea that appears while typing) */
+.dark .pulse-fortune .luckysheet-input-box-inner {
+  background-color: #13131c;
+  color: #f2f2f7;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 0.55);
+}
+.dark .pulse-fortune .luckysheet-formula-text-color {
+  color: #f2f2f7;
+}
+.dark .pulse-fortune .luckysheet-formula-text-string {
+  color: #7ee787;
+}
+.dark .pulse-fortune .luckysheet-formula-text-func {
+  color: #d2a8ff;
+}
+
+/* sheet scrollbars */
+.dark .pulse-fortune .luckysheet-scrollbar-ltr::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.28);
+}
+
+/* toolbar / tab-bar surfaces sit on card tones in dark */
+.dark .pulse-fortune .fortune-toolbar {
+  background: color-mix(in srgb, var(--muted, #16161f) 55%, var(--card, #101018));
+}
+.dark .pulse-fortune .fortune-toolbar-combo-popup,
+.dark .pulse-fortune .fortune-toolbar-more-container,
+.dark .pulse-fortune .fortune-context-menu,
+.dark .pulse-fortune .fortune-filter-menu,
+.dark .pulse-fortune .fortune-color-picker,
+.dark .pulse-fortune .fortune-modal-dialog,
+.dark .pulse-fortune .fortune-dialog,
+.dark .pulse-fortune .fortune-message-box,
+.dark .pulse-fortune .fortune-search-replace {
+  box-shadow: 0 14px 40px -12px rgb(0 0 0 / 0.65);
 }

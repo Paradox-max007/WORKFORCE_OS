@@ -1,0 +1,208 @@
+diff --git a/dist/index.esm.js b/dist/index.esm.js
+index 5c9820b1a261305d500e69eeaf350821872beaf4..b740be8050eaa55caa32c6cbd8cd4f3b538c957a 100644
+--- a/dist/index.esm.js
++++ b/dist/index.esm.js
+@@ -60367,7 +60367,7 @@ function normalizedCellAttr(cell, attr) {
+   } else if (["fc", "bg", "bc"].includes(attr)) {
+     var _value;
+     if (["fc", "bc"].includes(attr)) {
+-      value || (value = "#000000");
++      value || (value = __pulseFortuneTheme("#000000", "#f2f2f7"));
+     }
+     if (((_value = value) === null || _value === void 0 ? void 0 : _value.indexOf("rgba")) > -1) {
+       value = rgbToHex(value);
+@@ -72527,11 +72527,27 @@ function onDropCellSelectEnd(ctx, e, container) {
+   }
+ }
+ 
++function __pulseFortuneDark() {
++  try {
++    return typeof document !== "undefined" && document.documentElement.classList.contains("dark") && !(typeof globalThis !== "undefined" && globalThis.__PULSE_FORTUNE_LIGHT__);
++  } catch (e) {
++    return false;
++  }
++}
++function __pulseFortuneTheme(light, dark) {
++  return __pulseFortuneDark() ? dark : light;
++}
+ var defaultStyle = {
+-  fillStyle: "#000000",
++  get fillStyle() {
++    return __pulseFortuneTheme("#000000", "#f2f2f7");
++  },
+   textBaseline: "middle",
+-  strokeStyle: "#dfdfdf",
+-  rowFillStyle: "#5e5e5e",
++  get strokeStyle() {
++    return __pulseFortuneTheme("#dfdfdf", "rgba(255, 255, 255, 0.55)");
++  },
++  get rowFillStyle() {
++    return __pulseFortuneTheme("#5e5e5e", "#f2f2f7");
++  },
+   textAlign: "center"
+ };
+ function isRealNum$1(val) {
+@@ -72663,9 +72679,9 @@ var Canvas = /*#__PURE__*/function () {
+           continue;
+         }
+         if (((_this$sheetCtx$config = this.sheetCtx.config) === null || _this$sheetCtx$config === void 0 ? void 0 : (_this$sheetCtx$config2 = _this$sheetCtx$config.rowhidden) === null || _this$sheetCtx$config2 === void 0 ? void 0 : _this$sheetCtx$config2[r]) == null) {
+-          renderCtx.fillStyle = "#ffffff";
++          renderCtx.fillStyle = __pulseFortuneTheme("#ffffff", "#1b1b26");
+           renderCtx.fillRect(0, start_r + offsetTop + firstOffset, this.sheetCtx.rowHeaderWidth - 1, end_r - start_r + 1 + lastOffset - firstOffset);
+-          renderCtx.fillStyle = "#000000";
++          renderCtx.fillStyle = __pulseFortuneTheme("#000000", "#f2f2f7");
+           renderCtx.save();
+           renderCtx.scale(this.sheetCtx.zoomRatio, this.sheetCtx.zoomRatio);
+           var textMetrics = getMeasureText(r + 1, renderCtx, this.sheetCtx);
+@@ -72756,9 +72772,9 @@ var Canvas = /*#__PURE__*/function () {
+           continue;
+         }
+         if (((_this$sheetCtx$config5 = this.sheetCtx.config) === null || _this$sheetCtx$config5 === void 0 ? void 0 : (_this$sheetCtx$config6 = _this$sheetCtx$config5.colhidden) === null || _this$sheetCtx$config6 === void 0 ? void 0 : _this$sheetCtx$config6[c]) == null) {
+-          renderCtx.fillStyle = "#ffffff";
++          renderCtx.fillStyle = __pulseFortuneTheme("#ffffff", "#1b1b26");
+           renderCtx.fillRect(start_c + offsetLeft - 1, 0, end_c - start_c, this.sheetCtx.columnHeaderHeight - 1);
+-          renderCtx.fillStyle = "#000000";
++          renderCtx.fillStyle = __pulseFortuneTheme("#000000", "#f2f2f7");
+           renderCtx.save();
+           renderCtx.scale(this.sheetCtx.zoomRatio, this.sheetCtx.zoomRatio);
+           var textMetrics = getMeasureText(abc, renderCtx, this.sheetCtx);
+@@ -72884,7 +72900,7 @@ var Canvas = /*#__PURE__*/function () {
+       }
+       var rowEndY = this.sheetCtx.visibledatarow[rowEnd];
+       var colEndX = this.sheetCtx.visibledatacolumn[colEnd];
+-      renderCtx.fillStyle = "#ffffff";
++      renderCtx.fillStyle = __pulseFortuneTheme("#ffffff", "#13131c");
+       renderCtx.fillRect(offsetLeft - 1, offsetTop - 1, colEndX - scrollWidth, rowEndY - scrollHeight);
+       renderCtx.font = defaultFont(this.sheetCtx.defaultFontSize);
+       renderCtx.fillStyle = defaultStyle.fillStyle;
+@@ -73280,7 +73296,7 @@ var Canvas = /*#__PURE__*/function () {
+         fillStyle = checksCF.cellColor;
+       }
+       if (!fillStyle) {
+-        renderCtx.fillStyle = "#FFFFFF";
++        renderCtx.fillStyle = __pulseFortuneTheme("#FFFFFF", "#13131c");
+       } else {
+         renderCtx.fillStyle = fillStyle;
+       }
+@@ -73298,7 +73314,7 @@ var Canvas = /*#__PURE__*/function () {
+       renderCtx.fillRect(cellsize[0], cellsize[1], cellsize[2], cellsize[3]);
+       if ("".concat(r, "_").concat(c) in dynamicArrayCompute) {
+         var value = dynamicArrayCompute["".concat(r, "_").concat(c)].v;
+-        renderCtx.fillStyle = "#000000";
++        renderCtx.fillStyle = __pulseFortuneTheme("#000000", "#f2f2f7");
+         var fontset = defaultFont(this.sheetCtx.defaultFontSize);
+         renderCtx.font = fontset;
+         var horizonAlignPos = startX + 4 + offsetLeft;
+@@ -73373,7 +73389,7 @@ var Canvas = /*#__PURE__*/function () {
+         fillStyle = checksCF.cellColor;
+       }
+       if (!fillStyle) {
+-        renderCtx.fillStyle = "#FFFFFF";
++        renderCtx.fillStyle = __pulseFortuneTheme("#FFFFFF", "#13131c");
+       } else {
+         renderCtx.fillStyle = fillStyle;
+       }
+diff --git a/dist/index.js b/dist/index.js
+index 04113a18dee9feee28e9434ee3023626c800e7d3..3be2272fbb6ccad60a3968da2043e7f8cf870604 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -60377,7 +60377,7 @@ function normalizedCellAttr(cell, attr) {
+   } else if (["fc", "bg", "bc"].includes(attr)) {
+     var _value;
+     if (["fc", "bc"].includes(attr)) {
+-      value || (value = "#000000");
++      value || (value = __pulseFortuneTheme("#000000", "#f2f2f7"));
+     }
+     if (((_value = value) === null || _value === void 0 ? void 0 : _value.indexOf("rgba")) > -1) {
+       value = rgbToHex(value);
+@@ -72537,11 +72537,27 @@ function onDropCellSelectEnd(ctx, e, container) {
+   }
+ }
+ 
++function __pulseFortuneDark() {
++  try {
++    return typeof document !== "undefined" && document.documentElement.classList.contains("dark") && !(typeof globalThis !== "undefined" && globalThis.__PULSE_FORTUNE_LIGHT__);
++  } catch (e) {
++    return false;
++  }
++}
++function __pulseFortuneTheme(light, dark) {
++  return __pulseFortuneDark() ? dark : light;
++}
+ var defaultStyle = {
+-  fillStyle: "#000000",
++  get fillStyle() {
++    return __pulseFortuneTheme("#000000", "#f2f2f7");
++  },
+   textBaseline: "middle",
+-  strokeStyle: "#dfdfdf",
+-  rowFillStyle: "#5e5e5e",
++  get strokeStyle() {
++    return __pulseFortuneTheme("#dfdfdf", "rgba(255, 255, 255, 0.55)");
++  },
++  get rowFillStyle() {
++    return __pulseFortuneTheme("#5e5e5e", "#f2f2f7");
++  },
+   textAlign: "center"
+ };
+ function isRealNum$1(val) {
+@@ -72673,9 +72689,9 @@ var Canvas = /*#__PURE__*/function () {
+           continue;
+         }
+         if (((_this$sheetCtx$config = this.sheetCtx.config) === null || _this$sheetCtx$config === void 0 ? void 0 : (_this$sheetCtx$config2 = _this$sheetCtx$config.rowhidden) === null || _this$sheetCtx$config2 === void 0 ? void 0 : _this$sheetCtx$config2[r]) == null) {
+-          renderCtx.fillStyle = "#ffffff";
++          renderCtx.fillStyle = __pulseFortuneTheme("#ffffff", "#1b1b26");
+           renderCtx.fillRect(0, start_r + offsetTop + firstOffset, this.sheetCtx.rowHeaderWidth - 1, end_r - start_r + 1 + lastOffset - firstOffset);
+-          renderCtx.fillStyle = "#000000";
++          renderCtx.fillStyle = __pulseFortuneTheme("#000000", "#f2f2f7");
+           renderCtx.save();
+           renderCtx.scale(this.sheetCtx.zoomRatio, this.sheetCtx.zoomRatio);
+           var textMetrics = getMeasureText(r + 1, renderCtx, this.sheetCtx);
+@@ -72766,9 +72782,9 @@ var Canvas = /*#__PURE__*/function () {
+           continue;
+         }
+         if (((_this$sheetCtx$config5 = this.sheetCtx.config) === null || _this$sheetCtx$config5 === void 0 ? void 0 : (_this$sheetCtx$config6 = _this$sheetCtx$config5.colhidden) === null || _this$sheetCtx$config6 === void 0 ? void 0 : _this$sheetCtx$config6[c]) == null) {
+-          renderCtx.fillStyle = "#ffffff";
++          renderCtx.fillStyle = __pulseFortuneTheme("#ffffff", "#1b1b26");
+           renderCtx.fillRect(start_c + offsetLeft - 1, 0, end_c - start_c, this.sheetCtx.columnHeaderHeight - 1);
+-          renderCtx.fillStyle = "#000000";
++          renderCtx.fillStyle = __pulseFortuneTheme("#000000", "#f2f2f7");
+           renderCtx.save();
+           renderCtx.scale(this.sheetCtx.zoomRatio, this.sheetCtx.zoomRatio);
+           var textMetrics = getMeasureText(abc, renderCtx, this.sheetCtx);
+@@ -72894,7 +72910,7 @@ var Canvas = /*#__PURE__*/function () {
+       }
+       var rowEndY = this.sheetCtx.visibledatarow[rowEnd];
+       var colEndX = this.sheetCtx.visibledatacolumn[colEnd];
+-      renderCtx.fillStyle = "#ffffff";
++      renderCtx.fillStyle = __pulseFortuneTheme("#ffffff", "#13131c");
+       renderCtx.fillRect(offsetLeft - 1, offsetTop - 1, colEndX - scrollWidth, rowEndY - scrollHeight);
+       renderCtx.font = defaultFont(this.sheetCtx.defaultFontSize);
+       renderCtx.fillStyle = defaultStyle.fillStyle;
+@@ -73290,7 +73306,7 @@ var Canvas = /*#__PURE__*/function () {
+         fillStyle = checksCF.cellColor;
+       }
+       if (!fillStyle) {
+-        renderCtx.fillStyle = "#FFFFFF";
++        renderCtx.fillStyle = __pulseFortuneTheme("#FFFFFF", "#13131c");
+       } else {
+         renderCtx.fillStyle = fillStyle;
+       }
+@@ -73308,7 +73324,7 @@ var Canvas = /*#__PURE__*/function () {
+       renderCtx.fillRect(cellsize[0], cellsize[1], cellsize[2], cellsize[3]);
+       if ("".concat(r, "_").concat(c) in dynamicArrayCompute) {
+         var value = dynamicArrayCompute["".concat(r, "_").concat(c)].v;
+-        renderCtx.fillStyle = "#000000";
++        renderCtx.fillStyle = __pulseFortuneTheme("#000000", "#f2f2f7");
+         var fontset = defaultFont(this.sheetCtx.defaultFontSize);
+         renderCtx.font = fontset;
+         var horizonAlignPos = startX + 4 + offsetLeft;
+@@ -73383,7 +73399,7 @@ var Canvas = /*#__PURE__*/function () {
+         fillStyle = checksCF.cellColor;
+       }
+       if (!fillStyle) {
+-        renderCtx.fillStyle = "#FFFFFF";
++        renderCtx.fillStyle = __pulseFortuneTheme("#FFFFFF", "#13131c");
+       } else {
+         renderCtx.fillStyle = fillStyle;
+       }

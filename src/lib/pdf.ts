@@ -4,6 +4,17 @@
 
 import jsPDF from 'jspdf';
 import type { EmployeeVM, LeaveRequestVM } from '@/lib/types';
+import {
+  TERMINATION_BASIS_LABELS,
+  buildNoticeBody,
+  buildNoticeWhatsAppText,
+  noticeCreatorLine,
+  noticePdfFilename,
+  noticeRef,
+  noticeTitle,
+  sanitizeWhatsAppNumber,
+  type NoticeLetterData,
+} from '@/lib/notices';
 
 const BRAND = 'PULSE WORKFORCE OS';
 const BRAND_SHORT = 'PULSE Workforce';
@@ -351,4 +362,206 @@ export function printElement(el: HTMLElement): void {
   };
   if (iframe.contentWindow?.document.readyState === 'complete') setTimeout(doPrint, 300);
   else iframe.onload = () => setTimeout(doPrint, 300);
+}
+
+// ---------------------------------------------------------------------------
+// Formal letters & notices (Warning Letter / Termination Letter / Fine Notice)
+// ---------------------------------------------------------------------------
+// One generator for all three documents issued from the Notifications Hub:
+// full employee details, type-specific notice details, the formal letter body
+// (custom body wins) and the creator identification (user name / System).
+export function generateNoticePdf(data: NoticeLetterData): jsPDF {
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 18;
+  let y = 20;
+
+  const ensureSpace = (needed: number) => {
+    if (y + needed > pageH - 22) {
+      doc.addPage();
+      y = 20;
+    }
+  };
+
+  // ---- header -------------------------------------------------------------
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(...INK);
+  doc.text('PULSE WORKFORCE OS LLC.', pageW / 2, y, { align: 'center' });
+  y += 5;
+  doc.setDrawColor(...BRAND_COLOR);
+  doc.setLineWidth(0.8);
+  doc.line(margin, y, pageW - margin, y);
+  y += 9;
+
+  doc.setFontSize(13);
+  doc.text(noticeTitle(data.kind), pageW / 2, y, { align: 'center' });
+  y += 8;
+
+  // ref + date + creator identification
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...MUTED);
+  doc.text(`Reference: ${noticeRef(data.kind, data.recordId)}`, margin, y);
+  doc.text(`Date: ${new Date(data.createdAt).toLocaleDateString('en-GB')}`, pageW - margin, y, { align: 'right' });
+  y += 5.5;
+  doc.setTextColor(...INK);
+  doc.setFont('helvetica', 'bold');
+  doc.text(noticeCreatorLine(data.creatorName, data.isAuto), margin, y);
+  y += 9;
+
+  const section = (title: string) => {
+    ensureSpace(14);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(...BRAND_COLOR);
+    doc.text(title, margin, y);
+    y += 2;
+    doc.setDrawColor(200, 200, 210);
+    doc.setLineWidth(0.3);
+    doc.line(margin, y, pageW - margin, y);
+    y += 5.5;
+  };
+
+  // ---- employee information (two-column grid, all relevant details) --------
+  const emp = data.employee;
+  const accommodation = emp.camp_name
+    ? `${emp.camp_name}${emp.camp_block ? ` — Block ${emp.camp_block}` : ''}${emp.camp_room ? `, Room ${emp.camp_room}` : ''}`
+    : 'No camp assigned';
+  const leftCol: [string, string][] = [
+    ['Full Name', emp.full_name],
+    ['Employee ID', emp.employee_code],
+    ['Nationality', emp.nationality ?? '—'],
+    ['Date of Birth', emp.date_of_birth ?? '—'],
+    ['Phone', emp.phone ?? '—'],
+    ['Position', emp.position ?? '—'],
+    ['Trade', emp.trade_name ?? '—'],
+    ['Company', emp.company_name ?? '—'],
+  ];
+  const rightCol: [string, string][] = [
+    ['Branch', emp.branch_name ?? '—'],
+    ['Current Site', emp.site_name ?? 'Not Assigned'],
+    ['Accommodation', accommodation],
+    ['Join Date', emp.join_date ?? '—'],
+    ['Passport No.', emp.passport_number ?? '—'],
+    ['ID / Iqama No.', emp.id_number ?? '—'],
+    ['Employment Status', emp.status === 'active' ? 'Active' : emp.status === 'pending_deletion' ? 'Pending Deletion' : 'Deleted'],
+    ['Performance Rating', `${emp.rating.toFixed(1)} / 5.0`],
+  ];
+  section('EMPLOYEE INFORMATION');
+  const col2X = pageW / 2 + 4;
+  for (let i = 0; i < leftCol.length; i++) {
+    ensureSpace(6.5);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(...MUTED);
+    doc.text(leftCol[i][0], margin + 1, y);
+    doc.text(rightCol[i][0], col2X, y);
+    doc.setTextColor(...INK);
+    doc.text(doc.splitTextToSize(leftCol[i][1], pageW / 2 - margin - 34)[0] ?? '—', margin + 30, y);
+    doc.text(doc.splitTextToSize(rightCol[i][1], pageW / 2 - margin - 34)[0] ?? '—', col2X + 29, y);
+    y += 6.5;
+  }
+  y += 3;
+
+  // ---- notice details -------------------------------------------------------
+  section('NOTICE DETAILS');
+  const kv = (key: string, value: string) => {
+    ensureSpace(6.5);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...MUTED);
+    doc.text(key, margin + 1, y);
+    doc.setTextColor(...INK);
+    doc.text(value, margin + 52, y);
+    y += 6.5;
+  };
+  kv('Document Type', noticeTitle(data.kind));
+  if (data.kind === 'warning') {
+    kv('Warning Type', data.isAuto ? 'Auto-generated (attendance policy)' : 'Manually issued');
+    if (data.absentDates && data.absentDates.length > 0) {
+      kv('Recorded Absence(s)', data.absentDates.map((d) => new Date(d).toLocaleDateString('en-GB')).join(', '));
+    }
+  } else if (data.kind === 'fine') {
+    kv('Fine Amount', `SAR ${typeof data.amount === 'number' ? data.amount.toFixed(2) : '0.00'}`);
+  } else {
+    kv('Effective Date', data.effectiveDate ? new Date(data.effectiveDate).toLocaleDateString('en-GB') : '—');
+    kv('Notice Basis', TERMINATION_BASIS_LABELS[data.noticeBasis ?? 'with_notice']);
+    kv('Letter Text', data.customBody?.trim() ? 'Custom (as entered by issuer)' : 'Standard company format');
+  }
+  kv('Issued On', new Date(data.createdAt).toLocaleDateString('en-GB'));
+  y += 3;
+
+  // ---- letter body ----------------------------------------------------------
+  section(data.customBody?.trim() ? 'LETTER (CUSTOM TEXT)' : 'LETTER');
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...INK);
+  for (const para of buildNoticeBody(data)) {
+    const lines = doc.splitTextToSize(para, pageW - margin * 2 - 2) as string[];
+    for (const line of lines) {
+      ensureSpace(6);
+      doc.text(line, margin + 1, y);
+      y += 5.6;
+    }
+    y += 2.5;
+  }
+
+  // ---- signatures -----------------------------------------------------------
+  ensureSpace(34);
+  y = Math.max(y + 14, pageH - 52);
+  doc.setDrawColor(...INK);
+  doc.setLineWidth(0.3);
+  doc.line(margin, y, margin + 62, y);
+  doc.line(pageW - margin - 62, y, pageW - margin, y);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.5);
+  doc.setTextColor(...MUTED);
+  doc.text('Employee Signature', margin + 1, y + 4.5);
+  doc.text('HR / Office Admin', pageW - margin - 60, y + 4.5);
+
+  // ---- footer on every page -------------------------------------------------
+  const total = doc.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(...MUTED);
+    doc.text(`${BRAND_SHORT} · ${noticeRef(data.kind, data.recordId)} · ${noticeCreatorLine(data.creatorName, data.isAuto)}`, margin, pageH - 8);
+    doc.text(`Page ${i} of ${total}`, pageW - margin, pageH - 8, { align: 'right' });
+    doc.setFontSize(7.5);
+    doc.text('This is a computer-generated document.', pageW / 2, pageH - 4, { align: 'center' });
+  }
+  return doc;
+}
+
+export function downloadNoticePdf(data: NoticeLetterData): void {
+  generateNoticePdf(data).save(noticePdfFilename(data));
+}
+
+/** wa.me chat link with the employee's number + the notice summary as text. */
+export function openNoticeWhatsAppMessage(phoneDigitsOrRaw: string, text: string): void {
+  const digits = sanitizeWhatsAppNumber(phoneDigitsOrRaw);
+  const base = digits ? `https://wa.me/${digits}` : 'https://wa.me/';
+  window.open(`${base}?text=${encodeURIComponent(text)}`, '_blank');
+}
+
+/** Share the letter PDF through WhatsApp (Web Share API, download fallback). */
+export async function shareNoticePdfViaWhatsApp(data: NoticeLetterData): Promise<void> {
+  const doc = generateNoticePdf(data);
+  const blob = doc.output('blob');
+  const file = new File([blob], noticePdfFilename(data), { type: 'application/pdf' });
+  const nav = navigator as Navigator & { canShare?: (data: ShareData) => boolean };
+  const text = buildNoticeWhatsAppText(data);
+  if (nav.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: noticeTitle(data.kind), text });
+      return;
+    } catch { /* user cancelled → fall through */ }
+  }
+  doc.save(noticePdfFilename(data));
+  const digits = sanitizeWhatsAppNumber(data.employee.phone);
+  const base = digits ? `https://wa.me/${digits}` : 'https://wa.me/';
+  window.open(`${base}?text=${encodeURIComponent(text)}`, '_blank');
 }

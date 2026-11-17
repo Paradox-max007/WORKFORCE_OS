@@ -101,7 +101,7 @@ interface AppStore {
   salaryPeriodBranchId: string;
   setSalaryPeriodBranch: (branchId: string) => void;
   /** Which tab the Notifications Hub opens on (deep links from other pages) */
-  notificationsTab: 'requests' | 'warnings' | 'fines';
+  notificationsTab: 'requests' | 'warnings' | 'fines' | 'letters';
   /** Deep-link payload for the Advance Book — set when another page (e.g. the
    *  Payroll red time-card carryover line under Net Payable) sends the user to
    *  a SPECIFIC employee's advance record. The page scrolls to the record(s),
@@ -116,7 +116,7 @@ interface AppStore {
    *  Sites page "Timesheet / Time Cards" button on each site card). */
   selectedSiteId: string | null;
   navigateTo: (view: AppView) => void;
-  navigateToNotifications: (tab?: 'requests' | 'warnings' | 'fines') => void;
+  navigateToNotifications: (tab?: 'requests' | 'warnings' | 'fines' | 'letters') => void;
   navigateToEmployees: (filter?: string) => void;
   navigateToEmployeeDetails: (employeeId: string) => void;
   navigateToEmployeeForm: (

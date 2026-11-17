@@ -206,7 +206,7 @@ export interface Notification {
   profile_id: string;
   title: string;
   message: string;
-  type: 'request' | 'warning' | 'fine';
+  type: 'request' | 'warning' | 'fine' | 'termination';
   read: boolean;
   is_hidden: boolean;
   created_at: string;
@@ -243,6 +243,30 @@ export interface FineVM extends Fine {
   employee_name: string;
   employee_code: string;
   issued_by_name: string;
+}
+
+/** Contractual basis of a termination letter. */
+export type TerminationNoticeBasis = 'immediate' | 'with_notice' | 'payment_in_lieu';
+
+/** Formal termination letter issued from the Notifications Hub (Letters tab). */
+export interface TerminationLetter {
+  id: string;
+  employee_id: string;
+  reason: string;
+  /** last working day (YYYY-MM-DD) */
+  effective_date: string;
+  notice_basis: TerminationNoticeBasis;
+  /** free-text letter body — null = standard company format */
+  custom_body: string | null;
+  created_by: string | null;
+  is_hidden: boolean;
+  created_at: string;
+}
+
+export interface TerminationLetterVM extends TerminationLetter {
+  employee_name: string;
+  employee_code: string;
+  created_by_name: string;
 }
 
 export type LeaveType = 'casual' | 'sick' | 'annual' | 'emergency' | 'marriage' | 'other';
@@ -970,6 +994,7 @@ export type RealtimeTable =
   | 'notification'
   | 'warning'
   | 'fine'
+  | 'termination_letter'
   | 'leave_request'
   | 'cancellation_request'
   | 'uniform_registry'

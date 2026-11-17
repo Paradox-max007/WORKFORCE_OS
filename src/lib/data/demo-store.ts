@@ -28,6 +28,7 @@ import {
   type Site,
   type SiteSettings,
   type SiteTransfer,
+  type TerminationLetter,
   type Trade,
   type UniformEntry,
   type Warning,
@@ -201,6 +202,7 @@ export interface DemoDB {
   notifications: Notification[];
   warnings: Warning[];
   fines: Fine[];
+  terminationLetters: TerminationLetter[];
   leaveRequests: LeaveRequest[];
   cancellationRequests: CancellationRequest[];
   uniforms: UniformEntry[];
@@ -328,6 +330,7 @@ function seedDB(): DemoDB {
     notifications: [],
     warnings: [],
     fines: [],
+    terminationLetters: [],
     leaveRequests: [],
     cancellationRequests: [],
     uniforms: [],
@@ -971,6 +974,8 @@ function loadDB(): DemoDB {
         parsed.payrollTimeCards?.forEach((tc) => {
           if (tc.carryover_applied == null) tc.carryover_applied = 0;
         });
+        // termination letters shipped without a version bump — heal to []
+        if (!parsed.terminationLetters) parsed.terminationLetters = [];
         // advance ledger shipped without a version bump — heal to []
         if (!parsed.advanceRecords) parsed.advanceRecords = [];
         parsed.advanceRecords?.forEach((r) => {

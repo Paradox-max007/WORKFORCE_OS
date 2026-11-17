@@ -25,6 +25,7 @@ import {
   type EmployeeVM,
   type EmployeeWorkingHoursReport,
   type ExperienceTier,
+  type Fine,
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
@@ -54,9 +55,13 @@ import {
   type TradeInput,
   type TradeRate,
   type TradeRateInput,
+  type TerminationLetter,
+  type TerminationLetterVM,
+  type TerminationNoticeBasis,
   type UniformEntry,
   type UniformEntryInput,
   type UniformEntryUpdate,
+  type Warning,
   type WarningVM,
   type MenuPermissionMap,
   type AdminAccess,
@@ -388,6 +393,16 @@ const attachFineVM = (f: (typeof db.fines)[number]): FineVM => {
     employee_name: e?.full_name ?? 'Unknown',
     employee_code: e?.employee_code ?? '—',
     issued_by_name: profileName(f.created_by) ?? 'System',
+  };
+};
+
+const attachTerminationVM = (t: (typeof db.terminationLetters)[number]): TerminationLetterVM => {
+  const e = db.employees.find((x) => x.id === t.employee_id);
+  return {
+    ...t,
+    employee_name: e?.full_name ?? 'Unknown',
+    employee_code: e?.employee_code ?? '—',
+    created_by_name: profileName(t.created_by) ?? 'System',
   };
 };
 
@@ -1723,17 +1738,19 @@ export const demoApi = {
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
   },
 
-  async issueWarning(employeeId: string, reason: string): Promise<void> {
+  async issueWarning(employeeId: string, reason: string): Promise<Warning | null> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
-    db.warnings.push({
+    const record: Warning = {
       id: uid(), employee_id: employeeId, reason,
       is_auto_generated: false, absent_dates: null,
       created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
-    });
+    };
+    db.warnings.push(record);
     e.rating = clampRating(e.rating - 0.5);
     notifySuperAdmins('New Warning Issued', `${e.full_name} (${e.employee_code}) received a warning: ${reason}`, 'warning');
     saveAndEmit(['warning', 'notification', 'employee']);
+    return record;
   },
 
   async listFines(): Promise<FineVM[]> {
@@ -1744,17 +1761,54 @@ export const demoApi = {
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
   },
 
-  async issueFine(employeeId: string, reason: string, amount: number): Promise<void> {
+  async issueFine(employeeId: string, reason: string, amount: number): Promise<Fine | null> {
     const e = db.employees.find((x) => x.id === employeeId);
     if (!e) throw new Error('Employee not found');
     if (amount < 0) throw new Error('Fine amount cannot be negative');
-    db.fines.push({
+    const record: Fine = {
       id: uid(), employee_id: employeeId, reason, amount,
       created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
-    });
+    };
+    db.fines.push(record);
     e.rating = clampRating(e.rating - 1.0);
     notifySuperAdmins('New Fine Issued', `${e.full_name} (${e.employee_code}) was fined SAR ${amount}: ${reason}`, 'fine');
     saveAndEmit(['fine', 'notification', 'employee']);
+    return record;
+  },
+
+  // ---- termination letters ---------------------------------------------------------------
+  async listTerminationLetters(): Promise<TerminationLetterVM[]> {
+    return db.terminationLetters
+      .filter((t) => !t.is_hidden)
+      .filter((t) => { const e = db.employees.find((x) => x.id === t.employee_id); return e ? e.status !== 'deleted' : false; })
+      .map(attachTerminationVM)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  },
+
+  async createTerminationLetter(
+    employeeId: string,
+    reason: string,
+    effectiveDate: string,
+    noticeBasis: TerminationNoticeBasis,
+    customBody: string | null,
+  ): Promise<TerminationLetter | null> {
+    const e = db.employees.find((x) => x.id === employeeId);
+    if (!e) throw new Error('Employee not found');
+    if (!effectiveDate) throw new Error('Effective date is required');
+    const record: TerminationLetter = {
+      id: uid(), employee_id: employeeId, reason,
+      effective_date: effectiveDate, notice_basis: noticeBasis,
+      custom_body: customBody?.trim() ? customBody.trim() : null,
+      created_by: currentProfile()?.id ?? null, is_hidden: false, created_at: nowISO(),
+    };
+    db.terminationLetters.push(record);
+    notifySuperAdmins(
+      'New Termination Letter',
+      `${e.full_name} (${e.employee_code}) — termination letter issued (effective ${effectiveDate}): ${reason}`,
+      'termination',
+    );
+    saveAndEmit(['termination_letter', 'notification']);
+    return record;
   },
 
   // ---- notifications ---------------------------------------------------------------------

@@ -26,6 +26,7 @@ import {
   type EmployeeVM,
   type EmployeeWorkingHoursReport,
   type ExperienceTier,
+  type Fine,
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
@@ -58,9 +59,13 @@ import {
   type TradeInput,
   type TradeRate,
   type TradeRateInput,
+  type TerminationLetter,
+  type TerminationLetterVM,
+  type TerminationNoticeBasis,
   type UniformEntry,
   type UniformEntryInput,
   type UniformEntryUpdate,
+  type Warning,
   type WarningVM,
 } from '@/lib/types';
 import { ABSENT_DEDUCTION_FREE_DAYS, ABSENT_DEDUCTION_RATE, DEFAULT_SITE_SETTINGS } from '@/lib/types';
@@ -143,6 +148,7 @@ function ensureRealtimeChannel(): void {
     'attendance_share_link',
     'advance_record',
     'site_settings',
+    'termination_letter',
   ];
 
   // Clean up any stale channel on the same topic before subscribing
@@ -983,9 +989,10 @@ export const prodApi = {
     });
   },
 
-  async issueWarning(employeeId: string, reason: string): Promise<void> {
-    const { error } = await sb().rpc('issue_warning', { p_employee_id: employeeId, p_reason: reason });
+  async issueWarning(employeeId: string, reason: string): Promise<Warning | null> {
+    const { data, error } = await sb().rpc('issue_warning', { p_employee_id: employeeId, p_reason: reason });
     assertOk(error);
+    return ((data ?? null) as Warning | null);
   },
 
   async listFines(): Promise<FineVM[]> {
@@ -1005,11 +1012,48 @@ export const prodApi = {
     });
   },
 
-  async issueFine(employeeId: string, reason: string, amount: number): Promise<void> {
-    const { error } = await sb().rpc('issue_fine', {
+  async issueFine(employeeId: string, reason: string, amount: number): Promise<Fine | null> {
+    const { data, error } = await sb().rpc('issue_fine', {
       p_employee_id: employeeId, p_reason: reason, p_amount: amount,
     });
     assertOk(error);
+    return ((data ?? null) as Fine | null);
+  },
+
+  // ---- termination letters ---------------------------------------------------------------
+  async listTerminationLetters(): Promise<TerminationLetterVM[]> {
+    const { data, error } = await sb().from('termination_letter')
+      .select('*, employee:employee_id(full_name, employee_code), creator:created_by(name)')
+      .eq('is_hidden', false)
+      .order('created_at', { ascending: false });
+    assertOk(error);
+    return ((data ?? []) as unknown as Record<string, unknown>[]).map((row) => {
+      const e = row.employee as { full_name: string; employee_code: string } | null;
+      return {
+        ...(row as unknown as TerminationLetterVM),
+        employee_name: e?.full_name ?? 'Unknown',
+        employee_code: e?.employee_code ?? '—',
+        created_by_name: (row.creator as { name: string } | null)?.name ?? 'System',
+      };
+    });
+  },
+
+  async createTerminationLetter(
+    employeeId: string,
+    reason: string,
+    effectiveDate: string,
+    noticeBasis: TerminationNoticeBasis,
+    customBody: string | null,
+  ): Promise<TerminationLetter | null> {
+    const { data, error } = await sb().rpc('create_termination_letter', {
+      p_employee_id: employeeId,
+      p_reason: reason,
+      p_effective_date: effectiveDate,
+      p_notice_basis: noticeBasis,
+      p_custom_body: customBody?.trim() ? customBody.trim() : null,
+    });
+    assertOk(error);
+    return ((data ?? null) as TerminationLetter | null);
   },
 
   // ---- notifications ---------------------------------------------------------------------

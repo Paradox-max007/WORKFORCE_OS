@@ -13,9 +13,10 @@
 import { motion } from 'framer-motion';
 import {
   Banknote, Bell, BellOff, CalendarCheck2, Check, CheckCheck, ChevronsUpDown,
-  Download, Inbox, Loader2, MessageCircle, Plus, Printer, TriangleAlert, UserX, X, Zap,
+  Download, FileDown, FileText, Inbox, Loader2, MessageCircle, Plus, Printer,
+  Send, TriangleAlert, UserX, X, Zap,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
 import {
@@ -36,11 +37,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { dataApi } from '@/lib/data';
 import { fmtDate, fmtSar, fmtTimeAgo, initials } from '@/lib/format';
-import { downloadLeavePdf, openLeavePrintWindow, shareLeaveViaWhatsApp } from '@/lib/pdf';
+import {
+  downloadLeavePdf, openLeavePrintWindow, shareLeaveViaWhatsApp,
+  downloadNoticePdf, openNoticeWhatsAppMessage, shareNoticePdfViaWhatsApp,
+} from '@/lib/pdf';
+import {
+  NOTICE_KINDS, buildNoticeWhatsAppText, noticeLabel, noticeRef, noticeTitle,
+  sanitizeWhatsAppNumber,
+  type NoticeKind, type NoticeLetterData, type TerminationNoticeBasis,
+} from '@/lib/notices';
 import {
   LEAVE_TYPES,
   type CancellationRequestVM, type EmployeeVM, type FineVM, type LeaveRequestInput,
-  type LeaveRequestVM, type LeaveType, type Notification, type WarningVM,
+  type LeaveRequestVM, type LeaveType, type Notification, type TerminationLetterVM,
+  type WarningVM,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
@@ -58,11 +68,12 @@ const MONTH_OPTIONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', '
 const CURRENT_YEAR = new Date().getFullYear();
 const YEAR_OPTIONS = [CURRENT_YEAR - 2, CURRENT_YEAR - 1, CURRENT_YEAR, CURRENT_YEAR + 1, CURRENT_YEAR + 2];
 
-/** Colored dot per notification type (request = brand, warning = amber, fine = rose) */
+/** Colored dot per notification type (request = brand, warning = amber, fine = rose, termination = red) */
 const TYPE_DOT: Record<Notification['type'], string> = {
   request: 'bg-brand',
   warning: 'bg-amber-500',
   fine: 'bg-rose-500',
+  termination: 'bg-red-500',
 };
 
 const DOC_BTN = 'size-8 text-muted-foreground transition-colors hover:bg-brand/10 hover:text-brand';
@@ -772,7 +783,46 @@ function CancellationCard({
   );
 }
 
-function WarningCard({ warn, index }: { warn: WarningVM; index: number }) {
+/** Shared action row: download the formal letter PDF / send via WhatsApp */
+function NoticeActions({ onDownload, onWhatsApp }: { onDownload: () => void; onWhatsApp: () => void }) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t pt-2.5">
+      <Button
+        size="sm" variant="outline"
+        className="h-8 gap-1.5 px-2.5 text-[11px]"
+        onClick={onDownload}
+      >
+        <FileDown size={13} /> Letter PDF
+      </Button>
+      <Button
+        size="sm" variant="outline"
+        className="h-8 gap-1.5 px-2.5 text-[11px] text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400"
+        onClick={onWhatsApp}
+      >
+        <MessageCircle size={13} /> WhatsApp
+      </Button>
+    </div>
+  );
+}
+
+function WarningCard({
+  warn, index, employee, onWhatsApp,
+}: {
+  warn: WarningVM;
+  index: number;
+  employee: EmployeeVM | undefined;
+  onWhatsApp: (data: NoticeLetterData) => void;
+}) {
+  const letterData = (): NoticeLetterData | null => !employee ? null : {
+    kind: 'warning',
+    employee,
+    recordId: warn.id,
+    reason: warn.reason,
+    createdAt: warn.created_at,
+    creatorName: warn.issued_by_name,
+    isAuto: warn.is_auto_generated,
+    absentDates: warn.absent_dates,
+  };
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -811,13 +861,38 @@ function WarningCard({ warn, index }: { warn: WarningVM; index: number }) {
       )}
 
       <p className="mt-1.5 text-[11px] text-muted-foreground">
-        Issued by {warn.issued_by_name} · {fmtTimeAgo(warn.created_at)}
+        Created by: {warn.is_auto_generated ? 'System (Auto-generated)' : warn.issued_by_name} · {fmtTimeAgo(warn.created_at)}
       </p>
+
+      {employee ? (
+        <NoticeActions
+          onDownload={() => { const d = letterData(); if (d) downloadNoticePdf(d); }}
+          onWhatsApp={() => { const d = letterData(); if (d) onWhatsApp(d); }}
+        />
+      ) : (
+        <p className="mt-2 text-[11px] text-muted-foreground/70">Employee record unavailable — letter cannot be generated.</p>
+      )}
     </motion.div>
   );
 }
 
-function FineCard({ fine, index }: { fine: FineVM; index: number }) {
+function FineCard({
+  fine, index, employee, onWhatsApp,
+}: {
+  fine: FineVM;
+  index: number;
+  employee: EmployeeVM | undefined;
+  onWhatsApp: (data: NoticeLetterData) => void;
+}) {
+  const letterData = (): NoticeLetterData | null => !employee ? null : {
+    kind: 'fine',
+    employee,
+    recordId: fine.id,
+    reason: fine.reason,
+    createdAt: fine.created_at,
+    creatorName: fine.issued_by_name,
+    amount: fine.amount,
+  };
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -838,9 +913,473 @@ function FineCard({ fine, index }: { fine: FineVM; index: number }) {
       <p className="mt-2 line-clamp-2 text-sm italic text-muted-foreground">{fine.reason}</p>
 
       <p className="mt-1.5 text-[11px] text-muted-foreground">
-        Issued by {fine.issued_by_name} · {fmtTimeAgo(fine.created_at)}
+        Created by: {fine.issued_by_name} · {fmtTimeAgo(fine.created_at)}
       </p>
+
+      {employee ? (
+        <NoticeActions
+          onDownload={() => { const d = letterData(); if (d) downloadNoticePdf(d); }}
+          onWhatsApp={() => { const d = letterData(); if (d) onWhatsApp(d); }}
+        />
+      ) : (
+        <p className="mt-2 text-[11px] text-muted-foreground/70">Employee record unavailable — notice cannot be generated.</p>
+      )}
     </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Letters tab — unified document card (warning letters / fine notices / termination letters)
+// ---------------------------------------------------------------------------
+const KIND_BADGE: Record<NoticeKind, { cls: string; icon: React.ReactNode }> = {
+  warning: {
+    cls: 'border-amber-500/25 bg-amber-500/10 text-amber-500',
+    icon: <TriangleAlert size={10} />,
+  },
+  fine: {
+    cls: 'border-rose-500/25 bg-rose-500/10 text-rose-500',
+    icon: <Banknote size={10} />,
+  },
+  termination: {
+    cls: 'border-red-500/30 bg-red-500/10 text-red-500',
+    icon: <UserX size={10} />,
+  },
+};
+
+interface NoticeDoc {
+  kind: NoticeKind;
+  recordId: string;
+  employeeId: string;
+  employeeName: string;
+  employeeCode: string;
+  reason: string;
+  createdAt: string;
+  creatorName: string;
+  isAuto: boolean;
+  amount?: number;
+  effectiveDate?: string | null;
+  noticeBasis?: TerminationNoticeBasis;
+  customBody?: string | null;
+}
+
+function NoticeDocumentCard({
+  doc, index, employee, onWhatsApp,
+}: {
+  doc: NoticeDoc;
+  index: number;
+  employee: EmployeeVM | undefined;
+  onWhatsApp: (data: NoticeLetterData) => void;
+}) {
+  const letterData = (): NoticeLetterData | null => !employee ? null : {
+    kind: doc.kind,
+    employee,
+    recordId: doc.recordId,
+    reason: doc.reason,
+    createdAt: doc.createdAt,
+    creatorName: doc.creatorName,
+    isAuto: doc.isAuto,
+    amount: doc.amount,
+    effectiveDate: doc.effectiveDate,
+    noticeBasis: doc.noticeBasis,
+    customBody: doc.customBody,
+  };
+  const badge = KIND_BADGE[doc.kind];
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: Math.min(index, 12) * 0.03 }}
+      className="card-glow rounded-xl border bg-card p-4"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className={cn('inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold', badge.cls)}>
+            {badge.icon} {noticeLabel(doc.kind)}
+          </span>
+          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{noticeRef(doc.kind, doc.recordId)}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {doc.isAuto && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-zinc-500/25 bg-zinc-500/10 px-2 py-0.5 text-[11px] font-medium text-zinc-400">
+              <Zap size={10} /> Auto
+            </span>
+          )}
+          {doc.kind === 'fine' && typeof doc.amount === 'number' && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-500">
+              <Banknote size={10} /> {fmtSar(doc.amount)}
+            </span>
+          )}
+          {doc.kind === 'termination' && doc.effectiveDate && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-red-500/25 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium text-red-500">
+              <CalendarCheck2 size={10} /> Effective {fmtDate(doc.effectiveDate)}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
+        <p className="truncate text-sm font-semibold">{doc.employeeName}</p>
+        <MonoCode code={doc.employeeCode} />
+      </div>
+
+      <p className="mt-1.5 line-clamp-2 text-sm italic text-muted-foreground">{doc.reason}</p>
+
+      <p className="mt-1.5 text-[11px] text-muted-foreground">
+        Created by: {doc.isAuto ? 'System (Auto-generated)' : doc.creatorName} · {fmtDate(doc.createdAt)}
+      </p>
+
+      {employee ? (
+        <NoticeActions
+          onDownload={() => { const d = letterData(); if (d) downloadNoticePdf(d); }}
+          onWhatsApp={() => { const d = letterData(); if (d) onWhatsApp(d); }}
+        />
+      ) : (
+        <p className="mt-2 text-[11px] text-muted-foreground/70">Employee record unavailable — letter cannot be generated.</p>
+      )}
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// New Letter / Notice dialog (Warning Letter · Termination Letter · Fine Notice)
+// ---------------------------------------------------------------------------
+function NoticeCreateDialog({
+  open, onOpenChange, employees, creatorName, onWhatsApp,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  employees: EmployeeVM[];
+  creatorName: string;
+  onWhatsApp: (data: NoticeLetterData) => void;
+}) {
+  const [kind, setKind] = useState<NoticeKind>('warning');
+  const [employeeId, setEmployeeId] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
+  const [amount, setAmount] = useState('');
+  const [effectiveDate, setEffectiveDate] = useState('');
+  const [noticeBasis, setNoticeBasis] = useState<TerminationNoticeBasis>('with_notice');
+  const [customBody, setCustomBody] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [download, setDownload] = useState(true);
+
+  useEffect(() => {
+    if (open) {
+      setKind('warning');
+      setEmployeeId(null);
+      setReason('');
+      setAmount('');
+      setEffectiveDate('');
+      setNoticeBasis('with_notice');
+      setCustomBody('');
+      setBusy(false);
+      setDownload(true);
+    }
+  }, [open]);
+
+  const employee = useMemo(() => employees.find((e) => e.id === employeeId) ?? null, [employees, employeeId]);
+
+  const submit = async () => {
+    if (!employeeId || !employee) { toast.error('Please select an employee'); return; }
+    if (!reason.trim()) { toast.error('Please provide a reason'); return; }
+    let parsedAmount = 0;
+    if (kind === 'fine') {
+      parsedAmount = parseFloat(amount);
+      if (amount.trim() === '' || Number.isNaN(parsedAmount) || parsedAmount < 0) {
+        toast.error('Please enter a valid fine amount');
+        return;
+      }
+    }
+    if (kind === 'termination' && !effectiveDate) { toast.error('Please select the effective date'); return; }
+    setBusy(true);
+    try {
+      let recordId = '';
+      if (kind === 'warning') {
+        const rec = await dataApi.issueWarning(employeeId, reason.trim());
+        recordId = rec?.id ?? '';
+      } else if (kind === 'fine') {
+        const rec = await dataApi.issueFine(employeeId, reason.trim(), parsedAmount);
+        recordId = rec?.id ?? '';
+      } else {
+        const rec = await dataApi.createTerminationLetter(
+          employeeId, reason.trim(), effectiveDate, noticeBasis, customBody.trim() || null,
+        );
+        recordId = rec?.id ?? '';
+      }
+      if (recordId) {
+        const letter: NoticeLetterData = {
+          kind,
+          employee,
+          recordId,
+          reason: reason.trim(),
+          createdAt: new Date().toISOString(),
+          creatorName,
+          amount: kind === 'fine' ? parsedAmount : undefined,
+          effectiveDate: kind === 'termination' ? effectiveDate : undefined,
+          noticeBasis: kind === 'termination' ? noticeBasis : undefined,
+          customBody: kind === 'termination' ? customBody.trim() || null : undefined,
+        };
+        toast.success(`${noticeTitle(kind)} created${kind !== 'termination' ? (kind === 'fine' ? ' — fine issued' : ' — warning issued') : ''}`);
+        if (download) downloadNoticePdf(letter);
+        else onWhatsApp(letter);
+      } else {
+        toast.success(`${noticeTitle(kind)} created`);
+      }
+      onOpenChange(false);
+    } catch (err) {
+      toast.error(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>New Letter / Notice</DialogTitle>
+          <DialogDescription>
+            Create a formal Warning Letter, Termination Letter or Fine Notice — download the PDF or send it through WhatsApp.
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* document type */}
+        <div className="grid grid-cols-3 gap-2">
+          {NOTICE_KINDS.map((k) => (
+            <button
+              key={k.kind}
+              type="button"
+              onClick={() => setKind(k.kind)}
+              className={cn(
+                'flex flex-col items-center gap-1 rounded-lg border p-2.5 text-center text-[11px] font-medium transition-colors',
+                kind === k.kind
+                  ? 'border-brand bg-brand/10 text-brand'
+                  : 'border-border text-muted-foreground hover:bg-muted/60',
+              )}
+            >
+              {k.kind === 'warning' && <TriangleAlert size={16} />}
+              {k.kind === 'termination' && <UserX size={16} />}
+              {k.kind === 'fine' && <Banknote size={16} />}
+              {k.label}
+            </button>
+          ))}
+        </div>
+
+        {/* employee */}
+        <div className="grid gap-1.5">
+          <Label>Employee <span className="text-rose-500">*</span></Label>
+          <EmployeeCombobox
+            employees={employees}
+            value={employeeId}
+            onChange={setEmployeeId}
+            emptyText="No active employees found."
+          />
+          {employee && (
+            <p className="rounded-md bg-muted/60 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+              {employee.position ?? '—'} · {employee.nationality ?? '—'} · {employee.site_name ?? 'No site'} · {employee.phone ?? 'No phone'}
+            </p>
+          )}
+        </div>
+
+        {/* fine amount */}
+        {kind === 'fine' && (
+          <div className="grid gap-1.5">
+            <Label htmlFor="notice-amount">Amount (SAR) <span className="text-rose-500">*</span></Label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-muted-foreground">SAR</span>
+              <Input
+                id="notice-amount"
+                type="number"
+                min={0}
+                step={0.01}
+                className="h-11 pl-11"
+                placeholder="0.00"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* termination specifics */}
+        {kind === 'termination' && (
+          <>
+            <div className="grid gap-1.5 sm:grid-cols-2 sm:gap-3">
+              <div className="grid gap-1.5">
+                <Label htmlFor="notice-effective">Effective Date <span className="text-rose-500">*</span></Label>
+                <Input
+                  id="notice-effective"
+                  type="date"
+                  className="h-11"
+                  value={effectiveDate}
+                  onChange={(e) => setEffectiveDate(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label>Notice Basis</Label>
+                <Select value={noticeBasis} onValueChange={(v) => setNoticeBasis(v as TerminationNoticeBasis)}>
+                  <SelectTrigger className="h-11 bg-card" aria-label="Notice basis"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="with_notice">With notice period</SelectItem>
+                    <SelectItem value="immediate">Immediate termination</SelectItem>
+                    <SelectItem value="payment_in_lieu">Payment in lieu of notice</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="notice-custom">Custom Letter Text <span className="text-muted-foreground">(optional — leave blank for the standard format)</span></Label>
+              <Textarea
+                id="notice-custom"
+                rows={4}
+                value={customBody}
+                onChange={(e) => setCustomBody(e.target.value)}
+                placeholder="Type the full letter text if the standard format does not fit…"
+              />
+            </div>
+          </>
+        )}
+
+        {/* reason */}
+        <div className="grid gap-1.5">
+          <Label htmlFor="notice-reason">
+            Reason <span className="text-rose-500">*</span>
+            {kind === 'warning' && <span className="ml-1 text-muted-foreground">(deducts 0.5 stars)</span>}
+            {kind === 'fine' && <span className="ml-1 text-muted-foreground">(deducts 1 star)</span>}
+          </Label>
+          <Textarea
+            id="notice-reason"
+            rows={3}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder={kind === 'termination' ? 'Grounds for termination…' : 'What happened?…'}
+          />
+        </div>
+
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
+          The letter will be identified as <span className="font-semibold text-foreground">Created by: {creatorName}</span> and carries the
+          employee's name, code and full details.
+        </p>
+
+        <div className="flex items-center gap-2">
+          <Button
+            type="button" size="sm" variant={download ? 'default' : 'outline'}
+            className="h-8 gap-1.5 text-[11px]"
+            onClick={() => setDownload(true)}
+          >
+            <FileDown size={13} /> Download PDF after creating
+          </Button>
+          <Button
+            type="button" size="sm" variant={!download ? 'default' : 'outline'}
+            className="h-8 gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400"
+            onClick={() => setDownload(false)}
+          >
+            <MessageCircle size={13} /> Open WhatsApp instead
+          </Button>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>Cancel</Button>
+          <Button onClick={() => { void submit(); }} disabled={busy} className="bg-brand text-white shadow-xs hover:bg-brand/90">
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
+            {busy ? 'Creating…' : `Create ${noticeLabel(kind)}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp send dialog — "send directly" (PDF file) and "send as message"
+// ---------------------------------------------------------------------------
+function WhatsAppSendDialog({
+  open, onOpenChange, payload,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  payload: { data: NoticeLetterData; nonce: number } | null;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        {payload && (
+          <WhatsAppSendForm key={payload.nonce} data={payload.data} onOpenChange={onOpenChange} />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function WhatsAppSendForm({
+  data, onOpenChange,
+}: {
+  data: NoticeLetterData;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [phone, setPhone] = useState(() => sanitizeWhatsAppNumber(data.employee.phone) ?? '');
+  const [text, setText] = useState(() => buildNoticeWhatsAppText(data));
+  const [busy, setBusy] = useState(false);
+  const digits = phone.replace(/[^0-9]/g, '');
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <MessageCircle size={16} className="text-emerald-500" />
+          Send {noticeTitle(data.kind).toLowerCase()} via WhatsApp
+        </DialogTitle>
+        <DialogDescription>
+          Send the PDF file directly, or send the notice as a text message to the employee's number.
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="grid gap-1.5">
+        <Label htmlFor="wa-phone">WhatsApp Number <span className="text-muted-foreground">(international format, e.g. 9665xxxxxxxx)</span></Label>
+        <Input
+          id="wa-phone"
+          inputMode="tel"
+          className="h-11"
+          placeholder="9665xxxxxxxx"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+        />
+      </div>
+
+      <div className="grid gap-1.5">
+        <Label htmlFor="wa-text">Message</Label>
+        <Textarea
+          id="wa-text"
+          rows={7}
+          className="text-xs"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+      </div>
+
+      <DialogFooter className="flex-col gap-2 sm:flex-col">
+        <Button
+          className="w-full gap-2 bg-emerald-500 text-white shadow-xs hover:bg-emerald-600"
+          disabled={busy || digits.length < 7}
+          onClick={() => { openNoticeWhatsAppMessage(phone, text); onOpenChange(false); }}
+        >
+          <Send size={14} /> Send as Message (open chat)
+        </Button>
+        <Button
+          variant="outline"
+          className="w-full gap-2"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            void shareNoticePdfViaWhatsApp(data)
+              .catch(() => toast.error('Could not share the PDF — it was downloaded instead.'))
+              .finally(() => { setBusy(false); onOpenChange(false); });
+          }}
+        >
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <FileDown size={14} />}
+          Send PDF Directly (share file)
+        </Button>
+      </DialogFooter>
+    </>
   );
 }
 
@@ -850,7 +1389,7 @@ function FineCard({ fine, index }: { fine: FineVM; index: number }) {
 export function NotificationPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
-  const version = useRealtimeVersion(['notification', 'leave_request', 'cancellation_request', 'warning', 'fine']);
+  const version = useRealtimeVersion(['notification', 'leave_request', 'cancellation_request', 'warning', 'fine', 'termination_letter']);
   // controlled tab — other pages deep-link straight to Warnings / Fines
   // (e.g. the Notices & Fines card on the Employee Details page)
   const activeTab = useAppStore((s) => s.notificationsTab);
@@ -862,6 +1401,7 @@ export function NotificationPage() {
   const [cancellations, setCancellations] = useState<CancellationRequestVM[] | null>(null);
   const [warnings, setWarnings] = useState<WarningVM[] | null>(null);
   const [fines, setFines] = useState<FineVM[] | null>(null);
+  const [terminationLetters, setTerminationLetters] = useState<TerminationLetterVM[] | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
 
   // Shared filters for the Requests tab (apply to both sub-lists)
@@ -874,6 +1414,16 @@ export function NotificationPage() {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [warningOpen, setWarningOpen] = useState(false);
   const [fineOpen, setFineOpen] = useState(false);
+  const [noticeOpen, setNoticeOpen] = useState(false);
+
+  // Letters tab: document filter + WhatsApp send dialog payload
+  const [letterFilter, setLetterFilter] = useState<NoticeKind | 'all'>('all');
+  const [whatsapp, setWhatsapp] = useState<{ data: NoticeLetterData; nonce: number } | null>(null);
+  /** open the WhatsApp send dialog — every open gets a fresh nonce so the
+   *  keyed inner form remounts with prefilled state (no effect resets) */
+  const openWhatsApp = useCallback((data: NoticeLetterData) => {
+    setWhatsapp((prev) => ({ data, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
 
   // Review confirmations (AlertDialog state)
   const [leaveReview, setLeaveReview] = useState<{ req: LeaveRequestVM; approve: boolean } | null>(null);
@@ -887,13 +1437,14 @@ export function NotificationPage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [notifs, unread, leaves, cancels, warns, fineRows, emps] = await Promise.all([
+      const [notifs, unread, leaves, cancels, warns, fineRows, terms, emps] = await Promise.all([
         dataApi.listNotifications(),
         dataApi.getUnreadNotificationCount(),
         dataApi.listLeaveRequests(),
         dataApi.listCancellationRequests(),
         dataApi.listWarnings(),
         dataApi.listFines(),
+        dataApi.listTerminationLetters(),
         dataApi.listEmployees(),
       ]);
       if (cancelled) return;
@@ -903,6 +1454,7 @@ export function NotificationPage() {
       setCancellations(cancels);
       setWarnings(warns);
       setFines(fineRows);
+      setTerminationLetters(terms);
       setEmployees(emps);
     })().catch(() => {
       if (!cancelled) {
@@ -912,6 +1464,7 @@ export function NotificationPage() {
         setCancellations([]);
         setWarnings([]);
         setFines([]);
+        setTerminationLetters([]);
         setEmployees([]);
       }
     });
@@ -940,6 +1493,44 @@ export function NotificationPage() {
     const dismissed = new Set(dismissedIds);
     return (notifications ?? []).filter((n) => !dismissed.has(n.id)).slice(0, 8);
   }, [notifications, dismissedIds]);
+
+  const employeeById = useMemo(() => new Map((employees ?? []).map((e) => [e.id, e])), [employees]);
+
+  // unified Letters tab feed — every formal document, newest first
+  const noticeDocs = useMemo<NoticeDoc[]>(() => {
+    const docs: NoticeDoc[] = [];
+    for (const w of warnings ?? []) {
+      docs.push({
+        kind: 'warning', recordId: w.id, employeeId: w.employee_id,
+        employeeName: w.employee_name, employeeCode: w.employee_code,
+        reason: w.reason, createdAt: w.created_at, creatorName: w.issued_by_name,
+        isAuto: w.is_auto_generated,
+      });
+    }
+    for (const f of fines ?? []) {
+      docs.push({
+        kind: 'fine', recordId: f.id, employeeId: f.employee_id,
+        employeeName: f.employee_name, employeeCode: f.employee_code,
+        reason: f.reason, createdAt: f.created_at, creatorName: f.issued_by_name,
+        isAuto: false, amount: f.amount,
+      });
+    }
+    for (const t of terminationLetters ?? []) {
+      docs.push({
+        kind: 'termination', recordId: t.id, employeeId: t.employee_id,
+        employeeName: t.employee_name, employeeCode: t.employee_code,
+        reason: t.reason, createdAt: t.created_at, creatorName: t.created_by_name,
+        isAuto: false, effectiveDate: t.effective_date, noticeBasis: t.notice_basis,
+        customBody: t.custom_body,
+      });
+    }
+    return docs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [warnings, fines, terminationLetters]);
+
+  const filteredDocs = useMemo(
+    () => letterFilter === 'all' ? noticeDocs : noticeDocs.filter((d) => d.kind === letterFilter),
+    [noticeDocs, letterFilter],
+  );
 
   // ---- handlers ----------------------------------------------------------------
   const handleMarkAllRead = async () => {
@@ -1075,11 +1666,15 @@ export function NotificationPage() {
       {/* ------------------------------------------------------------------ */}
       {/* Main tabs: Requests / Warnings / Fines                               */}
       {/* ------------------------------------------------------------------ */}
-      <Tabs value={activeTab} onValueChange={(v) => navigateToNotifications(v as 'requests' | 'warnings' | 'fines')} className="w-full">
-        <TabsList className="w-full max-w-md">
+      <Tabs value={activeTab} onValueChange={(v) => navigateToNotifications(v as 'requests' | 'warnings' | 'fines' | 'letters')} className="w-full">
+        <TabsList className="w-full max-w-xl">
           <TabsTrigger value="requests">
             <Inbox size={14} /> Requests
             <CountChip count={pendingLeaveCount + pendingCancelCount} tone="brand" />
+          </TabsTrigger>
+          <TabsTrigger value="letters">
+            <FileText size={14} /> Letters
+            <CountChip count={noticeDocs.length} tone="brand" />
           </TabsTrigger>
           <TabsTrigger value="warnings">
             <TriangleAlert size={14} /> Warnings
@@ -1218,6 +1813,67 @@ export function NotificationPage() {
           </div>
         </TabsContent>
 
+        {/* ---- Letters & Notices ---- */}
+        <TabsContent value="letters" className="mt-4">
+          <motion.section
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.05 }}
+            className="card-glow rounded-xl border bg-card p-4 md:p-5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <SectionTitle
+                icon={<FileText size={15} />}
+                title="Letters & Notices"
+                sub="Warning letters, termination letters and fine notices — download the PDF or send through WhatsApp"
+              />
+              <Button size="sm" className="bg-brand text-white shadow-xs hover:bg-brand/90" onClick={() => setNoticeOpen(true)}>
+                <Plus size={14} /> New Letter / Notice
+              </Button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-1.5">
+              {(['all', 'warning', 'termination', 'fine'] as const).map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setLetterFilter(f)}
+                  className={cn(
+                    'rounded-full border px-3 py-1 text-[11px] font-medium transition-colors',
+                    letterFilter === f
+                      ? 'border-brand bg-brand/10 text-brand'
+                      : 'border-border text-muted-foreground hover:bg-muted/60',
+                  )}
+                >
+                  {f === 'all' ? 'All Documents' : `${noticeLabel(f)}s`}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-4 max-h-[600px] space-y-3 overflow-y-auto pr-1">
+              {filteredDocs === null || warnings === null || fines === null ? (
+                <SkeletonRows rows={3} />
+              ) : filteredDocs.length === 0 ? (
+                <EmptyState
+                  icon={<FileText size={22} />}
+                  title="No letters or notices yet"
+                  description="Create a Warning Letter, Termination Letter or Fine Notice — issued warnings and fines also appear here automatically."
+                />
+              ) : (
+                filteredDocs.map((doc, i) => (
+                  <NoticeDocumentCard
+                    key={`${doc.kind}-${doc.recordId}`}
+                    doc={doc}
+                    index={i}
+                    employee={employeeById.get(doc.employeeId)}
+                    onWhatsApp={openWhatsApp}
+                  />
+                ))
+              )}
+            </div>
+          </motion.section>
+        </TabsContent>
+
         {/* ---- Warnings ---- */}
         <TabsContent value="warnings" className="mt-4">
           <motion.section
@@ -1246,7 +1902,15 @@ export function NotificationPage() {
                   description="No warnings have been issued yet. Auto-warnings appear here after 3+ consecutive absences."
                 />
               ) : (
-                warnings.map((w, i) => <WarningCard key={w.id} warn={w} index={i} />)
+                warnings.map((w, i) => (
+                  <WarningCard
+                    key={w.id}
+                    warn={w}
+                    index={i}
+                    employee={employeeById.get(w.employee_id)}
+                    onWhatsApp={openWhatsApp}
+                  />
+                ))
               )}
             </div>
           </motion.section>
@@ -1280,7 +1944,15 @@ export function NotificationPage() {
                   description="No fines have been issued yet. Issue a fine to see it appear in this live feed."
                 />
               ) : (
-                fines.map((f, i) => <FineCard key={f.id} fine={f} index={i} />)
+                fines.map((f, i) => (
+                  <FineCard
+                    key={f.id}
+                    fine={f}
+                    index={i}
+                    employee={employeeById.get(f.employee_id)}
+                    onWhatsApp={openWhatsApp}
+                  />
+                ))
               )}
             </div>
           </motion.section>
@@ -1381,6 +2053,18 @@ export function NotificationPage() {
       <CancellationDialog open={cancelOpen} onOpenChange={setCancelOpen} employees={cancelCandidates} />
       <WarningDialog open={warningOpen} onOpenChange={setWarningOpen} employees={activeEmployees} />
       <FineDialog open={fineOpen} onOpenChange={setFineOpen} employees={activeEmployees} />
+      <NoticeCreateDialog
+        open={noticeOpen}
+        onOpenChange={setNoticeOpen}
+        employees={activeEmployees}
+        creatorName={user?.name ?? 'System'}
+        onWhatsApp={openWhatsApp}
+      />
+      <WhatsAppSendDialog
+        open={whatsapp !== null}
+        onOpenChange={(o) => { if (!o) setWhatsapp(null); }}
+        payload={whatsapp}
+      />
     </div>
   );
 }

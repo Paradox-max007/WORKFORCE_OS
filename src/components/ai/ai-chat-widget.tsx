@@ -8,6 +8,11 @@
 // Clicking the bubble opens a floating chat panel; clicking it again (or the
 // panel's ✕ / Escape) collapses it — the conversation survives the collapse.
 //
+// The panel is fully responsive: phones get a full-screen sheet (safe-area
+// aware, launcher hidden while open), tablets a tall floating panel above the
+// bubble, and desktops a wide chat window (38–42rem) with larger text,
+// roomier spacing and 2-column suggestion chips.
+//
 // The chat:
 //   • EVERY question rebuilds the knowledge base from the live database
 //     (see src/lib/ai/knowledge.ts) — a real database search per message —
@@ -257,13 +262,15 @@ function MarkdownTable({ head, rows }: { head: string[]; rows: string[][] }) {
     <div
       className={
         'my-1 max-h-72 overscroll-contain overflow-auto rounded-lg border border-border/70 bg-background/50 shadow-sm ' +
+        // taller tables now that the panel itself is much taller
+        'sm:max-h-[26rem] lg:max-h-[30rem] ' +
         // thin but VISIBLE scrollbar — signals that wide/long tables scroll
         '[scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:w-1.5 ' +
         '[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border ' +
         '[&::-webkit-scrollbar-track]:bg-transparent'
       }
     >
-      <table className="w-full border-separate border-spacing-0 text-[11.5px] leading-snug">
+      <table className="w-full border-separate border-spacing-0 text-[11.5px] leading-snug lg:text-xs">
         <thead>
           <tr>
             {head.map((h, j) => (
@@ -424,7 +431,7 @@ export function AiChatWidget() {
     const el = taRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 112)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
   };
 
   /** Fetch the data a [[LOOKUP]] directive asks for, formatted for the model —
@@ -632,11 +639,19 @@ export function AiChatWidget() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 12, scale: 0.97 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            style={{ transformOrigin: 'bottom right' }}
-            className="fixed bottom-[5.75rem] right-5 z-50 flex h-[min(34rem,72dvh)] w-[min(24rem,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-2xl border border-border/70 bg-card/70 shadow-2xl shadow-black/25 backdrop-blur-2xl backdrop-saturate-150"
+            className={
+              'fixed z-50 flex flex-col overflow-hidden bg-card/70 shadow-2xl shadow-black/25 backdrop-blur-2xl backdrop-saturate-150 ' +
+              // phones: a full-screen sheet — every pixel of the viewport is chat
+              'inset-0 h-dvh w-full origin-bottom rounded-none border-0 ' +
+              // sm and up: a floating panel anchored above the bubble button
+              'sm:inset-auto sm:bottom-[5.75rem] sm:right-5 sm:origin-bottom-right ' +
+              'sm:h-[min(40rem,78dvh)] sm:w-[min(28rem,calc(100vw-2.5rem))] sm:rounded-2xl sm:border sm:border-border/70 ' +
+              // large screens: a properly roomy desktop chat window
+              'lg:h-[min(46rem,84dvh)] lg:w-[min(38rem,calc(100vw-3rem))] xl:w-[min(42rem,calc(100vw-3rem))]'
+            }
           >
             {/* header */}
-            <div className="flex items-center gap-3 border-b border-border/70 bg-gradient-to-r from-brand/10 via-brand/5 to-transparent px-4 py-3 backdrop-blur-sm">
+            <div className="flex items-center gap-3 border-b border-border/70 bg-gradient-to-r from-brand/10 via-brand/5 to-transparent px-4 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm sm:px-5 sm:pt-3">
               <div className="relative flex size-9 shrink-0 items-center justify-center rounded-xl brand-gradient text-brand-foreground">
                 <PebbleAvatar className="size-6 drop-shadow-sm" />
                 <span className="absolute -right-0.5 -top-0.5 size-2.5 rounded-full border-2 border-card bg-emerald-500" />
@@ -663,7 +678,7 @@ export function AiChatWidget() {
             </div>
 
             {/* thread */}
-            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto bg-gradient-to-b from-brand/[0.06] to-brand/[0.02] px-4 py-4">
+            <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto bg-gradient-to-b from-brand/[0.06] to-brand/[0.02] px-4 py-4 sm:px-5 sm:py-5">
               {messages.length === 0 && !preparing ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-2 text-center">
                   <div className="flex size-12 items-center justify-center rounded-2xl brand-gradient text-brand-foreground shadow-lg">
@@ -686,11 +701,11 @@ export function AiChatWidget() {
                       </p>
                     )}
                   </div>
-                  <div className="mt-1 flex w-full flex-col gap-1.5">
+                  <div className="mt-1 grid w-full grid-cols-1 gap-1.5 sm:grid-cols-2">
                     {SUGGESTIONS.map((s) => (
                       <button
                         key={s} type="button" onClick={() => void send(s)}
-                        className="w-full rounded-lg border border-border bg-background/50 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:border-ring hover:text-foreground"
+                        className="w-full rounded-lg border border-border bg-background/50 px-3.5 py-2.5 text-left text-xs text-muted-foreground transition-colors hover:border-ring hover:text-foreground"
                       >
                         {s}
                       </button>
@@ -704,12 +719,12 @@ export function AiChatWidget() {
                       <div
                         data-role={m.role}
                         className={cn(
-                          'break-words rounded-2xl px-3.5 py-2 text-[13px]',
+                          'break-words rounded-2xl px-3.5 py-2 text-[13px] lg:text-sm',
                           m.role === 'user'
                             ? 'max-w-[85%] whitespace-pre-wrap leading-relaxed brand-gradient rounded-br-md text-brand-foreground shadow-sm'
                             // assistant bubbles render markdown BLOCKS — wide or
                             // long tables scroll inside the bubble, not the page
-                            : 'max-w-[95%] rounded-bl-md border border-border/50 bg-card/80 text-foreground shadow-sm backdrop-blur-sm',
+                            : 'max-w-[95%] rounded-bl-md border border-border/50 bg-card/80 text-foreground shadow-sm backdrop-blur-sm lg:max-w-[88%]',
                         )}
                       >
                         {m.role === 'user'
@@ -759,7 +774,7 @@ export function AiChatWidget() {
                 )}
               </div>
             ) : (
-              <div className="border-t border-border/70 bg-card/60 p-3 backdrop-blur-md">
+              <div className="border-t border-border/70 bg-card/60 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md sm:p-3">
                 {error && (
                   <p className="mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                     {error}
@@ -787,7 +802,7 @@ export function AiChatWidget() {
                     }}
                     rows={1}
                     placeholder="Ask about employees, payroll…"
-                    className="min-h-[2.5rem] flex-1 resize-none rounded-xl border border-border/70 bg-background/75 px-3 py-2 text-[13px] leading-snug outline-none placeholder:text-muted-foreground focus-visible:border-ring"
+                    className="min-h-11 flex-1 resize-none rounded-xl border border-border/70 bg-background/75 px-3.5 py-2.5 text-[13px] leading-snug outline-none placeholder:text-muted-foreground focus-visible:border-ring lg:text-sm"
                   />
                   <Button
                     type="submit" size="icon" aria-label="Send message"
@@ -810,7 +825,12 @@ export function AiChatWidget() {
         whileHover={{ scale: 1.06 }}
         whileTap={{ scale: 0.94 }}
         aria-label={open ? `Collapse ${BOT_NAME}` : `Open ${BOT_NAME} — Smart Assistant`}
-        className="fixed bottom-5 right-5 z-50 flex size-14 items-center justify-center rounded-full brand-gradient text-brand-foreground shadow-xl shadow-black/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        className={cn(
+          'fixed bottom-5 right-5 z-50 flex size-14 items-center justify-center rounded-full brand-gradient text-brand-foreground shadow-xl shadow-black/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+          // phones: the chat is a full-screen sheet — the launcher would sit on
+          // top of the composer, so it steps aside while the sheet is open
+          open && 'max-sm:hidden',
+        )}
       >
         {!hasOpened && !open && (
           <span className="absolute inset-0 animate-ping rounded-full brand-gradient opacity-50" aria-hidden />

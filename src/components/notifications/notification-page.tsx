@@ -54,6 +54,7 @@ import {
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
+import { useBranchScope } from '@/components/shared/branch-scope';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 import { useSettingsStore } from '@/store/settings-store';
@@ -1478,22 +1479,47 @@ export function NotificationPage() {
   }, [version]);
 
   // ---- derived values ---------------------------------------------------------
-  const activeEmployees = useMemo(() => (employees ?? []).filter((e) => e.status === 'active'), [employees]);
-  const cancelCandidates = useMemo(() => employees ?? [], [employees]);
+  // branch scope — the issue dialogs and the request / letter lists stay
+  // inside the viewer's granted branches (+ directly assigned sites)
+  const scope = useBranchScope();
+  const empInScope = useCallback((employeeId: string): boolean => {
+    if (scope.effectiveSiteIds === null) return true;
+    const emp = (employees ?? []).find((e) => e.id === employeeId);
+    return emp ? scope.employeeInScope(emp) : true;
+  }, [scope, employees]);
+
+  const activeEmployees = useMemo(
+    () => (employees ?? []).filter((e) => e.status === 'active' && scope.employeeInScope(e)),
+    [employees, scope]);
+  const cancelCandidates = useMemo(
+    () => (employees ?? []).filter((e) => scope.employeeInScope(e)), [employees, scope]);
+
+  // requests inside the viewer's branch scope (archived employees stay
+  // visible — their records are history)
+  const scopedLeaves = useMemo(
+    () => (leaveRequests ?? []).filter((r) => empInScope(r.employee_id)), [leaveRequests, empInScope]);
+  const scopedCancellations = useMemo(
+    () => (cancellations ?? []).filter((r) => empInScope(r.employee_id)), [cancellations, empInScope]);
+  const scopedWarnings = useMemo(
+    () => (warnings ?? []).filter((w) => empInScope(w.employee_id)), [warnings, empInScope]);
+  const scopedFines = useMemo(
+    () => (fines ?? []).filter((f) => empInScope(f.employee_id)), [fines, empInScope]);
+  const scopedTerminationLetters = useMemo(
+    () => (terminationLetters ?? []).filter((t) => empInScope(t.employee_id)), [terminationLetters, empInScope]);
 
   const pendingLeaveCount = useMemo(
-    () => (leaveRequests ?? []).filter((r) => r.status === 'pending').length, [leaveRequests]);
+    () => scopedLeaves.filter((r) => r.status === 'pending').length, [scopedLeaves]);
   const pendingCancelCount = useMemo(
-    () => (cancellations ?? []).filter((r) => r.status === 'pending').length, [cancellations]);
+    () => scopedCancellations.filter((r) => r.status === 'pending').length, [scopedCancellations]);
 
   const filteredLeaves = useMemo(
-    () => (leaveRequests ?? []).filter((r) =>
+    () => scopedLeaves.filter((r) =>
       (statusFilter === 'all' || r.status === statusFilter) && inYearMonth(r.created_at, yearFilter, monthFilter)),
-    [leaveRequests, statusFilter, yearFilter, monthFilter]);
+    [scopedLeaves, statusFilter, yearFilter, monthFilter]);
   const filteredCancellations = useMemo(
-    () => (cancellations ?? []).filter((r) =>
+    () => scopedCancellations.filter((r) =>
       (statusFilter === 'all' || r.status === statusFilter) && inYearMonth(r.created_at, yearFilter, monthFilter)),
-    [cancellations, statusFilter, yearFilter, monthFilter]);
+    [scopedCancellations, statusFilter, yearFilter, monthFilter]);
 
   const stripItems = useMemo(() => {
     const dismissed = new Set(dismissedIds);
@@ -1503,9 +1529,10 @@ export function NotificationPage() {
   const employeeById = useMemo(() => new Map((employees ?? []).map((e) => [e.id, e])), [employees]);
 
   // unified Letters tab feed — every formal document, newest first
+  // (branch-scoped: a normal admin only sees their branches' employees)
   const noticeDocs = useMemo<NoticeDoc[]>(() => {
     const docs: NoticeDoc[] = [];
-    for (const w of warnings ?? []) {
+    for (const w of scopedWarnings) {
       docs.push({
         kind: 'warning', recordId: w.id, employeeId: w.employee_id,
         employeeName: w.employee_name, employeeCode: w.employee_code,
@@ -1513,7 +1540,7 @@ export function NotificationPage() {
         isAuto: w.is_auto_generated,
       });
     }
-    for (const f of fines ?? []) {
+    for (const f of scopedFines) {
       docs.push({
         kind: 'fine', recordId: f.id, employeeId: f.employee_id,
         employeeName: f.employee_name, employeeCode: f.employee_code,
@@ -1521,7 +1548,7 @@ export function NotificationPage() {
         isAuto: false, amount: f.amount,
       });
     }
-    for (const t of terminationLetters ?? []) {
+    for (const t of scopedTerminationLetters) {
       docs.push({
         kind: 'termination', recordId: t.id, employeeId: t.employee_id,
         employeeName: t.employee_name, employeeCode: t.employee_code,
@@ -1531,7 +1558,7 @@ export function NotificationPage() {
       });
     }
     return docs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [warnings, fines, terminationLetters]);
+  }, [scopedWarnings, scopedFines, scopedTerminationLetters]);
 
   const filteredDocs = useMemo(
     () => letterFilter === 'all' ? noticeDocs : noticeDocs.filter((d) => d.kind === letterFilter),
@@ -1684,11 +1711,11 @@ export function NotificationPage() {
           </TabsTrigger>
           <TabsTrigger value="warnings">
             <TriangleAlert size={14} /> Warnings
-            <CountChip count={warnings?.length ?? 0} tone="amber" />
+            <CountChip count={scopedWarnings.length} tone="amber" />
           </TabsTrigger>
           <TabsTrigger value="fines">
             <Banknote size={14} /> Fines
-            <CountChip count={fines?.length ?? 0} tone="rose" />
+            <CountChip count={scopedFines.length} tone="rose" />
           </TabsTrigger>
         </TabsList>
 
@@ -1901,14 +1928,14 @@ export function NotificationPage() {
             <div className="mt-4 max-h-[600px] space-y-3 overflow-y-auto pr-1">
               {warnings === null ? (
                 <SkeletonRows />
-              ) : warnings.length === 0 ? (
+              ) : scopedWarnings.length === 0 ? (
                 <EmptyState
                   icon={<TriangleAlert size={22} />}
                   title="No warnings issued"
                   description="No warnings have been issued yet. Auto-warnings appear here after 3+ consecutive absences."
                 />
               ) : (
-                warnings.map((w, i) => (
+                scopedWarnings.map((w, i) => (
                   <WarningCard
                     key={w.id}
                     warn={w}
@@ -1943,14 +1970,14 @@ export function NotificationPage() {
             <div className="mt-4 max-h-[600px] space-y-3 overflow-y-auto pr-1">
               {fines === null ? (
                 <SkeletonRows />
-              ) : fines.length === 0 ? (
+              ) : scopedFines.length === 0 ? (
                 <EmptyState
                   icon={<Banknote size={22} />}
                   title="No fines issued"
                   description="No fines have been issued yet. Issue a fine to see it appear in this live feed."
                 />
               ) : (
-                fines.map((f, i) => (
+                scopedFines.map((f, i) => (
                   <FineCard
                     key={f.id}
                     fine={f}

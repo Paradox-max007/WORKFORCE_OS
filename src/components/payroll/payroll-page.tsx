@@ -1223,6 +1223,12 @@ export function PayrollPage() {
   // period (their row stays consolidated — that is how Payroll works). Normal
   // admins are additionally limited to the sites of their GRANTED branches
   // plus directly assigned sites, so "All branches" is already their own.
+  // branch names — labels the edit-mode trade picker so the SAME trade name
+  // from different branch books stays unambiguous
+  const branchNameOfId = useMemo(
+    () => new Map((branches ?? []).map((b) => [b.id, b.name] as const)),
+    [branches],
+  );
   const branchIdOfSite = useMemo(
     () => new Map((sites ?? []).map((s) => [s.id, s.branch_id ?? null] as const)),
     [sites],
@@ -2192,7 +2198,7 @@ export function PayrollPage() {
                                   <SelectItem value={NO_TRADE}>No trade</SelectItem>
                                   {tradeOptions.map((t) => (
                                     <SelectItem key={t.id} value={t.id}>
-                                      {t.name}{t.is_active ? '' : ' (inactive)'}
+                                      {t.name}{t.branch_id ? ` · ${branchNameOfId.get(t.branch_id) ?? 'another branch'}` : ''}{t.is_active ? '' : ' (inactive)'}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>

@@ -5,6 +5,7 @@
 import {
   type AdminSiteAssignment,
   type AdvanceBookReport,
+  type AdvanceBookTotals,
   type AdvanceRecordInput,
   type Attendance,
   type AttendanceShareLink,
@@ -447,6 +448,37 @@ const myBranchAllowance = (): Set<string> | null => {
   if (!me) return new Set();
   if (me.role === 'super_admin') return null;
   return new Set(db.branchAssignments.filter((x) => x.profile_id === me.id).map((x) => x.branch_id));
+};
+
+/** True when the current profile may manage this trade (rename / rates /
+ *  active switch): super admins manage every trade; normal admins only the
+ *  trades of their GRANTED branches — the org-wide shared book
+ *  (branch_id = null) and other branches' books stay super-admin only. */
+const canManageTrade = (trade: { branch_id: string | null }): boolean => {
+  const me = currentProfile();
+  if (me?.role === 'super_admin') return true;
+  if (!me) return false;
+  if (trade.branch_id === null) return false;
+  return myBranchAllowance()?.has(trade.branch_id) ?? false;
+};
+
+/** Branch-owned trade guard: a BRANCH-SPECIFIC trade may only be assigned to
+ *  employees working at a site of the SAME branch — the same trade name can
+ *  carry different rates in different branches and must never mix. The
+ *  org-wide shared book (branch_id = null) fits every employee. */
+const assertTradeFitsEmployee = (
+  tradeId: string | null, siteId: string | null,
+): void => {
+  if (!tradeId) return;
+  const trade = db.trades.find((t) => t.id === tradeId);
+  if (!trade || trade.branch_id === null) return;
+  const siteBranch = siteId ? db.sites.find((s) => s.id === siteId)?.branch_id ?? null : null;
+  if (siteBranch !== trade.branch_id) {
+    const branchName = db.branches.find((b) => b.id === trade.branch_id)?.name ?? 'another branch';
+    throw new Error(
+      `The selected trade belongs to ${branchName} — pick a trade of this employee's branch (or the shared All-Branches book)`,
+    );
+  }
 };
 
 export const demoApi = {
@@ -1042,6 +1074,9 @@ export const demoApi = {
     if (e.trade_id && !db.trades.some((t) => t.id === e.trade_id && t.is_active)) {
       throw new Error('The selected trade does not exist or is inactive');
     }
+    // branch-owned trades: a branch-specific trade may only sit on an
+    // employee working in THAT branch (rates must never mix across branches)
+    assertTradeFitsEmployee(e.trade_id, e.current_site_id);
     db.employees.push(e);
     // first salary assignment runs from the join date (mirrors create_employee RPC)
     if (e.trade_id) {
@@ -1130,6 +1165,12 @@ export const demoApi = {
     if (prevTradeId !== nextTradeId || prevRole !== nextRole) {
       if (nextTradeId && !db.trades.some((t) => t.id === nextTradeId)) {
         throw new Error('The selected trade does not exist');
+      }
+      // branch-owned trades: a branch-specific trade may only sit on an
+      // employee working in THAT branch (checked when the trade CHANGES —
+      // a stored trade is never silently invalidated by a site move)
+      if (prevTradeId !== nextTradeId) {
+        assertTradeFitsEmployee(nextTradeId, nextSiteId);
       }
       applyAssignment(db, id, nextTradeId, nextRole, toYMD(new Date()), currentProfile()?.id ?? null);
       e.trade_id = nextTradeId;
@@ -1904,7 +1945,14 @@ export const demoApi = {
 
   // ---- trades & salary ---------------------------------------------------------
   async listTrades(): Promise<(Trade & { current_rates: TradeRate[] })[]> {
-    return tradesWithRates(db);
+    const allowed = myBranchAllowance();
+    if (allowed === null) return tradesWithRates(db);
+    // branch-owned trade books: normal admins get the org-wide shared book
+    // PLUS the trades of their granted branches — another branch's book (and
+    // its rates) never leaks into their selection
+    return tradesWithRates(db).filter(
+      (t) => t.branch_id === null || allowed.has(t.branch_id),
+    );
   },
 
   // ---- absent deduction settings (Trade Management → Deductions tab) -----------
@@ -2055,10 +2103,28 @@ export const demoApi = {
   async createTrade(input: TradeInput): Promise<Trade> {
     const name = input.name.trim();
     if (!name) throw new Error('Trade name is required');
-    if (db.trades.some((t) => t.name.trim().toLowerCase() === name.toLowerCase())) {
-      throw new Error(`A trade named "${name}" already exists`);
-    }
     const me = currentProfile();
+    const branchId = input.branch_id ?? null;
+    // branch ownership: super admins may create the org-wide shared book or
+    // any branch's trade; normal admins only inside their granted branches
+    if (me?.role !== 'super_admin') {
+      if (!branchId || !(myBranchAllowance()?.has(branchId) ?? false)) {
+        throw new Error('Pick one of your granted branches for this trade');
+      }
+    } else if (branchId && !db.branches.some((b) => b.id === branchId)) {
+      throw new Error('Branch not found');
+    }
+    // the SAME trade name may exist in DIFFERENT branches (each with its own
+    // rate book) — but never twice within the same book
+    if (db.trades.some((t) =>
+      t.name.trim().toLowerCase() === name.toLowerCase()
+      && (t.branch_id ?? null) === branchId)) {
+      throw new Error(
+        branchId === null
+          ? `A trade named "${name}" already exists in the shared All-Branches book`
+          : `A trade named "${name}" already exists in this branch`,
+      );
+    }
     const cells = new Set(
       input.rates
         .filter((r) => Number.isFinite(r.hourly_rate) && r.hourly_rate >= 0)
@@ -2068,8 +2134,12 @@ export const demoApi = {
     if (activate && cells.size < 6) {
       throw new Error('Configure all six rate cells (3 salary roles × 2 experience tiers) before activating the trade');
     }
+    const branchLabel = branchId
+      ? ` (branch: ${db.branches.find((b) => b.id === branchId)?.name ?? 'unknown'})`
+      : ' (All Branches)';
     const trade: Trade = {
-      id: uid(), name, description: input.description?.trim() || null,
+      id: uid(), name, branch_id: branchId,
+      description: input.description?.trim() || null,
       is_active: activate, created_at: nowISO(), updated_at: nowISO(),
     };
     db.trades.push(trade);
@@ -2087,24 +2157,49 @@ export const demoApi = {
     db.tradeRateAudit.push({
       id: uid(), period_id: null, trade_id: trade.id, action: 'create',
       actor_id: me?.id ?? null, actor_name: me?.name ?? null,
-      details: `Trade "${trade.name}" created with ${cells.size} rate cells`,
+      details: `Trade "${trade.name}"${branchLabel} created with ${cells.size} rate cells`,
       created_at: nowISO(),
     });
     saveAndEmit(['trades', 'trade_rate_history']);
     return { ...trade };
   },
 
-  async updateTrade(tradeId: string, input: { name: string; description: string | null; is_active: boolean }): Promise<void> {
+  async updateTrade(tradeId: string, input: { name: string; description: string | null; is_active: boolean; branch_id?: string | null }): Promise<void> {
     const trade = db.trades.find((t) => t.id === tradeId);
     if (!trade) throw new Error('Trade not found');
+    const me = currentProfile();
+    // normal admins edit only their granted branches' trades — never the
+    // shared All-Branches book and never another branch's book
+    if (me?.role !== 'super_admin') {
+      if (!canManageTrade(trade)) {
+        throw new Error('You can only edit trades of your granted branches');
+      }
+    }
     const name = input.name.trim();
     if (!name) throw new Error('Trade name is required');
-    if (db.trades.some((t) => t.name.trim().toLowerCase() === name.toLowerCase() && t.id !== tradeId)) {
-      throw new Error(`A trade named "${name}" already exists`);
+    // branch move (super admin only): keep the trade inside a real branch
+    // (or hand it to the shared book)
+    let nextBranch = trade.branch_id;
+    if (input.branch_id !== undefined && me?.role === 'super_admin') {
+      if (input.branch_id && !db.branches.some((b) => b.id === input.branch_id)) {
+        throw new Error('Branch not found');
+      }
+      nextBranch = input.branch_id;
+    }
+    if (db.trades.some((t) =>
+      t.name.trim().toLowerCase() === name.toLowerCase()
+      && t.id !== tradeId
+      && (t.branch_id ?? null) === nextBranch)) {
+      throw new Error(
+        nextBranch === null
+          ? `A trade named "${name}" already exists in the shared All-Branches book`
+          : `A trade named "${name}" already exists in this branch`,
+      );
     }
     trade.name = name;
     trade.description = input.description?.trim() || null;
     trade.is_active = input.is_active;
+    trade.branch_id = nextBranch;
     trade.updated_at = nowISO();
     saveAndEmit(['trades']);
   },
@@ -2112,6 +2207,11 @@ export const demoApi = {
   async saveTradeRates(tradeId: string, rates: TradeRateInput[], effectiveFrom: string): Promise<void> {
     const trade = db.trades.find((t) => t.id === tradeId);
     if (!trade) throw new Error('Trade not found');
+    // rate books are branch-owned: a normal admin may only re-price the trades
+    // of their granted branches (the shared book = super admin only)
+    if (!canManageTrade(trade)) {
+      throw new Error('You can only change rates of trades in your granted branches');
+    }
     if (rates.length === 0) return;
     const me = currentProfile();
     if (effectiveFrom < localTodayYMD() && me?.role !== 'super_admin') {
@@ -2253,7 +2353,37 @@ export const demoApi = {
   // ---- advance book (the advance ledger — mirrors the 20261113e RPCs) -----
 
   async getAdvanceBook(): Promise<AdvanceBookReport> {
-    return buildAdvanceBook(db);
+    const report = buildAdvanceBook(db);
+    const allowedSites = mySiteAllowance();
+    if (allowedSites === null) return report;
+    // BRANCH-SCOPED LEDGER — a normal admin only sees the advance records of
+    // employees working at one of their GRANTED sites (branch sites + direct
+    // assignments); another branch's ledger never leaks in
+    const scopeEmpIds = new Set(
+      db.employees
+        .filter((e) => e.current_site_id !== null && allowedSites.has(e.current_site_id))
+        .map((e) => e.id),
+    );
+    const records = report.records.filter((r) => scopeEmpIds.has(r.employee_id));
+    // totals recomputed from the scoped records (due / overdue / cleared)
+    const totals: AdvanceBookTotals = {
+      due_count: 0, due_amount: 0, overdue_count: 0, overdue_amount: 0,
+      cleared_count: 0, cleared_amount: 0,
+    };
+    records.forEach((r) => {
+      if (r.cleared) {
+        totals.cleared_count += 1;
+        totals.cleared_amount += r.amount;
+      } else {
+        totals.due_count += 1;
+        totals.due_amount += r.amount;
+        if (r.overdue) {
+          totals.overdue_count += 1;
+          totals.overdue_amount += r.amount;
+        }
+      }
+    });
+    return { records, totals };
   },
 
   async saveAdvanceRecord(input: AdvanceRecordInput): Promise<void> {

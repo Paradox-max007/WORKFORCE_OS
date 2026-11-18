@@ -5,7 +5,8 @@
 //  4. the PDF employee grid keeps TRADE but drops Position & Performance Rating
 //  5. advance-book style branch mapping math (record scoping) — mirror of the
 //     component logic, verified against the same inputs
-import { noticeCompanyHeading, buildNoticeBody, buildNoticeWhatsAppText, DEFAULT_COMPANY_NAME } from '../src/lib/notices';
+import { noticeCompanyHeading, buildNoticeBody, buildNoticeWhatsAppText, DEFAULT_COMPANY_NAME, type NoticeLetterData } from '../src/lib/notices';
+import type { EmployeeVM } from '../src/lib/types';
 
 const employee = {
   id: 'emp-1',
@@ -25,7 +26,22 @@ const employee = {
   id_number: '2456789',
   status: 'active',
   rating: 4.5,
-} as never;
+  trade_id: null,
+  salary_role: 'standard',
+  opening_hours: 0,
+  is_team_leader: false,
+  team_leader_site_id: null,
+  current_site_id: null,
+  camp_id: null,
+  payment_type: null,
+  card_type_id: null,
+  emergency_contact: null,
+  email: null,
+  address: null,
+  photo: null,
+  created_at: '2023-01-15T00:00:00.000Z',
+  updated_at: '2023-01-15T00:00:00.000Z',
+} as unknown as EmployeeVM;
 
 let failures = 0;
 const check = (name: string, cond: boolean): void => {
@@ -46,7 +62,7 @@ const data = {
   createdAt: '2026-11-18T09:00:00.000Z',
   creatorName: 'Aisha',
   companyName: 'Al Rajhi Contracting LLC',
-} as never;
+} as unknown as NoticeLetterData;
 
 // 2. WhatsApp text
 const waText = buildNoticeWhatsAppText(data);
@@ -55,15 +71,15 @@ check('WhatsApp text keeps the employee + code line', waText.includes('To: Rames
 check('WhatsApp text keeps Created by', waText.includes('Created by: Aisha'));
 
 // no companyName → employee's company → else brand
-const waNoCompany = buildNoticeWhatsAppText({ ...data, companyName: null } as never);
+const waNoCompany = buildNoticeWhatsAppText({ ...data, companyName: null });
 check('WhatsApp text falls back to the employee company', waNoCompany.startsWith('*Alpha Contracting — WARNING LETTER*'));
-const waNothing = buildNoticeWhatsAppText({ ...data, companyName: null, employee: { ...employee, company_name: null } } as never);
+const waNothing = buildNoticeWhatsAppText({ ...data, companyName: null, employee: { ...employee, company_name: null } });
 check('WhatsApp text falls back to the brand', waNothing.startsWith('*PULSE WORKFORCE OS LLC. — WARNING LETTER*'));
 
 // 3. termination body references the issuing company
-const termBody = buildNoticeBody({ ...data, kind: 'termination', effectiveDate: '2026-12-01', companyName: 'Al Rajhi Contracting LLC' } as never);
+const termBody = buildNoticeBody({ ...data, kind: 'termination', effectiveDate: '2026-12-01', companyName: 'Al Rajhi Contracting LLC' });
 check('termination body names the settings company', termBody.some((p) => p.includes('employment with Al Rajhi Contracting LLC')));
-const termNoCompany = buildNoticeBody({ ...data, kind: 'termination', effectiveDate: '2026-12-01', companyName: null, employee: { ...employee, company_name: null } } as never);
+const termNoCompany = buildNoticeBody({ ...data, kind: 'termination', effectiveDate: '2026-12-01', companyName: null, employee: { ...employee, company_name: null } });
 check('termination body says "the Company" when nothing is set', termNoCompany.some((p) => p.includes('employment with the Company')));
 
 // 4. PDF employee grid — read the generator source and assert the columns

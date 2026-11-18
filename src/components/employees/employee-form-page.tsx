@@ -65,22 +65,45 @@ const nullify = (v: string | null | undefined): string | null => (v && v.trim() 
 // cells without leaving the employee form — the new trade is selected
 // automatically on save.
 // ---------------------------------------------------------------------------
-function NewTradeDialog({ open, onOpenChange, onCreated }: {
+function NewTradeDialog({ open, onOpenChange, onCreated, branches, defaultBranchId, isSuperAdmin }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onCreated: (trade: Trade) => void;
+  /** branches the viewer may own trades in (granted branches for a normal
+   *  admin; every branch for a super admin) */
+  branches: BranchWithCount[];
+  /** pre-selection (the employee form's current branch pick) */
+  defaultBranchId: string | null;
+  isSuperAdmin: boolean;
 }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [branchId, setBranchId] = useState<string>('__shared__');
   const [rates, setRates] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // pick up the form's branch every time the dialog opens
+  useEffect(() => {
+    if (open) {
+      const fromForm = defaultBranchId && branches.some((b) => b.id === defaultBranchId)
+        ? defaultBranchId
+        : null;
+      setBranchId(fromForm ?? (isSuperAdmin ? '__shared__' : branches[0]?.id ?? '__shared__'));
+    }
+  }, [open, defaultBranchId, branches, isSuperAdmin]);
 
   const cellKey = (role: SalaryRole, tier: ExperienceTier): string => `${role}:${tier}`;
   const filled = Object.values(rates).filter((v) => v.trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0).length;
   const allSix = filled >= 6;
+  /** null = the shared All-Branches book (super admin only) */
+  const ownerBranchId = branchId === '__shared__' ? null : branchId;
 
   const submit = async (): Promise<void> => {
     if (!name.trim()) { toast.error('Trade name is required'); return; }
+    if (!isSuperAdmin && ownerBranchId === null) {
+      toast.error('Pick one of your granted branches for this trade');
+      return;
+    }
     if (!allSix) {
       toast.error('Configure all six rate cells', {
         description: '3 salary roles × 2 experience tiers — a trade without rates cannot price salary.',
@@ -96,9 +119,14 @@ function NewTradeDialog({ open, onOpenChange, onCreated }: {
           hourly_rate: Number(rates[cellKey(role.value, tier.value)]),
         })));
       const trade = await dataApi.createTrade({
-        name: name.trim(), description: description.trim() || null, is_active: true, rates: payload,
+        name: name.trim(), description: description.trim() || null,
+        branch_id: ownerBranchId, is_active: true, rates: payload,
       });
-      toast.success('Trade created & selected', { description: trade.name });
+      toast.success('Trade created & selected', {
+        description: ownerBranchId === null
+          ? `${trade.name} joins the shared All-Branches book.`
+          : `${trade.name} joins the ${branches.find((b) => b.id === ownerBranchId)?.name ?? 'selected'} branch book.`,
+      });
       setName(''); setDescription(''); setRates({});
       onOpenChange(false);
       onCreated(trade);
@@ -126,9 +154,23 @@ function NewTradeDialog({ open, onOpenChange, onCreated }: {
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Scaffolder" className="h-11" />
             </div>
             <div className="space-y-2">
-              <Label>Description</Label>
-              <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional" className="h-11" />
+              <Label>Branch *</Label>
+              <Select value={branchId} onValueChange={setBranchId}>
+                <SelectTrigger className="h-11 bg-card" aria-label="Owning branch"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {isSuperAdmin && (
+                    <SelectItem value="__shared__">All Branches (shared)</SelectItem>
+                  )}
+                  {branches.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label>Description</Label>
+            <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional" className="h-11" />
           </div>
           <div className="overflow-hidden rounded-xl border">
             <table className="w-full text-sm">
@@ -373,7 +415,30 @@ export function EmployeeFormPage() {
 
   const activeSites = useMemo(() => (sites ?? []).filter((s) => s.is_active), [sites]);
   const activeCamps = useMemo(() => (camps ?? []).filter((c) => c.is_active), [camps]);
-  const activeTrades = useMemo(() => trades.filter((t) => t.is_active), [trades]);
+  // branch-owned trade books: the shared All-Branches book fits everyone; a
+  // branch-specific trade is offered only when its branch is the one picked
+  // above (the employee joins that branch's site — the books never mix)
+  const branchNameOfId = useMemo(
+    () => new Map((branches ?? []).map((b) => [b.id, b.name] as const)),
+    [branches],
+  );
+  const activeTrades = useMemo(() => {
+    const inScope = trades.filter((t) =>
+      t.is_active && (t.branch_id === null || (branchSel !== 'all' && t.branch_id === branchSel)));
+    // keep the employee's STORED trade selectable while editing (a stored
+    // trade is never silently dropped — it keeps pricing until changed)
+    if (mode === 'edit' && form.trade_id) {
+      const stored = trades.find((t) => t.id === form.trade_id);
+      if (stored && !inScope.some((t) => t.id === stored.id)) inScope.unshift(stored);
+    }
+    return inScope;
+  }, [trades, branchSel, mode, form.trade_id]);
+  /** dropdown label — branch books carry their branch so the same trade name
+   *  from different books stays unambiguous */
+  const tradeLabel = (t: Trade): string =>
+    t.branch_id === null || t.branch_id === branchSel
+      ? t.name
+      : `${t.name} · ${branchNameOfId.get(t.branch_id) ?? 'another branch'}`;
 
   // EFFECTIVE site scope for normal admins: the sites of their granted
   // branches PLUS any directly assigned sites (Admin Management → Site
@@ -775,11 +840,21 @@ export function EmployeeFormPage() {
                   <SelectContent>
                     <SelectItem value="none">No trade assigned</SelectItem>
                     {activeTrades.map((t) => (
-                      <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                      <SelectItem key={t.id} value={t.id}>{tradeLabel(t)}</SelectItem>
                     ))}
                     <SelectItem value="__add_new" className="text-brand">+ Add New Trade…</SelectItem>
                   </SelectContent>
                 </Select>
+                {branchSel === 'all' ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Showing the shared All-Branches trades — pick a branch above to also see that
+                    branch&apos;s own trade books and rates.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">
+                    Shared trades plus {branchNameOfId.get(branchSel) ?? 'this branch'}&apos;s own books — a branch trade only prices employees of its branch.
+                  </p>
+                )}
                 {mode === 'edit' && (
                   <p className="text-[11px] text-muted-foreground">
                     Changing the trade or salary role takes effect today — earlier work keeps its
@@ -1181,6 +1256,9 @@ export function EmployeeFormPage() {
       <NewTradeDialog
         open={tradeDialogOpen}
         onOpenChange={setTradeDialogOpen}
+        branches={branches ?? []}
+        defaultBranchId={branchSel === 'all' ? null : branchSel}
+        isSuperAdmin={isSuperAdmin}
         onCreated={(trade) => {
           setTrades((prev) => [...prev, trade as Trade & { current_rates: unknown[] }]);
           setForm((f) => ({ ...f, trade_id: trade.id }));

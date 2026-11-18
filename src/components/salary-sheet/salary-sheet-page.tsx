@@ -228,7 +228,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
 // ---------------------------------------------------------------------------
 function SiteGroup({
   group, index, onShowLines, editMode, peIdOf, siteDraftOf, onSiteDraftChange,
-  onSaveSite, onResetAuto, busyKey, tradeOptions, tradeStateOf, onTradeChange,
+  onSaveSite, onResetAuto, busyKey, tradeOptions, tradeLabelOf, tradeStateOf, onTradeChange,
   paidOf, settlementOf, onOpenTimeCard,
 }: {
   group: SalarySheetSiteGroup;
@@ -242,6 +242,8 @@ function SiteGroup({
   onResetAuto: (employeeId: string) => void;
   busyKey: string | null;
   tradeOptions: Trade[];
+  /** display label of a trade (branch books carry their branch name) */
+  tradeLabelOf: (t: Trade) => string;
   tradeStateOf: (employeeId: string) => TradeState;
   onTradeChange: (employeeId: string, tradeId: string | null) => void;
   paidOf: (employeeId: string) => boolean;
@@ -450,7 +452,7 @@ function SiteGroup({
                                   <SelectItem value={NO_TRADE}>No trade</SelectItem>
                                   {tradeOptions.map((t) => (
                                     <SelectItem key={t.id} value={t.id}>
-                                      {t.name}{t.is_active ? '' : ' (inactive)'}
+                                      {tradeLabelOf(t)}{t.is_active ? '' : ' (inactive)'}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>
@@ -948,6 +950,15 @@ export function SalarySheetPage() {
   // A site section belongs to the owner branch of its site; the idle group
   // (no site) belongs to no branch. Normal admins are limited to their granted
   // branches' sites (+ directly assigned sites) and never see the idle group.
+  // branch names — labels the edit-mode trade picker so the SAME trade name
+  // from different branch books stays unambiguous
+  const branchNameOfId = useMemo(
+    () => new Map((branches ?? []).map((b) => [b.id, b.name] as const)),
+    [branches],
+  );
+  const tradeOptionLabel = useCallback((t: Trade): string =>
+    t.branch_id === null ? t.name : `${t.name} · ${branchNameOfId.get(t.branch_id) ?? 'another branch'}`,
+  [branchNameOfId]);
   const branchIdOfSite = useMemo(
     () => new Map((sites ?? []).map((s) => [s.id, s.branch_id ?? null] as const)),
     [sites],
@@ -1300,6 +1311,7 @@ export function SalarySheetPage() {
                   onResetAuto={(employeeId) => { void onResetAuto(employeeId); }}
                   busyKey={busyKey}
                   tradeOptions={tradeOptions}
+                  tradeLabelOf={tradeOptionLabel}
                   tradeStateOf={tradeStateOf}
                   onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   paidOf={paidOf}
@@ -1322,6 +1334,7 @@ export function SalarySheetPage() {
                   onResetAuto={(employeeId) => { void onResetAuto(employeeId); }}
                   busyKey={busyKey}
                   tradeOptions={tradeOptions}
+                  tradeLabelOf={tradeOptionLabel}
                   tradeStateOf={tradeStateOf}
                   onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   paidOf={paidOf}

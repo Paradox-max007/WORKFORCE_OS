@@ -30,6 +30,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader } from '@/components/ui/table';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
 import { EmptyState, PageHeader, SkeletonRows } from '@/components/shared/primitives';
+import { useBranchScope } from '@/components/shared/branch-scope';
 import { dataApi } from '@/lib/data';
 import { daysUntil, fmtDate } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -90,6 +91,10 @@ const toEmployeeInput = (e: EmployeeVM): EmployeeInput => ({
 export function UniformRegistryPage() {
   const version = useRealtimeVersion(['uniform_registry', 'employee', 'site']);
 
+  // branch scope — a normal admin only sees the uniform records of their
+  // branches' employees and can only issue tokens for them
+  const scope = useBranchScope();
+
   const [entries, setEntries] = useState<UniformEntry[] | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [sites, setSites] = useState<SiteWithCount[] | null>(null);
@@ -148,23 +153,27 @@ export function UniformRegistryPage() {
   );
 
   // ---- rows: one per employee (newest entry + record count) -------------------
+  // (branch-scoped — rows of employees outside the viewer's scope drop out;
+  // archived employees keep their rows as history)
   const rows = useMemo<RegistryRow[] | null>(() => {
     if (!entries) return null;
     const byEmp = new Map<string, RegistryRow>();
     // listUniformEntries is newest-first → first occurrence IS the newest entry
     for (const entry of entries) {
+      const emp = employeeMap.get(entry.employee_id);
+      if (emp && !scope.employeeInScope(emp)) continue;
       const cur = byEmp.get(entry.employee_id);
       if (cur) cur.count += 1;
       else {
         byEmp.set(entry.employee_id, {
           entry,
           count: 1,
-          employee: employeeMap.get(entry.employee_id) ?? null,
+          employee: emp ?? null,
         });
       }
     }
     return Array.from(byEmp.values());
-  }, [entries, employeeMap]);
+  }, [entries, employeeMap, scope]);
 
   // site filter options = distinct site names present across entries
   const siteOptions = useMemo(() => {
@@ -522,11 +531,12 @@ export function UniformRegistryPage() {
         )}
       </AnimatePresence>
 
-      {/* Shared Create / Renew dialog (available over both views) */}
+      {/* Shared Create / Renew dialog (available over both views) — the
+          employee pool is already branch-scoped by the page */}
       <CreateRenewDialog
         open={dialogOpen}
         target={dialogTarget}
-        employees={employees ?? []}
+        employees={(employees ?? []).filter(scope.employeeInScope)}
         sites={sites ?? []}
         onClose={() => setDialogOpen(false)}
       />
@@ -846,7 +856,8 @@ function EntryForm({
   const patchItem = (key: string, value: boolean) =>
     setState((prev) => ({ ...prev, items: { ...prev.items, [key]: value } }));
 
-  const activeEmployees = useMemo(() => employees.filter((e) => e.status === 'active'), [employees]);
+  const activeEmployees = useMemo(
+    () => employees.filter((e) => e.status === 'active'), [employees]);
   const siteObj = useMemo(
     () => (state.siteName ? sites.find((s) => s.name === state.siteName) ?? null : null),
     [sites, state.siteName],

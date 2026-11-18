@@ -23,12 +23,16 @@
 //   a payroll is generated. DRAFT periods recalculate on their next view;
 //   FINALIZED periods stay locked as paid.
 //
-//   BRANCH VIEW (Trades tab) — the Branch dropdown scopes the trade grid to one
-//   branch's employees: only trades carried by that branch's workforce stay
-//   visible and every card shows how many of the branch's employees use it.
-//   Hourly RATES stay company-wide (effective-dated) — the branch view is a
-//   workforce lens, not a separate rate book. "All branches" restores the
-//   full grid.
+//   BRANCH-OWNED TRADE BOOKS — every branch owns its OWN trades and rate
+//   grids: the SAME trade name can carry DIFFERENT hourly rates in different
+//   branches and never mixes (the trade + its whole trade_rate_history belong
+//   to one branch). The Branch dropdown scopes the grid:
+//   • All Branches — the shared "All Branches" book plus (super admin) every
+//     branch's own book, each card badged with its owner; a normal admin
+//     gets the shared book + only their granted branches' books
+//   • a specific branch — that branch's trades plus the shared book
+//   Normal admins can only create / edit / re-price trades inside their
+//   granted branches; the shared book is super-admin only.
 // ============================================================================
 
 import { motion } from 'framer-motion';
@@ -141,20 +145,43 @@ function RateGrid({ values, onChange, disabled = false }: {
 // ---------------------------------------------------------------------------
 // Create trade dialog
 // ---------------------------------------------------------------------------
-function CreateTradeDialog({ open, onOpenChange }: {
+function CreateTradeDialog({ open, onOpenChange, branches, defaultBranchId, isSuperAdmin }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  /** branches the viewer may own trades in (granted branches for a normal
+   *  admin; every branch for a super admin) */
+  branches: BranchWithCount[];
+  /** pre-selection (the branch currently picked in the toolbar, if any) */
+  defaultBranchId: string | null;
+  isSuperAdmin: boolean;
 }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [branchId, setBranchId] = useState<string>('__shared__');
   const [rates, setRates] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // pick up the toolbar's branch every time the dialog opens
+  useEffect(() => {
+    if (open) {
+      const fromToolbar = defaultBranchId && branches.some((b) => b.id === defaultBranchId)
+        ? defaultBranchId
+        : null;
+      setBranchId(fromToolbar ?? (isSuperAdmin ? '__shared__' : branches[0]?.id ?? '__shared__'));
+    }
+  }, [open, defaultBranchId, branches, isSuperAdmin]);
 
   const filledCells = useMemo(
     () => Object.values(rates).filter((v) => v.trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0).length,
     [rates],
   );
   const allSix = filledCells >= 6;
+  /** the owning book of the new trade — null = the shared All-Branches book
+   *  (super admin only); a normal admin must own the branch */
+  const ownerBranchId = branchId === '__shared__' ? null : branchId;
+  const ownerLabel = ownerBranchId === null
+    ? 'the shared All-Branches book'
+    : `the ${branches.find((b) => b.id === ownerBranchId)?.name ?? 'selected'} branch`;
 
   const reset = (): void => {
     setName(''); setDescription(''); setRates({});
@@ -162,6 +189,10 @@ function CreateTradeDialog({ open, onOpenChange }: {
 
   const submit = async (): Promise<void> => {
     if (!name.trim()) { toast.error('Trade name is required'); return; }
+    if (!isSuperAdmin && ownerBranchId === null) {
+      toast.error('Pick one of your granted branches for this trade');
+      return;
+    }
     if (!allSix) {
       toast.error('Configure all six rate cells before activating', {
         description: 'Or use "Save as inactive draft" to keep it out of salary calculation until the rates are ready.',
@@ -179,10 +210,13 @@ function CreateTradeDialog({ open, onOpenChange }: {
       const trade = await dataApi.createTrade({
         name: name.trim(),
         description: description.trim() || null,
+        branch_id: ownerBranchId,
         is_active: true,
         rates: payload,
       });
-      toast.success('Trade created', { description: `${trade.name} is ready for employee selection.` });
+      toast.success('Trade created', {
+        description: `${trade.name} is ready for employee selection in ${ownerLabel}.`,
+      });
       reset();
       onOpenChange(false);
     } catch (err) {
@@ -194,6 +228,10 @@ function CreateTradeDialog({ open, onOpenChange }: {
 
   const saveDraft = async (): Promise<void> => {
     if (!name.trim()) { toast.error('Trade name is required'); return; }
+    if (!isSuperAdmin && ownerBranchId === null) {
+      toast.error('Pick one of your granted branches for this trade');
+      return;
+    }
     setSaving(true);
     try {
       const payload: TradeRateInput[] = SALARY_ROLES.flatMap((role) =>
@@ -205,6 +243,7 @@ function CreateTradeDialog({ open, onOpenChange }: {
       await dataApi.createTrade({
         name: name.trim(),
         description: description.trim() || null,
+        branch_id: ownerBranchId,
         is_active: false,
         rates: payload,
       });
@@ -225,7 +264,8 @@ function CreateTradeDialog({ open, onOpenChange }: {
           <DialogTitle>Add New Trade</DialogTitle>
           <DialogDescription>
             All six rate cells (3 salary roles × 2 experience tiers) must be configured before the
-            trade becomes available for salary calculation.
+            trade becomes available for salary calculation. The trade and its rates belong to the
+            selected branch — the same trade name can carry different rates in another branch.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -235,9 +275,28 @@ function CreateTradeDialog({ open, onOpenChange }: {
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Scaffolder" className="h-11" />
             </div>
             <div className="space-y-2">
-              <Label>Description</Label>
-              <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional notes" className="h-11" />
+              <Label>Branch *</Label>
+              <Select value={branchId} onValueChange={setBranchId}>
+                <SelectTrigger className="h-11 bg-card" aria-label="Owning branch"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {isSuperAdmin && (
+                    <SelectItem value="__shared__">All Branches (shared)</SelectItem>
+                  )}
+                  {branches.map((b) => (
+                    <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                {ownerBranchId === null
+                  ? 'Shared book — usable by every branch (super admin only).'
+                  : `Only ${ownerLabel}'s employees pick this trade.`}
+              </p>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label>Description</Label>
+            <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional notes" className="h-11" />
           </div>
           <RateGrid values={rates} onChange={setRates} />
           <p className={cn('text-xs', allSix ? 'text-emerald-500' : 'text-muted-foreground')}>
@@ -263,11 +322,13 @@ function CreateTradeDialog({ open, onOpenChange }: {
 // ---------------------------------------------------------------------------
 // Edit rates dialog (effective-dated change)
 // ---------------------------------------------------------------------------
-function EditRatesDialog({ trade, open, onOpenChange, isSuperAdmin }: {
+function EditRatesDialog({ trade, open, onOpenChange, isSuperAdmin, branchLabel }: {
   trade: TradeWithRates | null;
   open: boolean;
   onOpenChange: (v: boolean) => void;
   isSuperAdmin: boolean;
+  /** owning book label shown next to the trade name */
+  branchLabel: string | null;
 }) {
   const [rates, setRates] = useState<Record<string, string>>({});
   const [effectiveFrom, setEffectiveFrom] = useState(localTodayYMD());
@@ -323,10 +384,11 @@ function EditRatesDialog({ trade, open, onOpenChange, isSuperAdmin }: {
     <Dialog open={open} onOpenChange={(v) => { if (!saving) onOpenChange(v); }}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{trade.name} — hourly rates</DialogTitle>
+          <DialogTitle>{trade.name} — hourly rates{branchLabel ? ` · ${branchLabel}` : ''}</DialogTitle>
           <DialogDescription>
             A rate change closes the previous period and starts a new one from the effective date.
-            Worked hours before that date keep their original rate.
+            Worked hours before that date keep their original rate. These rates apply wherever this
+            trade&apos;s book is used — branch books never mix.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -380,16 +442,20 @@ function EditRatesDialog({ trade, open, onOpenChange, isSuperAdmin }: {
 }
 
 // ---------------------------------------------------------------------------
-// Edit details dialog (name / description / active)
+// Edit details dialog (name / description / branch / active)
 // ---------------------------------------------------------------------------
-function EditTradeDialog({ trade, open, onOpenChange }: {
+function EditTradeDialog({ trade, open, onOpenChange, branches, isSuperAdmin }: {
   trade: TradeWithRates | null;
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  /** branches the viewer may move the trade into */
+  branches: BranchWithCount[];
+  isSuperAdmin: boolean;
 }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [active, setActive] = useState(true);
+  const [branchId, setBranchId] = useState<string>('__shared__');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -397,6 +463,7 @@ function EditTradeDialog({ trade, open, onOpenChange }: {
       setName(trade.name);
       setDescription(trade.description ?? '');
       setActive(trade.is_active);
+      setBranchId(trade.branch_id ?? '__shared__');
     }
   }, [open, trade]);
 
@@ -410,6 +477,9 @@ function EditTradeDialog({ trade, open, onOpenChange }: {
         name: name.trim(),
         description: description.trim() || null,
         is_active: active,
+        // undefined would keep the current book; we always send the picked one
+        // (a normal admin's picker is locked to the trade's own branch)
+        branch_id: branchId === '__shared__' ? null : branchId,
       });
       toast.success('Trade updated');
       onOpenChange(false);
@@ -433,6 +503,33 @@ function EditTradeDialog({ trade, open, onOpenChange }: {
           <div className="space-y-2">
             <Label>Trade Name</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} className="h-11" />
+          </div>
+          <div className="space-y-2">
+            <Label>Branch</Label>
+            <Select value={branchId} onValueChange={setBranchId} disabled={!isSuperAdmin}>
+              <SelectTrigger className="h-11 bg-card" aria-label="Owning branch"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {isSuperAdmin && (
+                  <SelectItem value="__shared__">All Branches (shared)</SelectItem>
+                )}
+                {branches.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                ))}
+                {/* keep the trade's real branch selectable when a normal admin
+                    cannot move it (their granted list already contains it, but
+                    belt-and-braces for shared trades) */}
+                {!isSuperAdmin && trade.branch_id && !branches.some((b) => b.id === trade.branch_id) && (
+                  <SelectItem value={trade.branch_id}>
+                    {branches.find((b) => b.id === trade.branch_id)?.name ?? 'Current branch'}
+                  </SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              {isSuperAdmin
+                ? 'Moving the trade moves its whole rate book to the new branch.'
+                : 'Only super admins can move a trade between branches.'}
+            </p>
           </div>
           <div className="space-y-2">
             <Label>Description</Label>
@@ -460,7 +557,7 @@ function EditTradeDialog({ trade, open, onOpenChange }: {
 // ---------------------------------------------------------------------------
 // Trade card
 // ---------------------------------------------------------------------------
-function TradeCard({ trade, index, onEditRates, onEditDetails, usage }: {
+function TradeCard({ trade, index, onEditRates, onEditDetails, usage, branchLabel, canManage }: {
   trade: TradeWithRates;
   index: number;
   onEditRates: () => void;
@@ -468,6 +565,11 @@ function TradeCard({ trade, index, onEditRates, onEditDetails, usage }: {
   /** branch lens (set when a specific branch is picked): how many of that
    *   branch's employees carry this trade */
   usage?: { count: number; label: string };
+  /** owning book label — "All branches" (shared) or the branch name */
+  branchLabel: string;
+  /** false → the viewer may not edit / re-price this book (shared book or
+   *   another branch's trade for a normal admin) */
+  canManage: boolean;
 }) {
   return (
     <motion.section
@@ -481,6 +583,9 @@ function TradeCard({ trade, index, onEditRates, onEditDetails, usage }: {
           <h3 className="flex items-center gap-2 truncate text-base font-semibold">
             <Wrench size={15} className="shrink-0 text-brand" /> {trade.name}
           </h3>
+          <p className="mt-1 inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            <GitBranch size={11} className="shrink-0" /> {branchLabel}
+          </p>
           {trade.description && (
             <p className="mt-0.5 truncate text-xs text-muted-foreground">{trade.description}</p>
           )}
@@ -532,10 +637,18 @@ function TradeCard({ trade, index, onEditRates, onEditDetails, usage }: {
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button variant="outline" size="sm" onClick={onEditRates}>
-          <Pencil size={13} /> Edit Rates
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onEditDetails}>Details</Button>
+        {canManage ? (
+          <>
+            <Button variant="outline" size="sm" onClick={onEditRates}>
+              <Pencil size={13} /> Edit Rates
+            </Button>
+            <Button variant="ghost" size="sm" onClick={onEditDetails}>Details</Button>
+          </>
+        ) : (
+          <p className="text-[11px] text-muted-foreground">
+            Read-only — {branchLabel === 'All branches' ? 'the shared All-Branches book is super-admin only' : 'this book belongs to another branch'}.
+          </p>
+        )}
       </div>
     </motion.section>
   );
@@ -823,10 +936,7 @@ export function TradePage() {
     (employees ?? []).forEach((e) => {
       if (e.status !== 'active') return;
       const branch = e.current_site_id ? branchIdOfSite.get(e.current_site_id) ?? null : null;
-      const inScope = branchFilter === 'all' ? true
-        : branchFilter === '__none__' ? branch === null
-          : branch === branchFilter;
-      if (!inScope) return;
+      if (branchFilter !== 'all' && branch !== branchFilter) return;
       employeeCount += 1;
       if (e.trade_id) counts.set(e.trade_id, (counts.get(e.trade_id) ?? 0) + 1);
     });
@@ -835,21 +945,36 @@ export function TradePage() {
 
   const branchScopeName = branchFilter === 'all'
     ? null
-    : branchFilter === '__none__' ? 'No branch' : branchNameOf.get(branchFilter) ?? 'this branch';
+    : branchNameOf.get(branchFilter) ?? 'this branch';
 
+  // branch-owned books: a specific branch shows ITS trades plus the shared
+  // All-Branches book; "All branches" shows everything the viewer may see
+  // (listTrades already scopes a normal admin to the shared book + their
+  // granted branches' books)
   const visible = useMemo(() => {
-    let list = (trades ?? []).filter((t) => t.is_active || showInactive);
-    // a specific branch → only the trades its employees actually carry
-    if (branchFilter !== 'all') list = list.filter((t) => (branchUsage.counts.get(t.id) ?? 0) > 0);
-    return list;
-  }, [trades, showInactive, branchFilter, branchUsage]);
+    const list = (trades ?? []).filter((t) => t.is_active || showInactive);
+    if (branchFilter === 'all') return list;
+    return list.filter((t) => t.branch_id === null || t.branch_id === branchFilter);
+  }, [trades, showInactive, branchFilter]);
+
+  /** the label of a trade's owning book */
+  const bookLabel = (t: TradeWithRates): string =>
+    t.branch_id === null ? 'All branches' : branchNameOf.get(t.branch_id) ?? 'another branch';
+
+  /** super admin manages every book; a normal admin only their granted
+   *  branches' books (never the shared All-Branches book) */
+  const canManage = (t: TradeWithRates): boolean => {
+    if (isSuperAdmin) return true;
+    if (t.branch_id === null) return false;
+    return (branches ?? []).some((b) => b.id === t.branch_id);
+  };
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
       <SectionTitle
         icon={<Wrench size={16} />}
         title="Trade / Deduction Management"
-        sub="Trades & effective-dated hourly rates — plus the configurable absent deduction rule"
+        sub="Branch-owned trades & effective-dated hourly rates — plus the configurable absent deduction rule"
       />
 
       <Tabs defaultValue="trades" className="space-y-4">
@@ -868,7 +993,7 @@ export function TradePage() {
             <div className="flex flex-wrap items-center gap-3">
               <div
                 className="flex items-center gap-1.5 text-xs text-muted-foreground"
-                title="Show only the trades this branch's employees carry — rates stay company-wide"
+                title="Each branch owns its own trades and rates — the same trade can carry different rates in another branch"
               >
                 <GitBranch size={14} className="shrink-0" />
                 <Select value={branchFilter} onValueChange={setBranchFilter}>
@@ -880,7 +1005,6 @@ export function TradePage() {
                     {(branches ?? []).map((b) => (
                       <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
                     ))}
-                    <SelectItem value="__none__">No branch (idle)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -896,9 +1020,16 @@ export function TradePage() {
 
           {branchScopeName && (
             <p className="text-xs text-muted-foreground">
-              <span className="font-semibold text-foreground">{branchScopeName === 'No branch' ? 'Employees without a branch' : `${branchScopeName} branch`}</span>
-              {' '}— {branchUsage.employeeCount} active employee{branchUsage.employeeCount === 1 ? '' : 's'} across{' '}
-              {visible.length} trade{visible.length === 1 ? '' : 's'}. Hourly rates stay company-wide.
+              <span className="font-semibold text-foreground">{branchScopeName}</span>
+              {' '}— its own trade books plus the shared All-Branches book: {visible.length} trade{visible.length === 1 ? '' : 's'}.
+              {branchUsage.employeeCount > 0 && (
+                <> {branchUsage.employeeCount} active employee{branchUsage.employeeCount === 1 ? '' : 's'} work{branchUsage.employeeCount === 1 ? 's' : ''} here.</>
+              )}
+            </p>
+          )}
+          {!isSuperAdmin && branchFilter === 'all' && (
+            <p className="text-xs text-muted-foreground">
+              Showing the shared All-Branches book{branches && branches.length > 0 ? ` plus your granted ${branches.length === 1 ? 'branch' : `${branches.length} branches`}` : ''} — each book keeps its own rates.
             </p>
           )}
 
@@ -909,12 +1040,12 @@ export function TradePage() {
           ) : visible.length === 0 ? (
             <EmptyState
               icon={<Wrench size={22} />}
-              title={branchFilter !== 'all' && (trades.length > 0 || branchUsage.employeeCount === 0)
-                ? 'No trades in use in this branch'
+              title={branchFilter !== 'all'
+                ? 'No trades in this branch yet'
                 : showInactive ? 'No trades yet' : 'No active trades'}
-              description={branchFilter !== 'all' && trades.length > 0
-                ? `None of this branch's ${branchUsage.employeeCount} active employee${branchUsage.employeeCount === 1 ? '' : 's'} carry a configured trade yet — switch to All branches to see every trade and its rates.`
-                : 'Create a trade with its six rate cells to start pricing salary.'}
+              description={branchFilter !== 'all'
+                ? 'This branch has no trade of its own yet — add one with its six rate cells, or use the shared All-Branches book.'
+                : 'Create a trade with its six rate cells to start pricing salary — pick the branch that owns it and its rates.'}
             />
           ) : (
             <div className="grid gap-4 md:grid-cols-2">
@@ -926,6 +1057,8 @@ export function TradePage() {
                   onEditRates={() => setRatesTarget(t)}
                   onEditDetails={() => setEditTarget(t)}
                   usage={branchScopeName ? { count: branchUsage.counts.get(t.id) ?? 0, label: branchScopeName } : undefined}
+                  branchLabel={bookLabel(t)}
+                  canManage={canManage(t)}
                 />
               ))}
             </div>
@@ -938,17 +1071,26 @@ export function TradePage() {
         </TabsContent>
       </Tabs>
 
-      <CreateTradeDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <CreateTradeDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        branches={branches ?? []}
+        defaultBranchId={branchFilter === 'all' ? null : branchFilter}
+        isSuperAdmin={isSuperAdmin}
+      />
       <EditRatesDialog
         trade={ratesTarget}
         open={ratesTarget !== null}
         onOpenChange={(v) => { if (!v) setRatesTarget(null); }}
         isSuperAdmin={isSuperAdmin}
+        branchLabel={ratesTarget ? bookLabel(ratesTarget) : null}
       />
       <EditTradeDialog
         trade={editTarget}
         open={editTarget !== null}
         onOpenChange={(v) => { if (!v) setEditTarget(null); }}
+        branches={branches ?? []}
+        isSuperAdmin={isSuperAdmin}
       />
     </div>
   );

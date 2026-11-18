@@ -1154,6 +1154,7 @@ export const prodApi = {
     return ((data ?? []) as unknown as Record<string, unknown>[]).map((row) => ({
       id: row.id as string,
       name: row.name as string,
+      branch_id: (row.branch_id as string | null) ?? null,
       description: (row.description as string | null) ?? null,
       is_active: Boolean(row.is_active),
       created_at: row.created_at as string,
@@ -1193,17 +1194,22 @@ export const prodApi = {
       // plain array for the jsonb param (double-encoding breaks it)
       p_rates: input.rates,
       p_activate: input.is_active ?? true,
+      p_branch_id: input.branch_id ?? null,
     });
     assertOk(error);
     return data as unknown as Trade;
   },
 
-  async updateTrade(tradeId: string, input: { name: string; description: string | null; is_active: boolean }): Promise<void> {
+  async updateTrade(tradeId: string, input: { name: string; description: string | null; is_active: boolean; branch_id?: string | null }): Promise<void> {
     const { error } = await sb().rpc('update_trade', {
       p_trade_id: tradeId,
       p_name: input.name,
       p_description: input.description,
       p_is_active: input.is_active,
+      // undefined = keep the trade in its current book; otherwise the
+      // (possibly new) owning branch — null moves it to the shared book
+      p_branch_id: input.branch_id ?? null,
+      p_keep_branch: input.branch_id === undefined,
     });
     assertOk(error);
   },

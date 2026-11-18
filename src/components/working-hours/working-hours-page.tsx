@@ -17,12 +17,20 @@
 //   one number (historical breakdown unavailable by design)
 // • realtime: marking attendance, editing hours, transferring sites or
 //   touching employees refreshes the open report automatically
+//
+// BRANCH-WISE SEPARATION — the Branch dropdown scopes the employee picker:
+// a specific branch lists only that branch's employees (their branch = the
+// owner branch of their current site), "No branch" the idle ones. Normal
+// admins only ever see their granted branches (+ directly assigned sites) —
+// for them "All branches" already means their own allowance.
 // ============================================================================
 
-import { Clock, SearchX, TriangleAlert } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Clock, GitBranch, SearchX, TriangleAlert } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { EmptyState, PageHeader } from '@/components/shared/primitives';
+import { useBranchScope } from '@/components/shared/branch-scope';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { dataApi } from '@/lib/data';
 import type { EmployeeVM, EmployeeWorkingHoursReport } from '@/lib/types';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -44,9 +52,14 @@ export function WorkingHoursPage() {
   // rename refreshes both the picker and the open report
   const realtimeVersion = useRealtimeVersion(['attendance', 'employee', 'site', 'site_transfer']);
 
+  // shared branch scope — granted branches, site→branch map, employee scope
+  const scope = useBranchScope();
+
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reportState, setReportState] = useState<ReportState>({ phase: 'idle' });
+  // 'all' | branch id | '__none__' (employees without a branch / idle)
+  const [branchFilter, setBranchFilter] = useState('all');
 
   // employee picker list (fresh on every relevant change)
   useEffect(() => {
@@ -62,10 +75,23 @@ export function WorkingHoursPage() {
     return () => { cancelled = true; };
   }, [realtimeVersion]);
 
-  // the selection is derived through the fresh employee list — a deleted
-  // employee quietly falls back to the search prompt, no state juggling
+  // ---- branch-wise separation -------------------------------------------------
+  // the picker only offers employees of the picked branch — and for a normal
+  // admin (without the all-branches grant) never leaves their granted sites
+  const visibleEmployees = useMemo(() => {
+    const list = employees ?? [];
+    return list.filter((e) => {
+      if (!scope.employeeInScope(e)) return false;
+      if (branchFilter === 'all') return true;
+      const branch = scope.branchIdOfEmployee(e);
+      return branchFilter === '__none__' ? branch === null : branch === branchFilter;
+    });
+  }, [employees, branchFilter, scope]);
+
+  // the selection is derived through the fresh visible list — an employee
+  // leaving the scope quietly falls back to the search prompt
   const effectiveSelectedId =
-    selectedId !== null && employees !== null && !employees.some((e) => e.id === selectedId)
+    selectedId !== null && employees !== null && !visibleEmployees.some((e) => e.id === selectedId)
       ? null
       : selectedId;
 
@@ -99,7 +125,7 @@ export function WorkingHoursPage() {
   const reportError =
     reportState.phase === 'error' && reportState.id === effectiveSelectedId ? reportState.message : null;
 
-  const pickerLoading = employees === null;
+  const pickerLoading = employees === null || !scope.ready;
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -108,18 +134,38 @@ export function WorkingHoursPage() {
         description="Employee lifetime working hours and monthly history — opening balance plus every attendance-recorded hour, split by month and site."
       />
 
-      {/* employee search */}
+      {/* employee search + branch scope */}
       <div className="card-glow rounded-2xl border bg-card p-4 md:p-5">
-        <p className="mb-3 text-sm font-semibold">Search &amp; view employee working-hour records</p>
-        <EmployeeSearch
-          employees={employees ?? []}
-          value={effectiveSelectedId}
-          onChange={(id) => setSelectedId(id)}
-          loading={pickerLoading}
-        />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm font-semibold">Search &amp; view employee working-hour records</p>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <GitBranch size={14} className="shrink-0" />
+            <Select value={branchFilter} onValueChange={setBranchFilter}>
+              <SelectTrigger className="h-9 w-44 bg-card text-xs" aria-label="Filter employees by branch">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All branches</SelectItem>
+                {scope.branches.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                ))}
+                <SelectItem value="__none__">No branch (idle)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <div className="mt-3">
+          <EmployeeSearch
+            employees={visibleEmployees}
+            value={effectiveSelectedId}
+            onChange={(id) => setSelectedId(id)}
+            loading={pickerLoading}
+          />
+        </div>
         <p className="mt-2.5 text-[11px] text-muted-foreground">
           Search by name, employee ID, trade or current site. The report loads only after you pick
           someone — nothing is fetched up front.
+          {!scope.viewAllEmployees && ' You only see the employees of your granted branches and assigned sites.'}
         </p>
       </div>
 
@@ -128,7 +174,11 @@ export function WorkingHoursPage() {
           <EmptyState
             icon={<SearchX size={26} />}
             title="Pick an employee to see their working hours"
-            description="Lifetime hours = the employee's opening balance + every hour PULSE has recorded through attendance. Existing employees can start with their accumulated hours; new employees start at zero."
+            description={
+              visibleEmployees.length === 0 && (employees?.length ?? 0) > 0
+                ? 'No employees in this scope — switch the branch filter or ask a super admin for branch access.'
+                : 'Lifetime hours = the employee\'s opening balance + every hour PULSE has recorded through attendance. Existing employees can start with their accumulated hours; new employees start at zero.'
+            }
           />
         ) : reportLoading ? (
           <WorkingHoursSkeleton />

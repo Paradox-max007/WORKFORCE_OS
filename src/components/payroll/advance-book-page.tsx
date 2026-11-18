@@ -78,6 +78,7 @@ import type {
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
+import { useBranchScope } from '@/components/shared/branch-scope';
 import { useRealtimeVersion } from '@/store/realtime';
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -135,6 +136,10 @@ const todayYMD = (): string => {
 
 export function AdvanceBookPage() {
   const realtimeVersion = useRealtimeVersion(['advance_record', 'payroll_employee']);
+  // branch scope — the bulk-add picker never leaves the viewer's granted
+  // branches (+ directly assigned sites); the ledger itself is scoped by the
+  // data API (getAdvanceBook) for normal admins
+  const scope = useBranchScope();
   const [report, setReport] = useState<AdvanceBookReport | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
   const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
@@ -329,12 +334,15 @@ export function AdvanceBookPage() {
     setFormOpen(true);
   };
 
-  /** the dialog's employee list — branch first, then the search text */
+  /** the dialog's employee list — the viewer's branch scope first, then the
+   *  picked branch, then the search text (a normal admin never leaves their
+   *  granted branches + assigned sites) */
   const pickerEmployees = useMemo(() => {
     if (!employees) return [];
     const q = bulk.query.toLowerCase().trim();
     return employees.filter((e) => {
       if (e.status !== 'active') return false;
+      if (!scope.employeeInScope(e)) return false;
       const branch = e.current_site_id ? branchIdOfSite.get(e.current_site_id) ?? null : null;
       if (bulk.branchId === '__none__') {
         if (branch != null) return false;
@@ -346,7 +354,7 @@ export function AdvanceBookPage() {
         && !(e.site_name ?? '').toLowerCase().includes(q)) return false;
       return true;
     }).sort((a, b) => a.full_name.localeCompare(b.full_name));
-  }, [employees, branchIdOfSite, bulk.branchId, bulk.query]);
+  }, [employees, branchIdOfSite, bulk.branchId, bulk.query, scope]);
 
   const selectedIds = useMemo(
     () => Object.keys(bulk.amounts), [bulk.amounts]);

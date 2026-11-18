@@ -604,9 +604,16 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
 export const maskApiKey = (key: string): string =>
   key ? `••••••••${key.slice(-4)}` : '';
 
+/** A trade (Electrician, Plumber, …) with its own effective-dated rate grid.
+ *  Trades are BRANCH-OWNED: `branch_id` pins a trade (and its whole rate
+ *  book) to one branch, so the SAME trade name can carry DIFFERENT rates in
+ *  different branches — they never mix. `branch_id: null` marks an org-wide
+ *  "All Branches" trade shared by every branch (super admins only). */
 export interface Trade {
   id: string;
   name: string;
+  /** owning branch — null = the shared "All Branches" trade book */
+  branch_id: string | null;
   description: string | null;
   is_active: boolean;
   created_at: string;
@@ -634,6 +641,9 @@ export interface TradeRateInput {
 export interface TradeInput {
   name: string;
   description: string | null;
+  /** owning branch — null = the shared org-wide trade (super admin only);
+   *  normal admins must pick one of their granted branches */
+  branch_id?: string | null;
   /** false → inactive draft (hidden from new employee selection, not used for salary) */
   is_active?: boolean;
   /** initial effective-dated rates (today); may be partial when is_active=false */

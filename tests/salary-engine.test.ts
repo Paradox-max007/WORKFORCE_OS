@@ -41,7 +41,7 @@ const att = (employeeId: string, date: string, hours: number | null, hidden = fa
 });
 
 const trade = (id: string, name: string): Trade =>
-  ({ id, name, description: null, is_active: true, created_at: T0, updated_at: T0 });
+  ({ id, name, branch_id: null, description: null, is_active: true, created_at: T0, updated_at: T0 });
 
 const rate = (
   tradeId: string, role: SalaryRole, tier: ExperienceTier, hourly: number,

@@ -486,7 +486,7 @@ function seedDB(): DemoDB {
     'Store Keeper': [6, 8],
   };
   const mkTrade = (name: string, description: string): Trade => ({
-    id: uid(), name, description, is_active: true,
+    id: uid(), name, branch_id: null, description, is_active: true,
     created_at: nowISO(), updated_at: nowISO(),
   });
   const ROLES: SalaryRole[] = ['standard', 'team_leader', 'supervisor'];
@@ -980,6 +980,11 @@ function loadDB(): DemoDB {
         if (!parsed.advanceRecords) parsed.advanceRecords = [];
         parsed.advanceRecords?.forEach((r) => {
           if (r.source_period_id === undefined) r.source_period_id = null;
+        });
+        // branch-owned trades shipped without a version bump — trades saved
+        // before branches owned trades become the org-wide (shared) book
+        parsed.trades?.forEach((t) => {
+          if (t.branch_id === undefined) t.branch_id = null;
         });
         parsed.payrollEmployees?.forEach((pe) => {
           if (pe.advance_book_applied == null) pe.advance_book_applied = 0;

@@ -38,6 +38,7 @@ import { dataApi } from '@/lib/data';
 import { fmtDate, initials } from '@/lib/format';
 import type { CancellationRequestVM, EmployeeVM } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { useBranchScope } from '@/components/shared/branch-scope';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
 
@@ -53,6 +54,10 @@ export function CancellationRequestPage() {
   const user = useAuthStore((s) => s.user);
   const isSuperAdmin = user?.role === 'super_admin';
   const version = useRealtimeVersion(['cancellation_request']);
+
+  // branch scope — normal admins only see requests of their branches'
+  // employees (granted branches + directly assigned sites)
+  const scope = useBranchScope();
 
   const [requests, setRequests] = useState<CancellationRequestVM[] | null>(null);
   const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
@@ -93,30 +98,45 @@ export function CancellationRequestPage() {
   }, [search]);
 
   // ---- derived values ---------------------------------------------------------
-  const stats = useMemo(() => {
+  // employee id → record (scope lookup for the request rows); requests of
+  // employees no longer on the roster (archived) stay visible as history
+  const employeeById = useMemo(
+    () => new Map((employees ?? []).map((e) => [e.id, e] as const)),
+    [employees],
+  );
+  /** requests of employees inside the viewer's branch scope */
+  const scopedRequests = useMemo(() => {
     const list = requests ?? [];
+    if (scope.effectiveSiteIds === null) return list;
+    return list.filter((r) => {
+      const emp = employeeById.get(r.employee_id);
+      return emp ? scope.employeeInScope(emp) : true;
+    });
+  }, [requests, employeeById, scope]);
+
+  const stats = useMemo(() => {
     return {
-      total: list.length,
-      pending: list.filter((r) => r.status === 'pending').length,
-      approved: list.filter((r) => r.status === 'approved').length,
-      rejected: list.filter((r) => r.status === 'rejected').length,
+      total: scopedRequests.length,
+      pending: scopedRequests.filter((r) => r.status === 'pending').length,
+      approved: scopedRequests.filter((r) => r.status === 'approved').length,
+      rejected: scopedRequests.filter((r) => r.status === 'rejected').length,
     };
-  }, [requests]);
+  }, [scopedRequests]);
 
   const filtered = useMemo(() => {
-    const list = requests ?? [];
-    return list.filter((r) => {
+    return scopedRequests.filter((r) => {
       if (statusFilter !== 'all' && r.status !== statusFilter) return false;
       if (!debouncedSearch) return true;
       const hay = `${r.employee_name} ${r.employee_code} ${r.reason ?? ''} ${r.requested_by_name ?? ''}`.toLowerCase();
       return hay.includes(debouncedSearch);
     });
-  }, [requests, debouncedSearch, statusFilter]);
+  }, [scopedRequests, debouncedSearch, statusFilter]);
 
   const filtersActive = search.trim().length > 0 || statusFilter !== 'all';
   const loading = requests === null;
+  // the create dialog only offers the viewer's own branch employees
   const selectableEmployees = (employees ?? [])
-    .filter((e) => e.status === 'active' || e.status === 'pending_deletion')
+    .filter((e) => (e.status === 'active' || e.status === 'pending_deletion') && scope.employeeInScope(e))
     .sort((a, b) => (a.status === b.status ? a.full_name.localeCompare(b.full_name) : a.status === 'active' ? -1 : 1));
 
   const resetFilters = () => {

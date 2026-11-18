@@ -25,6 +25,7 @@
 
 import { dataApi } from '@/lib/data';
 import { queryableTablesDoc } from '@/lib/ai/query-engine';
+import { describeScope, type AiScope } from '@/lib/ai/scope';
 import {
   listAllSiteDocSummaries,
   listSiteDocs,
@@ -32,7 +33,7 @@ import {
   type SiteDocSummary,
 } from '@/lib/files/site-docs';
 import type {
-  AdminAccess, Attendance, EmployeeVM, LeaveRequestVM, Notification, SalarySheetReport,
+  AdminAccess, Attendance, CampWithCount, EmployeeVM, LeaveRequestVM, Notification, SalarySheetReport,
   SiteSettings, UniformEntry, WarningVM, FineVM, CancellationRequestVM,
 } from '@/lib/types';
 
@@ -81,9 +82,15 @@ PAYROLL RULES
 - FINALIZED periods are locked; drafts recalculate live.`;
 
 // ---------------------------------------------------------------------------
-// Knowledge base fetch — every readable entity (same keys as before so the
-// Site Settings scope grid keeps working)
+// Knowledge base fetch — every readable entity the VIEWER may see (same keys
+// as before so the Site Settings scope grid keeps working)
 // ---------------------------------------------------------------------------
+// BRANCH SCOPING: the roster, branches and sites come straight from the
+// resolved AiScope (already limited to the viewer's granted branches +
+// directly assigned sites — one fetch per question, no refetch), and every
+// employee-linked record fetched below is filtered through the SAME scope.
+// A branch admin's Pebby never sees another branch's data.
+//
 // NOTE: request dates. Every request table carries exact timestamps:
 //   cancellation_requests.requested_at (raised) / reviewed_at (decision —
 //   for an APPROVED request reviewed_at IS the employee's cancellation date)
@@ -91,22 +98,17 @@ PAYROLL RULES
 // They are serialized into the snapshot below and are also queryable via
 // the [[QUERY]] engine (src/lib/ai/query-engine.ts).
 
-export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
+export async function buildAiKnowledgeBase(scope: AiScope): Promise<AiKnowledgeBase> {
   const now = new Date();
   const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
+  // the scope's reference data (roster / branches / sites) is NOT refetched
+  // here — resolveAiScope() read it moments ago and already filtered it
   const [
-    adminAccess, branches, sites, camps, employees, cancelledEmployees, trades, leaveRequests,
-    cancellationRequests, uniforms, companies, cardTypes, warnings, fines,
-    notifications, attendance, salarySheet, advanceBook, deductionSettings,
+    leaveRequests, cancellationRequests, uniforms, companies, cardTypes, warnings, fines,
+    notifications, attendance, salarySheet, advanceBook, deductionSettings, camps, trades,
+    adminAccess,
   ] = await Promise.allSettled([
-    dataApi.listAdminAccess(),
-    dataApi.listBranches(),
-    dataApi.listSites(),
-    dataApi.listCamps(),
-    dataApi.listEmployees(),
-    dataApi.listCancelledEmployees(),
-    dataApi.listTrades(),
     dataApi.listLeaveRequests(),
     dataApi.listCancellationRequests(),
     dataApi.listUniformEntries(),
@@ -119,40 +121,95 @@ export async function buildAiKnowledgeBase(): Promise<AiKnowledgeBase> {
     dataApi.getSalarySheet(now.getFullYear(), now.getMonth() + 1),
     dataApi.getAdvanceBook(),
     dataApi.getDeductionSettings(),
+    dataApi.listCamps(),
+    dataApi.listTrades(),
+    // the admin directory (emails + grants of every account) stays with
+    // unrestricted viewers — super admin / All-Branches grant only
+    scope.unrestricted ? dataApi.listAdminAccess() : Promise.resolve([] as AdminAccess[]),
   ]);
 
   const val = <T,>(r: PromiseSettledResult<T>, fallback: T): T =>
     r.status === 'fulfilled' ? r.value : fallback;
 
-  // site documents (uploaded timesheets / time cards) — depends on the sites
-  // list, so it runs as a second (still cheap) round: demo = one IndexedDB
-  // read, prod = one bucket list per site capped to the newest 3 months
-  const sitesList = val(sites, [] as { id: string; name: string; created_at: string }[]);
-  const siteDocs = await listAllSiteDocSummaries(sitesList, 3).catch(() => [] as SiteDocSummary[]);
+  // ---- scope the employee-linked records (no-ops for unrestricted) ----
+  const keep = <T,>(rows: T[], pred: (row: T) => boolean): T[] =>
+    scope.unrestricted ? rows : rows.filter(pred);
+  const leaveList = keep(val(leaveRequests, []), (l) => scope.employeeByCodeInScope(l.employee_code));
+  const cancellationList = keep(val(cancellationRequests, []), (c) => scope.employeeByCodeInScope(c.employee_code));
+  const uniformList = keep(val(uniforms, []), (u) => scope.employeeByIdInScope(u.employee_id));
+  const warningList = keep(val(warnings, []), (w) => scope.employeeByCodeInScope(w.employee_code));
+  const fineList = keep(val(fines, []), (f) => scope.employeeByCodeInScope(f.employee_code));
+  const attendanceRecords = keep(val(attendance, [] as Attendance[]), (r) => scope.employeeByIdInScope(r.employee_id));
+  // salary sheet narrowed to the scope — rows by site membership, totals
+  // recomputed (mirrors the Salary Sheet page's branch scoping)
+  const salaryReport = scope.scopeSalaryReport(val(salarySheet, null));
+  // the advance ledger is server-scoped by site grants already; the code
+  // filter is a defensive second layer, totals recomputed from what stays
+  const advanceReport = (() => {
+    const book = val(advanceBook, null);
+    if (!book || scope.unrestricted) return book;
+    const records = book.records.filter((r) => scope.employeeByCodeInScope(r.employee_code));
+    const t = {
+      due_count: 0, due_amount: 0, overdue_count: 0, overdue_amount: 0,
+      cleared_count: 0, cleared_amount: 0,
+    };
+    records.forEach((r) => {
+      if (r.cleared) {
+        t.cleared_count += 1;
+        t.cleared_amount += r.amount;
+      } else {
+        t.due_count += 1;
+        t.due_amount += r.amount;
+        if (r.overdue) {
+          t.overdue_count += 1;
+          t.overdue_amount += r.amount;
+        }
+      }
+    });
+    return { records, totals: t };
+  })();
+  // camps: only camps housing in-scope employees, with in-scope resident
+  // counts — another branch's accommodation never leaks
+  const campList = (() => {
+    const list = val(camps, [] as CampWithCount[]);
+    if (scope.unrestricted) return list;
+    const residents = new Map<string, number>();
+    scope.employees.forEach((e) => {
+      if (e.camp_name) residents.set(e.camp_name, (residents.get(e.camp_name) ?? 0) + 1);
+    });
+    return list
+      .filter((c) => (residents.get(c.name) ?? 0) > 0)
+      .map((c) => ({ ...c, employee_count: residents.get(c.name) ?? 0 }));
+  })();
+
+  // site documents (uploaded timesheets / time cards) — only the viewer's
+  // sites are listed (demo = one IndexedDB read, prod = one bucket list per
+  // site capped to the newest 3 months)
+  const siteDocs = await listAllSiteDocSummaries(scope.sites, 3).catch(() => [] as SiteDocSummary[]);
 
   const data: Record<string, unknown> = {
     admins: val(adminAccess, []),
-    branches: val(branches, []),
-    sites: val(sites, []),
-    camps: val(camps, []),
-    employees: val(employees, []),
-    cancelled_employees: val(cancelledEmployees, []),
+    branches: scope.branches,
+    sites: scope.sites,
+    camps: campList,
+    employees: scope.employees,
+    cancelled_employees: scope.cancelledEmployees,
     trades: val(trades, []),
-    leave_requests: val(leaveRequests, []),
-    cancellation_requests: val(cancellationRequests, []),
-    uniforms: val(uniforms, []),
+    leave_requests: leaveList,
+    cancellation_requests: cancellationList,
+    uniforms: uniformList,
     companies: val(companies, []),
     card_types: val(cardTypes, []),
-    warnings: val(warnings, []),
-    fines: val(fines, []),
+    warnings: warningList,
+    fines: fineList,
     notifications: val(notifications, []),
-    attendance_current_month: { month, records: val(attendance, []) },
+    attendance_current_month: { month, records: attendanceRecords },
     salary_sheet_current_month: {
       year: now.getFullYear(),
       month: now.getMonth() + 1,
-      report: val(salarySheet, null),
+      report: salaryReport,
     },
-    advance_book: val(advanceBook, null),
+    advance_book: advanceReport,
     deduction_settings: val(deductionSettings, null),
     site_documents: siteDocs,
   };
@@ -399,22 +456,32 @@ export function formatSiteDocuments(
 }
 
 
-function buildSnapshotText(d: SnapshotInput): string {
+function buildSnapshotText(d: SnapshotInput, scope: AiScope): string {
   const sections: string[] = [];
 
-  sections.push([
-    `ADMINS (${d.admins.length})`,
-    ...d.admins.map((a) => {
-      const head = `- ${a.name} · ${a.role === 'super_admin' ? 'SUPER ADMIN' : a.role.toUpperCase()} · ${a.email} · created ${a.created}`;
-      if (a.role === 'super_admin') {
-        return `${head} · access: EVERYTHING — every menu, every branch and site, Admin Management & Site Settings; can approve/reject requests and restore cancelled employees`;
-      }
-      const bits = [`menus: ${a.menus.join(', ') || '(none)'}`];
-      bits.push(a.branches.length ? `supervises branches: ${a.branches.join(', ')}` : 'no branch grants');
-      bits.push(a.sites.length ? `direct site access: ${a.sites.join(', ')}` : 'no direct site grants');
-      return `${head} · ${bits.join(' · ')}`;
-    }),
-  ].join('\n'));
+  // admins — the full directory only for unrestricted viewers; a scoped
+  // viewer sees their OWN access instead (other admins' emails and grants
+  // never leak into a branch admin's Pebby)
+  if (scope.unrestricted) {
+    sections.push([
+      `ADMINS (${d.admins.length})`,
+      ...d.admins.map((a) => {
+        const head = `- ${a.name} · ${a.role === 'super_admin' ? 'SUPER ADMIN' : a.role.toUpperCase()} · ${a.email} · created ${a.created}`;
+        if (a.role === 'super_admin') {
+          return `${head} · access: EVERYTHING — every menu, every branch and site, Admin Management & Site Settings; can approve/reject requests and restore cancelled employees`;
+        }
+        const bits = [`menus: ${a.menus.join(', ') || '(none)'}`];
+        bits.push(a.branches.length ? `supervises branches: ${a.branches.join(', ')}` : 'no branch grants');
+        bits.push(a.sites.length ? `direct site access: ${a.sites.join(', ')}` : 'no direct site grants');
+        return `${head} · ${bits.join(' · ')}`;
+      }),
+    ].join('\n'));
+  } else {
+    sections.push([
+      'ADMIN DIRECTORY — not available in your access scope (visible to super admins / All-Branches admins only).',
+      `Your own access: ${describeScope(scope)}.`,
+    ].join('\n'));
+  }
 
   sections.push([
     `BRANCHES (${d.branches.length})`,
@@ -430,7 +497,7 @@ function buildSnapshotText(d: SnapshotInput): string {
   sections.push(formatSiteDocumentsGrouped(d.siteDocuments, d.sites));
 
   sections.push([
-    `CAMPS (${d.camps.length})`,
+    `CAMPS (${d.camps.length}${scope.unrestricted ? '' : ' — accommodation of in-scope employees; resident counts are branch-scoped'})`,
     ...d.camps.map((c) => `- ${c.name}${c.location ? ` · ${c.location}` : ''}${c.capacity ? ` · capacity ${c.capacity}` : ''} · ${c.is_active ? 'active' : 'inactive'} · ${c.employee_count} resident(s)`),
   ].join('\n'));
 
@@ -524,9 +591,11 @@ function buildSnapshotText(d: SnapshotInput): string {
 // System prompt — Pebby identity + snapshot + answer protocol
 // ---------------------------------------------------------------------------
 
-/** The complete system prompt: identity + guide + compact snapshot + the
- *  [[LOOKUP]] / [[WEB]] answer protocol. */
-export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings): string {
+/** The complete system prompt: identity + the viewer's access scope + guide +
+ *  compact snapshot + the [[LOOKUP]] / [[WEB]] answer protocol. The snapshot
+ *  and the query dictionary are both built FROM the scope, so everything the
+ *  model can read is already limited to the viewer's access. */
+export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings, scope: AiScope): string {
   // map the snake_case knowledge-base keys onto the snapshot builder's shape
   const raw = kb.data as Record<string, unknown>;
   const list = <T,>(key: string): T[] => (Array.isArray(raw[key]) ? raw[key] as T[] : []);
@@ -552,11 +621,27 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     deductionSettings: (raw.deduction_settings as SnapshotInput['deductionSettings']) ?? null,
     siteDocuments: list<SiteDocSummary>('site_documents'),
   };
-  const snapshot = buildSnapshotText(d);
+  const snapshot = buildSnapshotText(d, scope);
+
+  // the viewer's own access — Pebby explains WHY a record is missing
+  // instead of hallucinating data from other branches
+  const viewerScopeBlock = [
+    '=== VIEWER ACCESS SCOPE ===',
+    `You are assisting ${scope.viewerName} (${scope.viewerRole === 'super_admin' ? 'super admin' : 'admin'}). Data access: ${describeScope(scope)}.`,
+    scope.unrestricted
+      ? 'The snapshot below covers the ENTIRE organization — answer from all of it.'
+      : 'Every table in the snapshot below is ALREADY limited to this access: employees, sites, attendance, payroll, salary sheets, advances, uniforms, warnings, fines, letters and documents of other branches simply DO NOT EXIST for this viewer. Never speculate about records outside the scope — if asked about another branch, another branch\'s employee or a site you cannot see, say it is outside the viewer\'s access and suggest asking a super admin.',
+  ].join('\n');
+
+  const adminProtocolLine = scope.unrestricted
+    ? '7. Admin questions (who has which permissions, who supervises a branch/site, who can approve requests): read the ADMINS section of the snapshot — it lists every admin\'s effective menus, supervised branches and direct site access. Super admins have everything; only they can manage accounts, settings and restore cancelled employees.'
+    : '7. Admin questions beyond the viewer\'s own access are out of scope — the ADMIN DIRECTORY section lists only the viewer\'s own access. Do not guess about other admins\' permissions; suggest asking a super admin.';
 
   return [
     `You are Pebby — the Smart Assistant built into "${settings.project_name}" (${settings.company_name}), a workforce & payroll operations app. When you refer to yourself, use the name Pebby.`,
-    'You know the ENTIRE application — every module, rule and record — and the database snapshot below is refreshed before EVERY question, so treat it as current. You are a senior workforce-operations analyst: reason across tables, compute precisely, and always cite names with employee codes.',
+    'You know the ENTIRE application — every module, rule and record the VIEWER may access — and the database snapshot below is refreshed before EVERY question, so treat it as current. You are a senior workforce-operations analyst: reason across tables, compute precisely, and always cite names with employee codes.',
+    '',
+    viewerScopeBlock,
     '',
     '=== APPLICATION GUIDE ===',
     AI_APP_GUIDE,
@@ -564,8 +649,8 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     `=== LIVE DATABASE SNAPSHOT (text, currency AED, generated ${kb.generated_at}) ===`,
     snapshot,
     '',
-    '=== DATABASE QUERY ENGINE — complex querying on EVERY table ===',
-    queryableTablesDoc(),
+    '=== DATABASE QUERY ENGINE — complex querying on the tables you can see ===',
+    queryableTablesDoc(scope),
     '',
     '=== ANSWER PROTOCOL ===',
     '1. App/workforce/payroll questions: SEARCH the snapshot carefully first — match names, employee codes (e.g. PUL-2026-NNN), sites, dates — then answer precisely; compute sums, counts and averages when asked. The snapshot carries every request\'s timestamps (requested_at / reviewed_at): e.g. "when was X cancelled" = the reviewed_at of X\'s APPROVED cancellation request, and the CANCELLED EMPLOYEES directory line already carries it.',
@@ -581,6 +666,6 @@ export function buildAiSystemPrompt(kb: AiKnowledgeBase, settings: SiteSettings)
     '   The system researches the web and asks you again — then answer the user using the results.',
     '5. Never invent data. If the snapshot (plus queries/lookups) cannot answer, say so plainly and point to the right module of the app.',
     '6. Keep answers concise and well formatted: short paragraphs, compact bullet lists, amounts in AED, dates as YYYY-MM-DD. When your answer lists several records (per-employee amounts, admin access, advance rows, per-site stats…), present them as a compact markdown pipe table (header row + a |---| separator row, key columns only, max ~6 columns) — the chat renders it as a real scrollable table. Mention employee codes with names so answers are verifiable. When a question involves a date, state the exact date (and time when useful) from the record.',
-    '7. Admin questions (who has which permissions, who supervises a branch/site, who can approve requests): read the ADMINS section of the snapshot — it lists every admin\'s effective menus, supervised branches and direct site access. Super admins have everything; only they can manage accounts, settings and restore cancelled employees.',
+    adminProtocolLine,
   ].join('\n');
 }

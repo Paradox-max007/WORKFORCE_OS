@@ -40,7 +40,20 @@ const server = http.createServer((req, res) => {
       const lastUser = [...msgs].reverse().find((m) => m.role === 'user')?.content ?? '';
       seen.prompts = msgs.length;
 
-      if (lastUser.includes('DATABASE QUERY RESULT') || lastUser.includes('DATABASE QUERY ERROR')) {
+      // ---- branch-scoping verification rules (e2e: branch-scoped Pebby) ----
+      if (/dump the snapshot roster/i.test(lastUser)) {
+        const dir = /EMPLOYEE DIRECTORY \((\d+) on the roster\)\n([\s\S]*?)(?:\n\n|$)/.exec(system);
+        const codes = dir ? [...dir[2].matchAll(/^- ([A-Z]+-\d{4}-\d+) /gm)].map((m) => m[1]) : [];
+        const cancelledSec = /CANCELLED EMPLOYEES \((\d+)[^)]*\)\n([\s\S]*?)(?:\n\n|$)/.exec(system);
+        const ccodes = cancelledSec ? [...cancelledSec[2].matchAll(/^- ([A-Z]+-\d{4}-\d+) /gm)].map((m) => m[1]) : [];
+        const sitesSec = /SITES \((\d+)\)\n([\s\S]*?)(?:\n\n|$)/.exec(system);
+        const sites = sitesSec ? [...sitesSec[2].matchAll(/^- ([^·\n]+?)(?: ·|$)/gm)].map((m) => m[1].trim()) : [];
+        reply = `ROSTER(${codes.length}): ${codes.join(', ') || '(none)'} | CANCELLED(${ccodes.length}): ${ccodes.join(', ') || '(none)'} | SITES(${sites.length}): ${sites.join(' / ') || '(none)'}`;
+      } else if (/what is my access/i.test(lastUser)) {
+        const line = system.split('\n').find((l) => l.startsWith('You are assisting'));
+        const adminDir = system.split('\n').find((l) => l.startsWith('ADMIN DIRECTORY'));
+        reply = `ACCESS LINE: ${line ?? 'not found'} | ${adminDir ?? 'ADMINS section present (full directory)'}`;
+      } else if (lastUser.includes('DATABASE QUERY RESULT') || lastUser.includes('DATABASE QUERY ERROR')) {
         seen.queries += 1;
         if (lastUser.includes('cancellation_requests')) {
           const name = /employee_name: ([^·]+) ·/.exec(lastUser)?.[1]?.trim() ?? 'unknown';

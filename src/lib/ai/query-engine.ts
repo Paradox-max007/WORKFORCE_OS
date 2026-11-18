@@ -35,6 +35,7 @@
 // ============================================================================
 
 import { dataApi } from '@/lib/data';
+import type { AiScope } from '@/lib/ai/scope';
 import type {
   AttendanceShareLink, Attendance, EmployeeVM, TradeRate,
 } from '@/lib/types';
@@ -201,7 +202,11 @@ interface TableDef {
   defaultOrder?: { field: string; desc?: boolean };
   requiresMonth?: boolean;
   requiresEmployeeId?: boolean;
-  fetch: (spec: AiQuerySpec) => Promise<FetchResult>;
+  /** org-wide tables a branch-scoped viewer cannot query (the admins
+   *  directory, whole-org attendance summaries) — the run guard and the
+   * prompt dictionary both honour this */
+  superOnly?: boolean;
+  fetch: (spec: AiQuerySpec, scope?: AiScope) => Promise<FetchResult>;
 }
 
 /** employee VM → normalized query row (never includes the photo blob) */
@@ -348,14 +353,18 @@ const TABLES: Record<string, TableDef> = {
     defaultFields: ['employee_code', 'full_name', 'total_hours', 'gross_salary', 'absent_deduction', 'advance', 'deduction', 'net_salary', 'payment_status'],
     defaultOrder: { field: 'employee_code' },
     requiresMonth: true,
-    fetch: async (spec) => {
+    fetch: async (spec, scope) => {
       const month = spec.month ?? '';
       const year = Number(month.slice(0, 4));
       const mon = Number(month.slice(5, 7));
       const report = await dataApi.getSalarySheet(year, mon);
-      if (!report || !report.exists) return { rows: [], header: `no salary sheet exists for ${month}` };
-      const t = report.totals;
-      const rows = report.employees.map((p) => ({
+      // branch-scoped viewers get the report narrowed inside the scope —
+      // rows by site membership, totals recomputed (same rule as the
+      // Salary Sheet page), so another branch's amounts never leak
+      const scopedReport = scope ? scope.scopeSalaryReport(report) : report;
+      if (!scopedReport || !scopedReport.exists) return { rows: [], header: `no salary sheet exists for ${month}` };
+      const t = scopedReport.totals;
+      const rows = scopedReport.employees.map((p) => ({
         employee_code: p.employee_code,
         full_name: p.full_name,
         trade_name: p.trade_name,
@@ -374,7 +383,7 @@ const TABLES: Record<string, TableDef> = {
       }));
       return {
         rows,
-        header: `month ${month} · period ${report.period?.status ?? 'draft'} · totals: ${t.employees} employees, ${t.total_hours} h, gross AED ${t.gross_salary}, net AED ${t.net_payable}, paid ${t.paid_count}/${t.employees}`,
+        header: `month ${month} · period ${scopedReport.period?.status ?? 'draft'} · totals: ${t.employees} employees, ${t.total_hours} h, gross AED ${t.gross_salary}, net AED ${t.net_payable}, paid ${t.paid_count}/${t.employees}`,
       };
     },
   },
@@ -469,6 +478,8 @@ const TABLES: Record<string, TableDef> = {
     fields: ['month', 'status', 'count'],
     defaultFields: ['month', 'status', 'count'],
     defaultOrder: { field: 'month', desc: true },
+    // whole-organization counts — outside a branch admin's access
+    superOnly: true,
     fetch: async (spec) => {
       const rows = await dataApi.getMonthlyAttendanceSummary(spec.months ?? 6);
       return { rows: rows.map((r) => ({ month: r.month, status: r.status, count: r.count })) };
@@ -532,8 +543,8 @@ const TABLES: Record<string, TableDef> = {
     },
   },
   uniforms: {
-    doc: 'uniform tokens — token_number, employee_name, document_type (id|passport), document_number, site_name, team_leader_name, is_renewal, previous_token_id, renewal_date, items (issued pieces)',
-    fields: ['token_number', 'employee_name', 'document_type', 'document_number', 'site_name', 'team_leader_name', 'is_renewal', 'previous_token_id', 'renewal_date', 'items', 'created'],
+    doc: 'uniform tokens — token_number, employee_name, employee_id (UUID), document_type (id|passport), document_number, site_name, team_leader_name, is_renewal, previous_token_id, renewal_date, items (issued pieces)',
+    fields: ['token_number', 'employee_name', 'employee_id', 'document_type', 'document_number', 'site_name', 'team_leader_name', 'is_renewal', 'previous_token_id', 'renewal_date', 'items', 'created'],
     defaultFields: ['token_number', 'employee_name', 'site_name', 'is_renewal', 'renewal_date', 'items'],
     defaultOrder: { field: 'renewal_date', desc: true },
     fetch: async () => {
@@ -542,6 +553,7 @@ const TABLES: Record<string, TableDef> = {
         rows: list.map((u) => ({
           token_number: u.token_number,
           employee_name: u.employee_name,
+          employee_id: u.employee_id,
           document_type: u.document_type,
           document_number: u.document_number,
           site_name: u.site_name,
@@ -658,6 +670,8 @@ const TABLES: Record<string, TableDef> = {
     fields: ['name', 'email', 'role', 'menus', 'branches', 'sites', 'created'],
     defaultFields: ['name', 'role', 'menus', 'branches', 'sites'],
     defaultOrder: { field: 'name' },
+    // every account's email + grants — super admin / All-Branches only
+    superOnly: true,
     fetch: async () => {
       const list = await dataApi.listAdminAccess();
       return {
@@ -713,14 +727,27 @@ const TABLES: Record<string, TableDef> = {
     },
   },
   camps: {
-    doc: 'accommodation camps — name, location, capacity, is_active, employee_count, created',
+    doc: 'accommodation camps — name, location, capacity, is_active, employee_count (in-scope residents for branch-scoped viewers), created',
     fields: ['name', 'location', 'capacity', 'is_active', 'employee_count', 'created'],
     defaultFields: ['name', 'location', 'capacity', 'is_active', 'employee_count'],
     defaultOrder: { field: 'name' },
-    fetch: async () => {
+    fetch: async (spec, scope) => {
       const list = await dataApi.listCamps();
+      // branch-scoped viewers only see camps housing their own employees,
+      // with in-scope resident counts (another branch's camp never leaks)
+      const scopedList = scope && !scope.unrestricted
+        ? (() => {
+            const residents = new Map<string, number>();
+            scope.employees.forEach((e) => {
+              if (e.camp_name) residents.set(e.camp_name, (residents.get(e.camp_name) ?? 0) + 1);
+            });
+            return list
+              .filter((c) => (residents.get(c.name) ?? 0) > 0)
+              .map((c) => ({ ...c, employee_count: residents.get(c.name) ?? 0 }));
+          })()
+        : list;
       return {
-        rows: list.map((c) => ({
+        rows: scopedList.map((c) => ({
           name: c.name,
           location: c.location,
           capacity: c.capacity,
@@ -924,12 +951,65 @@ function fieldError(table: string, def: TableDef, kind: string, field: string): 
   return `DATABASE QUERY ERROR — table "${table}" has no ${kind} "${field}". Valid fields: ${def.fields.join(', ')}. Re-run the corrected query.`;
 }
 
-/** Run a validated spec against the live database. NEVER throws — errors come
- *  back as text so the model can self-correct on the next hop. */
-export async function runAiQuery(spec: AiQuerySpec): Promise<string> {
+// ---------------------------------------------------------------------------
+// Branch scoping — rows outside the viewer's access are dropped BEFORE any
+// filter / aggregate runs, so a scoped admin can never even COUNT another
+// branch's records. Tables whose fetch already narrows inside the scope
+// (salary_sheet, camps) or that are server-scoped (branches, trades) or
+// org-wide reference / the viewer's own inbox (companies, card_types,
+// deduction_settings, notifications) pass through untouched.
+// ---------------------------------------------------------------------------
+
+/** the site-name key of a row (sites carry `name`, link rows `site_name`) */
+const siteKeyOf = (r: Row): string | null => {
+  const v = r.site_name ?? r.name;
+  return typeof v === 'string' ? v : null;
+};
+
+function scopeRowsForTable(table: string, rows: Row[], scope: AiScope): Row[] {
+  const byCode = (r: Row): boolean =>
+    typeof r.employee_code === 'string' && scope.employeeByCodeInScope(r.employee_code);
+  switch (table) {
+    case 'employees':
+    case 'cancelled_employees':
+    case 'cancellation_requests':
+    case 'leave_requests':
+    case 'warnings':
+    case 'fines':
+    case 'employee_notes':
+    case 'site_transfers':
+    case 'attendance':
+    case 'advance_book':
+      // employee-linked rows — only the viewer's employees exist
+      return rows.filter(byCode);
+    case 'uniforms':
+      return rows.filter((r) => scope.employeeByIdInScope(
+        typeof r.employee_id === 'string' ? r.employee_id : null,
+      ));
+    case 'sites':
+    case 'attendance_share_links':
+      return rows.filter((r) => scope.siteNameInScope(siteKeyOf(r)));
+    default:
+      return rows;
+  }
+}
+
+/** Run a validated spec against the live database, optionally limited to the
+ *  viewer's access scope. NEVER throws — errors come back as text so the
+ *  model can self-correct on the next hop. */
+export async function runAiQuery(spec: AiQuerySpec, scope?: AiScope): Promise<string> {
   const def = TABLES[spec.table];
   if (!def) {
     return `DATABASE QUERY ERROR — unknown table "${spec.table}". Valid tables: ${Object.keys(TABLES).join(', ')}.`;
+  }
+
+  // ---- branch-scope guards (before anything is fetched) -------------------
+  const scopedDown = scope !== undefined && !scope.unrestricted;
+  if (scopedDown && def.superOnly) {
+    return `DATABASE QUERY ERROR — table "${spec.table}" covers the whole organization (every admin / every branch) and is available to super admins and All-Branches admins only. It is outside this viewer's branch access; answer from the snapshot's scoped sections instead.`;
+  }
+  if (scopedDown && spec.table === 'working_hours' && !scope.employeeByIdInScope(spec.employee_id)) {
+    return `DATABASE QUERY ERROR — that employee is outside your branch access (only employees working at your granted branches' sites — or directly assigned sites — can be queried). Pick an employee from the EMPLOYEE DIRECTORY of the snapshot.`;
   }
 
   // field-name validation (cheap, before fetching when possible)
@@ -944,18 +1024,21 @@ export async function runAiQuery(spec: AiQuerySpec): Promise<string> {
 
   let fetched: FetchResult;
   try {
-    fetched = await def.fetch(spec);
+    fetched = await def.fetch(spec, scope);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'the fetch failed';
     return `DATABASE QUERY ERROR — table "${spec.table}" could not be read (${msg}). Check the parameters and retry.`;
   }
 
-  const allRows = fetched.rows;
+  // rows outside the viewer's branch scope are dropped BEFORE any filter /
+  // aggregate runs (unrestricted viewers and pass-through tables: no-op)
+  const allRows = scopedDown ? scopeRowsForTable(spec.table, fetched.rows, scope) : fetched.rows;
   const filters = spec.where ?? [];
   const rows = filters.length ? allRows.filter((r) => filters.every((f) => applyFilter(r, f))) : [...allRows];
 
   const headerBits = [`table ${spec.table}`];
   if (fetched.header) headerBits.push(fetched.header);
+  if (scopedDown) headerBits.push("scoped to the viewer's branch access");
   if (filters.length) {
     headerBits.push(`filters: ${filters.map((f) => `${f.field} ${f.op}${f.value !== undefined ? ` ${String(f.value)}` : ''}`).join(' AND ')}`);
   }
@@ -992,11 +1075,19 @@ export async function runAiQuery(spec: AiQuerySpec): Promise<string> {
 // Prompt documentation — the table dictionary for the system prompt
 // ---------------------------------------------------------------------------
 
-/** Compact dictionary of every queryable table + the query syntax. */
-export function queryableTablesDoc(): string {
-  const tableLines = Object.entries(TABLES).map(([name, def]) => `- ${name} — ${def.doc}`);
+/** Compact dictionary of every queryable table + the query syntax. A
+ *  branch-scoped viewer's dictionary drops the org-wide tables and states
+ *  upfront that every result is limited to their access. */
+export function queryableTablesDoc(scope?: AiScope): string {
+  const scopedDown = scope !== undefined && !scope.unrestricted;
+  const tableLines = Object.entries(TABLES)
+    .filter(([name, def]) => !(scopedDown && def.superOnly))
+    .map(([name, def]) => `- ${name} — ${def.doc}`);
   return [
-    'Pebby can run structured queries against EVERY table of the database. When the snapshot above omits what you need (exact timestamps, other months, filtered / sorted / aggregated / cross-table views), reply with EXACTLY one directive line and nothing else:',
+    ...(scopedDown
+      ? ['QUERY RESULTS ARE LIMITED TO THE VIEWER\'S BRANCH ACCESS — records of other branches / outside your access do not exist and can never be returned. The org-wide tables (admins, whole-organization attendance summary) are not queryable for you.', '']
+      : []),
+    'Pebby can run structured queries against every table the viewer can see. When the snapshot above omits what you need (exact timestamps, other months, filtered / sorted / aggregated / cross-table views), reply with EXACTLY one directive line and nothing else:',
     '[[QUERY]] {"table":"cancellation_requests","where":[{"field":"employee_code","op":"eq","value":"ASM-2026-016"}]}',
     'The system executes it and asks you again with the matching rows — then answer the user. You may chain up to 3 query rounds per question (e.g. resolve an employee code, then pull their records from another table). If the result is a QUERY ERROR it lists the valid fields — simply re-run the corrected query.',
     '',

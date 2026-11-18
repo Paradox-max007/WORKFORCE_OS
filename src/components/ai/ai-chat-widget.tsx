@@ -10,7 +10,10 @@
 //
 // The chat:
 //   • EVERY question rebuilds the knowledge base from the live database
-//     (see src/lib/ai/knowledge.ts) — a real database search per message
+//     (see src/lib/ai/knowledge.ts) — a real database search per message —
+//     LIMITED to the viewer's access scope (src/lib/ai/scope.ts): a branch
+//     admin's Pebby sees only their granted branches + directly assigned
+//     sites; super admins / All-Branches admins see everything
 //   • when Pebby needs deeper records it replies with a [[LOOKUP]]
 //     directive; the widget fetches the rows (full employee documents,
 //     other attendance / salary months) and re-asks
@@ -48,6 +51,7 @@ import {
   formatAttendanceMonth, formatEmployeeDeepDive, formatSalarySheetPeriod,
   formatSiteDocuments,
 } from '@/lib/ai/knowledge';
+import { describeScope, resolveAiScope, type AiScope } from '@/lib/ai/scope';
 import { extractSiteDocText, formatSiteDocContent } from '@/lib/files/doc-content';
 import { listSiteDocs, monthsSince, type SiteDocKind } from '@/lib/files/site-docs';
 import {
@@ -336,6 +340,7 @@ function MessageMarkdown({ text }: { text: string }) {
 
 export function AiChatWidget() {
   const user = useAuthStore((s) => s.user);
+  const menuPermissions = useAuthStore((s) => s.menuPermissions);
   const settings = useSettingsStore((s) => s.settings);
   const settingsLoaded = useSettingsStore((s) => s.loaded);
   const navigateTo = useAppStore((s) => s.navigateTo);
@@ -353,6 +358,8 @@ export function AiChatWidget() {
   /** seconds the current question has been running — slow providers can now
    *  legally take up to ~90s per round, and a silent spinner feels broken */
   const [elapsedSec, setElapsedSec] = useState(0);
+  /** one-line access description for the welcome card ("branches: Northern…") */
+  const [accessLine, setAccessLine] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -384,6 +391,17 @@ export function AiChatWidget() {
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
 
+  // the welcome card shows this viewer's own access ("branches: Northern…")
+  // — resolved once when the panel is first opened, refreshed on grants change
+  useEffect(() => {
+    if (!hasOpened || !user) return;
+    let cancelled = false;
+    resolveAiScope(user, menuPermissions)
+      .then((scope) => { if (!cancelled) setAccessLine(describeScope(scope)); })
+      .catch(() => { if (!cancelled) setAccessLine(null); });
+    return () => { cancelled = true; };
+  }, [hasOpened, user, menuPermissions]);
+
   // hidden unless a user is signed in AND the org enabled the assistant
   if (!user || !settingsLoaded || !settings.ai_enabled) return null;
 
@@ -409,25 +427,27 @@ export function AiChatWidget() {
     el.style.height = `${Math.min(el.scrollHeight, 112)}px`;
   };
 
-  /** Fetch the data a [[LOOKUP]] directive asks for, formatted for the model. */
-  const runLookup = async (dir: LookupDirective): Promise<string> => {
+  /** Fetch the data a [[LOOKUP]] directive asks for, formatted for the model —
+   *  every path is limited to the viewer's access scope, so a branch admin's
+   *  lookup can never pull another branch's records. */
+  const runLookup = async (dir: LookupDirective, scope: AiScope): Promise<string> => {
     if (dir.kind === 'employees') {
-      const [active, cancelled] = await Promise.all([
-        dataApi.listEmployees(),
-        dataApi.listCancelledEmployees(),
-      ]);
       const wanted = new Set(dir.codes ?? []);
-      const matched = [...active, ...cancelled].filter((e) => wanted.has(e.employee_code.toUpperCase()));
+      const matched = [...scope.employees, ...scope.cancelledEmployees]
+        .filter((e) => wanted.has(e.employee_code.toUpperCase()));
+      if (matched.length === 0) {
+        return `DATABASE LOOKUP RESULT — no employee matched those codes within your access (${describeScope(scope)}). If the code belongs to another branch, it is outside this viewer's scope; say so instead of guessing.`;
+      }
       return `DATABASE LOOKUP RESULT — full records of ${matched.length} employee(s):\n${formatEmployeeDeepDive(matched)}`;
     }
     if (dir.kind === 'site-docs') {
       // a site's FULL uploaded-document history (every month since it started)
-      const sites = await dataApi.listSites();
+      // — only sites inside the viewer's scope are searched
       const needle = (dir.siteName ?? '').trim().toLowerCase();
-      const site = sites.find((s) => s.name.toLowerCase() === needle)
-        ?? sites.find((s) => s.name.toLowerCase().includes(needle));
+      const site = scope.sites.find((s) => s.name.toLowerCase() === needle)
+        ?? scope.sites.find((s) => s.name.toLowerCase().includes(needle));
       if (!site) {
-        return `DATABASE LOOKUP ERROR — no site named "${dir.siteName}" exists. The snapshot's SITES section lists every site; pick the exact name and re-run the [[LOOKUP]].`;
+        return `DATABASE LOOKUP ERROR — no site named "${dir.siteName}" exists within your access (${describeScope(scope)}). The snapshot's SITES section lists every site you can see; pick the exact name and re-run the [[LOOKUP]].`;
       }
       const months = monthsSince(site.created_at);
       const docs = await listSiteDocs(site.id, months).catch(() => []);
@@ -435,12 +455,12 @@ export function AiChatWidget() {
     }
     if (dir.kind === 'doc-content') {
       // read the CONTENT of one uploaded file (timesheet XLSX/CSV or a PDF)
-      const sites = await dataApi.listSites();
+      // — the site must be inside the viewer's scope
       const needle = (dir.siteName ?? '').trim().toLowerCase();
-      const site = sites.find((s) => s.name.toLowerCase() === needle)
-        ?? sites.find((s) => s.name.toLowerCase().includes(needle));
+      const site = scope.sites.find((s) => s.name.toLowerCase() === needle)
+        ?? scope.sites.find((s) => s.name.toLowerCase().includes(needle));
       if (!site) {
-        return `DATABASE LOOKUP ERROR — no site named "${dir.siteName}" exists. The snapshot's SITES section lists every site; pick the exact name and re-run the [[LOOKUP]].`;
+        return `DATABASE LOOKUP ERROR — no site named "${dir.siteName}" exists within your access (${describeScope(scope)}). The snapshot's SITES section lists every site you can see; pick the exact name and re-run the [[LOOKUP]].`;
       }
       const months = monthsSince(site.created_at);
       const docs = await listSiteDocs(site.id, months).catch(() => []);
@@ -460,23 +480,28 @@ export function AiChatWidget() {
     }
     const month = dir.month ?? '';
     if (dir.kind === 'attendance') {
-      const [records, active, cancelled] = await Promise.all([
-        dataApi.getMonthAttendance(month),
-        dataApi.listEmployees(),
-        dataApi.listCancelledEmployees(),
-      ]);
-      return `DATABASE LOOKUP RESULT:\n${formatAttendanceMonth(month, records, [...active, ...cancelled])}`;
+      // attendance of the viewer's employees only (the scope's roster is
+      // fresh — resolved moments ago for this very question)
+      const records = await dataApi.getMonthAttendance(month);
+      const scopedRecords = scope.unrestricted
+        ? records
+        : records.filter((r) => scope.employeeByIdInScope(r.employee_id));
+      return `DATABASE LOOKUP RESULT:\n${formatAttendanceMonth(month, scopedRecords, [...scope.employees, ...scope.cancelledEmployees])}`;
     }
-    // salary=YYYY-MM
+    // salary=YYYY-MM — narrowed inside the scope (totals recomputed)
     const year = Number(month.slice(0, 4));
     const mon = Number(month.slice(5, 7));
     const report = await dataApi.getSalarySheet(year, mon);
-    return `DATABASE LOOKUP RESULT:\n${formatSalarySheetPeriod(year, mon, report)}`;
+    return `DATABASE LOOKUP RESULT:\n${formatSalarySheetPeriod(year, mon, scope.scopeSalaryReport(report))}`;
   };
 
-  /** Execute a [[QUERY]] directive (or feed its parse error back). */
-  const runQueryRound = async (parsed: { spec: AiQuerySpec } | { error: string }): Promise<string> => {
-    if ('spec' in parsed) return runAiQuery(parsed.spec);
+  /** Execute a [[QUERY]] directive (or feed its parse error back) — the
+   *  engine drops every row outside the viewer's branch access. */
+  const runQueryRound = async (
+    parsed: { spec: AiQuerySpec } | { error: string },
+    scope: AiScope,
+  ): Promise<string> => {
+    if ('spec' in parsed) return runAiQuery(parsed.spec, scope);
     return `DATABASE QUERY ERROR — ${parsed.error}`;
   };
 
@@ -493,14 +518,19 @@ export function AiChatWidget() {
     setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
 
-    // fresh database read BEFORE every question — the snapshot is always current
+    // fresh database read BEFORE every question — the snapshot is always
+    // current AND limited to this viewer's access (a branch admin's Pebby
+    // only ever sees their granted branches + directly assigned sites)
     setPreparing(true);
     setSending(true);
+    let scope: AiScope | null = null;
     try {
       let system: string;
       try {
-        const kb = await buildAiKnowledgeBase();
-        system = buildAiSystemPrompt(kb, settings);
+        scope = await resolveAiScope(user, menuPermissions);
+        const kb = await buildAiKnowledgeBase(scope);
+        system = buildAiSystemPrompt(kb, settings, scope);
+        setAccessLine(describeScope(scope));
       } finally {
         setPreparing(false);
       }
@@ -552,12 +582,14 @@ export function AiChatWidget() {
         if (!needsRound) break;
 
         // fetch the requested data (query result / lookup rows / parse
-        // error) and ask again with it appended
+        // error) and ask again with it appended — every round is scoped to
+        // the viewer's access, so directives can never pull other branches'
+        // records
         setDigging(true);
         try {
           const context = queryParsed !== null
-            ? await runQueryRound(queryParsed)
-            : await runLookup(lookup as LookupDirective);
+            ? await runQueryRound(queryParsed, scope as AiScope)
+            : await runLookup(lookup as LookupDirective, scope as AiScope);
           const guidance = queryParsed !== null
             ? "system-provided query result — now answer the user's question with this data; if it is a QUERY ERROR, re-run a corrected [[QUERY]]; do not print any directive in the final answer"
             : "system-provided lookup result — now answer the user's question with this data; do not print any directive";
@@ -640,12 +672,19 @@ export function AiChatWidget() {
                   <div>
                     <p className="text-sm font-semibold">Hi, I&apos;m {BOT_NAME} — Smart Assistant</p>
                     <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      I search the whole {settings.project_name} database on every question — employees,
-                      attendance, payroll, advances, cancellations, admin permissions, site documents
+                      I search the {settings.project_name} database on every question — employees,
+                      attendance, payroll, advances, cancellations, site documents
                       (timesheets &amp; time cards) and more — I can even read INSIDE the uploaded
-                      timesheets and PDFs, and I can run complex queries on any table. Multi-record
+                      timesheets and PDFs, and I can run complex queries. Multi-record
                       answers render as scrollable tables. For anything else, I research the web.
                     </p>
+                    {/* this viewer's own access — Pebby answers inside it */}
+                    {accessLine && (
+                      <p className="mt-2 inline-flex max-w-full items-center gap-1 rounded-full border border-border/70 bg-background/60 px-2.5 py-1 text-[10.5px] leading-tight text-muted-foreground">
+                        <span aria-hidden>🔒</span>
+                        <span className="truncate">Your access: {accessLine}</span>
+                      </p>
+                    )}
                   </div>
                   <div className="mt-1 flex w-full flex-col gap-1.5">
                     {SUGGESTIONS.map((s) => (

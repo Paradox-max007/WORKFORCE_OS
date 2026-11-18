@@ -36,6 +36,7 @@ import { dataApi, isDemoMode } from '@/lib/data';
 import { db as demoDb } from '@/lib/data/demo-store';
 import { aiProxyHeaders } from '@/lib/ai/client';
 import { BOT_TITLE, buildAiKnowledgeBase } from '@/lib/ai/knowledge';
+import { resolveAiScope } from '@/lib/ai/scope';
 import type { AccentColor, SiteSettings, ThemeMode } from '@/lib/types';
 import { fmtTimeAgo } from '@/lib/format';
 import { useAuthStore } from '@/store/auth-store';
@@ -169,12 +170,15 @@ export function SiteSettingsPage() {
     let cancelled = false;
     (async () => {
       try {
-        const kb = await buildAiKnowledgeBase();
+        // this page is super-admin-only → the scope resolves unrestricted
+        // (the preview shows everything Pebby can be given by the settings)
+        const aiScope = await resolveAiScope(user, null);
+        const kb = await buildAiKnowledgeBase(aiScope);
         if (!cancelled) setScope(kb.counts);
       } catch { /* scope preview is optional */ }
     })();
     return () => { cancelled = true; };
-  }, [dataVersion]);
+  }, [dataVersion, user]);
 
   const meta = useMemo(() => {
     if (!settings.updated_at) return null;

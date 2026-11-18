@@ -11,6 +11,10 @@ import {
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 import { dataApi } from '@/lib/data';
@@ -48,7 +52,7 @@ function useUnreadCount(user: Profile | null): number {
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };
-     
+
   }, [user?.id, version]);
   return count;
 }
@@ -112,10 +116,13 @@ function NavGroup({ group, items, collapsed, onNav, currentView, unread }: {
 }) {
   const containsActive = items.some((x) => x.id === currentView);
   const [open, setOpen] = useState(containsActive);
-
-  useEffect(() => {
+  // auto-expand when one of the children becomes active (the documented
+  // "adjust state during render" pattern — no effect needed)
+  const [prevActive, setPrevActive] = useState(containsActive);
+  if (containsActive !== prevActive) {
+    setPrevActive(containsActive);
     if (containsActive) setOpen(true);
-  }, [containsActive]);
+  }
 
   // rail (collapsed) mode: no room for a dropdown — children stay reachable
   if (collapsed) {
@@ -172,15 +179,16 @@ function SidebarContent({
 }) {
   const { currentView, navigateTo, navigateToEmployees } = useAppStore();
   const signOut = useAuthStore((s) => s.signOut);
+  const setTheme = useAuthStore((s) => s.setTheme);
+  const setAccent = useAuthStore((s) => s.setAccent);
   const perms = useAuthStore((s) => s.menuPermissions);
   const settings = useSettingsStore((s) => s.settings);
-  const updateSettings = useSettingsStore((s) => s.update);
   const loadSettings = useSettingsStore((s) => s.load);
   const settingsVersion = useRealtimeVersion(['site_settings']);
   const unread = useUnreadCount(user);
   const [latestNotification, setLatestNotification] = useState<string | null>(null);
   const version = useRealtimeVersion(['notification']);
-  const isSuperAdmin = user.role === 'super_admin';
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
 
   // branding / theme changes made anywhere (this browser or another admin's)
   // refresh the sidebar live
@@ -201,7 +209,7 @@ function SidebarContent({
       } catch { /* silent */ }
     })();
     return () => { cancelled = true; };
-     
+
   }, [user?.id, version]);
 
   const allowed = (id: AppView): boolean => {
@@ -224,15 +232,14 @@ function SidebarContent({
     toast.success('Signed out');
   };
 
-  // The look is org-wide (Site Settings, super admin only) — the footer
-  // shortcuts write the SAME settings for the boss and are hidden for
-  // normal admins.
+  // Appearance is PERSONAL (each admin's own profile row): the footer
+  // shortcuts write the viewer's own theme/accent — available to every admin.
   const applyTheme = () => {
-    updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
+    setTheme(user.theme === 'dark' ? 'light' : 'dark')
       .catch((e: Error) => toast.error(e.message || 'Could not change the theme'));
   };
   const applyAccent = (accent: AccentColor) => {
-    updateSettings({ accent }).catch((e: Error) => toast.error(e.message || 'Could not change the accent'));
+    setAccent(accent).catch((e: Error) => toast.error(e.message || 'Could not change the accent'));
   };
 
   // project display name — first word plain, the rest with the gradient
@@ -320,96 +327,93 @@ function SidebarContent({
               </p>
             </div>
           )}
-          {!collapsed && isSuperAdmin && (
+          {/* every admin gets their personal theme toggle + sign out */}
+          {!collapsed && (
             <div className="flex items-center gap-1">
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-8 text-muted-foreground hover:text-foreground"
-                title={settings.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                title={user.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
                 onClick={applyTheme}
               >
-                {settings.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+                {user.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
               </Button>
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-8 text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10"
+                className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
                 title="Sign out"
-                onClick={handleSignOut}
+                onClick={() => setConfirmSignOut(true)}
               >
                 <LogOut size={15} />
               </Button>
             </div>
           )}
-          {!collapsed && !isSuperAdmin && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
-              title="Sign out"
-              onClick={handleSignOut}
-            >
-              <LogOut size={15} />
-            </Button>
-          )}
         </div>
 
-        {/* Accent picker — org-wide, super admin only (Site Settings) */}
-        {isSuperAdmin && (
-          <div className={cn('mt-3 flex items-center gap-1.5', collapsed ? 'flex-col' : 'justify-center')}>
-            {ACCENTS.map((a) => (
-              <button
-                key={a.id}
-                onClick={() => applyAccent(a.id)}
-                title={`${a.id} accent`}
-                className={cn(
-                  'size-3.5 rounded-full border-2 transition-all hover:scale-125',
-                  a.cls,
-                  settings.accent === a.id ? 'border-foreground/80 scale-110' : 'border-transparent opacity-60',
-                )}
-              />
-            ))}
-          </div>
-        )}
+        {/* Accent picker — personal, every admin (stored on their profile) */}
+        <div className={cn('mt-3 flex items-center gap-1.5', collapsed ? 'flex-col' : 'justify-center')}>
+          {ACCENTS.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => applyAccent(a.id)}
+              title={`${a.id} accent`}
+              className={cn(
+                'size-3.5 rounded-full border-2 transition-all hover:scale-125',
+                a.cls,
+                user.accent === a.id ? 'border-foreground/80 scale-110' : 'border-transparent opacity-60',
+              )}
+            />
+          ))}
+        </div>
 
-        {collapsed && isSuperAdmin && (
+        {collapsed && (
           <div className="mt-3 flex flex-col items-center gap-1">
             <Button
               variant="ghost"
               size="icon"
               className="size-8 text-muted-foreground hover:text-foreground"
-              title={settings.theme === 'dark' ? 'Light theme' : 'Dark theme'}
+              title={user.theme === 'dark' ? 'Light theme' : 'Dark theme'}
               onClick={applyTheme}
             >
-              {settings.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+              {user.theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
             </Button>
             <Button
               variant="ghost"
               size="icon"
               className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
               title="Sign out"
-              onClick={handleSignOut}
-            >
-              <LogOut size={15} />
-            </Button>
-          </div>
-        )}
-
-        {collapsed && !isSuperAdmin && (
-          <div className="mt-3 flex flex-col items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500"
-              title="Sign out"
-              onClick={handleSignOut}
+              onClick={() => setConfirmSignOut(true)}
             >
               <LogOut size={15} />
             </Button>
           </div>
         )}
       </div>
+
+      {/* signing out needs a confirmation — an accidental click must never
+          throw the admin out mid-work; nothing is lost until confirmed */}
+      <AlertDialog open={confirmSignOut} onOpenChange={setConfirmSignOut}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sign out of PULSE?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You are signed in as {user.name} ({user.email}). Any unsaved changes will be lost —
+              everything already saved stays exactly as it is.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay signed in</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 text-white hover:bg-rose-700"
+              onClick={() => { void handleSignOut(); }}
+            >
+              <LogOut size={15} className="mr-1.5" /> Sign out
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

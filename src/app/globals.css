@@ -291,6 +291,37 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 /* recharts cursor styling */
 .recharts-tooltip-cursor { fill: color-mix(in srgb, var(--foreground) 6%, transparent); }
 
+/* Pebby — the living pebble (idle bob + blink; no motion for users who
+   asked the OS to reduce it) */
+@media (prefers-reduced-motion: no-preference) {
+  .pebby-bob {
+    animation: pebby-bob 3.4s ease-in-out infinite;
+    transform-box: fill-box;
+    transform-origin: 50% 90%;
+  }
+  .pebby-eyes {
+    animation: pebby-blink 4.8s infinite;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .pebby-launcher:hover .pebby-bob {
+    animation: pebby-wiggle 0.7s ease-in-out;
+  }
+}
+@keyframes pebby-bob {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50%      { transform: translateY(-4%) rotate(-2.5deg); }
+}
+@keyframes pebby-blink {
+  0%, 91%, 96.5%, 100% { transform: scaleY(1); }
+  94%                   { transform: scaleY(0.08); }
+}
+@keyframes pebby-wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25%      { transform: rotate(-7deg); }
+  75%      { transform: rotate(7deg); }
+}
+
 /* attendance sheet print styles */
 @media print {
   body * { visibility: hidden; }

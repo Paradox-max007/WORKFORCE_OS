@@ -5,11 +5,15 @@
 // ============================================================================
 
 import { AnimatePresence, motion } from 'framer-motion';
-import { Bell, LogOut, Menu, Radio } from 'lucide-react';
+import { Bell, KeyRound, LogOut, Menu, Palette, Radio } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { MobileSidebarTrigger } from '@/components/layout/app-sidebar';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -29,6 +33,7 @@ export function AppHeader() {
   const navigateTo = useAppStore((s) => s.navigateTo);
   const status = useRealtimeStatus();
   const [unread, setUnread] = useState(0);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
   const version = useRealtimeVersion(['notification']);
   const prevUnread = useRef(0);
 
@@ -55,6 +60,11 @@ export function AppHeader() {
   if (!user) return null;
 
   const title = VIEW_TITLES[currentView];
+
+  const handleSignOut = async () => {
+    await signOut();
+    toast.success('Signed out');
+  };
 
   return (
     <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-border/60 bg-background/80 px-4 backdrop-blur-xl md:px-6">
@@ -117,14 +127,41 @@ export function AppHeader() {
           )}
         </Button>
 
-        {/* User menu */}
-        <UserMenu user={user} onSignOut={async () => { await signOut(); toast.success('Signed out'); }} />
+        {/* User menu — personal settings + confirmed sign out */}
+        <UserMenu user={user} onOpenSettings={() => navigateTo('my_settings')} onSignOut={() => setConfirmSignOut(true)} />
       </div>
+
+      {/* sign-out confirmation — an accidental click must never sign the
+          admin out mid-work */}
+      <AlertDialog open={confirmSignOut} onOpenChange={setConfirmSignOut}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sign out of PULSE?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You are signed in as {user.name} ({user.email}). Any unsaved changes will be lost —
+              everything already saved stays exactly as it is.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay signed in</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 text-white hover:bg-rose-700"
+              onClick={() => { void handleSignOut(); }}
+            >
+              <LogOut size={15} className="mr-1.5" /> Sign out
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </header>
   );
 }
 
-function UserMenu({ user, onSignOut }: { user: Profile; onSignOut: () => void }) {
+function UserMenu({ user, onOpenSettings, onSignOut }: {
+  user: Profile;
+  onOpenSettings: () => void;
+  onSignOut: () => void;
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -157,7 +194,14 @@ function UserMenu({ user, onSignOut }: { user: Profile; onSignOut: () => void })
           </span>
         </div>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={onSignOut} className="text-rose-500 focus:text-rose-500">
+        <DropdownMenuItem onClick={onOpenSettings} className="cursor-pointer">
+          <Palette size={15} className="mr-2" /> My appearance
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={onOpenSettings} className="cursor-pointer">
+          <KeyRound size={15} className="mr-2" /> Change password
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={onSignOut} className="cursor-pointer text-rose-500 focus:text-rose-500">
           <LogOut size={15} className="mr-2" /> Sign out
         </DropdownMenuItem>
       </DropdownMenuContent>

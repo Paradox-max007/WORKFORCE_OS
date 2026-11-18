@@ -30,6 +30,7 @@ export type AppView =
   | 'notifications'
   | 'admins'
   | 'site_settings'
+  | 'my_settings'
   | 'site_timesheets';
 
 export const VIEW_TITLES: Record<AppView, string> = {
@@ -55,6 +56,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   notifications: 'Notifications Hub',
   admins: 'Admin Management',
   site_settings: 'Site Settings',
+  my_settings: 'My Settings',
   site_timesheets: 'Site Timesheets / Time Cards',
 };
 

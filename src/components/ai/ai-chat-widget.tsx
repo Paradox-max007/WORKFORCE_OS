@@ -826,7 +826,7 @@ export function AiChatWidget() {
         whileTap={{ scale: 0.94 }}
         aria-label={open ? `Collapse ${BOT_NAME}` : `Open ${BOT_NAME} — Smart Assistant`}
         className={cn(
-          'fixed bottom-5 right-5 z-50 flex size-14 items-center justify-center rounded-full brand-gradient text-brand-foreground shadow-xl shadow-black/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+          'pebby-launcher fixed bottom-5 right-5 z-50 flex size-14 items-center justify-center rounded-full brand-gradient text-brand-foreground shadow-xl shadow-black/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
           // phones: the chat is a full-screen sheet — the launcher would sit on
           // top of the composer, so it steps aside while the sheet is open
           open && 'max-sm:hidden',

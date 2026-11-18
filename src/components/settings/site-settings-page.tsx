@@ -447,14 +447,16 @@ export function SiteSettingsPage() {
             </CardContent>
           </Card>
 
-          {/* ---- Appearance ---- */}
+          {/* ---- Appearance (org defaults) ---- */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
-                <Palette size={16} className="text-brand" /> Appearance
+                <Palette size={16} className="text-brand" /> Default Appearance
               </CardTitle>
               <CardDescription>
-                The theme and accent apply to EVERY signed-in admin — the whole organization shares one look.
+                The organisation&apos;s default look — applied to the sign-in screen and the starting
+                theme for new admins. Once signed in, every admin personalises their own theme &amp;
+                accent from My Settings (it follows their account, not these defaults).
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-5">

@@ -30,6 +30,7 @@ import { PayrollExportPreviewPage } from '@/components/payroll/payroll-export-pr
 import { PayrollPage } from '@/components/payroll/payroll-page';
 import { SalarySheetPage } from '@/components/salary-sheet/salary-sheet-page';
 import { SiteSettingsPage } from '@/components/settings/site-settings-page';
+import { MySettingsPage } from '@/components/settings/my-settings-page';
 import { SitesPage } from '@/components/sites/sites-page';
 import { SiteTimesheetsPage } from '@/components/sites/site-timesheets-page';
 import { TradePage } from '@/components/trades/trade-page';
@@ -97,6 +98,7 @@ function MainLayout() {
     notifications: <NotificationPage />,
     admins: <AdminPage />,
     site_settings: <SiteSettingsPage />,
+    my_settings: <MySettingsPage />,
     site_timesheets: <SiteTimesheetsPage />,
   };
 
@@ -161,13 +163,14 @@ export default function Home() {
     loadSettings(true);
   }, [loadSettings, settingsVersion]);
 
-  // Sync theme + accent to <html>. Once the org settings arrive they WIN over
-  // the personal profile preference (the look is controlled by the super admin
-  // from Site Settings); the profile preference is the pre-load fallback.
+  // Sync theme + accent to <html>. Appearance is PERSONAL: a signed-in
+  // admin's profile choice always wins (My Settings page + sidebar quick
+  // controls write it there). The org-wide look from Site Settings only
+  // shapes the sign-in screen before anyone is signed in.
   useEffect(() => {
     const root = document.documentElement;
-    const theme = settingsLoaded ? settings.theme : (user?.theme ?? 'dark');
-    const accent = settingsLoaded ? settings.accent : (user?.accent ?? 'violet');
+    const theme = user?.theme ?? (settingsLoaded ? settings.theme : 'dark');
+    const accent = user?.accent ?? (settingsLoaded ? settings.accent : 'violet');
     root.classList.toggle('dark', theme === 'dark');
     root.dataset.accent = accent;
   }, [settings.theme, settings.accent, settingsLoaded, user?.theme, user?.accent]);

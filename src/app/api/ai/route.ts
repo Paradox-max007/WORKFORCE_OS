@@ -13,6 +13,9 @@
 //          stored connection, while the stored-key fallback for 'test' stays
 //          super-admin only); in DEMO mode the caller supplies the
 //          connection from its local demo store.
+//          Messages may carry multimodal content parts (text + image_url
+//          data URLs) — used by the Add Employee document auto-fill to read
+//          scanned passports/visas/contracts with a vision-capable model.
 //
 //          WEB RESEARCH: when the model decides a question is outside the
 //          workforce database it replies with a [[WEB: query]] directive;
@@ -35,9 +38,15 @@ import { createClient } from '@supabase/supabase-js';
 /** Vercel function limit for this route — must exceed REQUEST_BUDGET_MS. */
 export const maxDuration = 120;
 
+/** OpenAI-compatible chat message. content is either plain text or an array
+ *  of multimodal parts (text + image_url with a data: URL) for vision. */
+type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  content: string | ContentPart[];
 }
 
 interface AiRequestBody {
@@ -54,6 +63,9 @@ const MAX_MESSAGES = 40;
 /** the system prompt carries the whole compact database snapshot, so the
  *  per-message ceiling is generous (≈ 150k chars ≈ 40k tokens) */
 const MAX_CONTENT_CHARS = 150_000;
+/** one embedded image (base64 data URL) — generous for a passport scan, small
+ *  enough to keep the provider request sane */
+const MAX_IMAGE_DATA_URL_CHARS = 7_000_000;
 const MAX_TOKENS_CAP = 4096;
 
 /** Per provider call. Slow OpenAI-compatible endpoints routinely need more
@@ -390,10 +402,26 @@ export async function POST(request: Request): Promise<Response> {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     if (messages.length === 0) return bad('messages[] is required for chat');
     if (messages.length > MAX_MESSAGES) return bad(`Too many messages (max ${MAX_MESSAGES})`);
+    const validContent = (content: unknown): boolean => {
+      if (typeof content === 'string') return content.length <= MAX_CONTENT_CHARS;
+      if (!Array.isArray(content)) return false;
+      return content.every((part) => {
+        if (!part || typeof part !== 'object') return false;
+        const p = part as { type?: unknown; text?: unknown; image_url?: { url?: unknown } };
+        if (p.type === 'text') return typeof p.text === 'string' && p.text.length <= MAX_CONTENT_CHARS;
+        if (p.type === 'image_url') {
+          const url = p.image_url?.url;
+          // data: image URLs only — arbitrary http(s) fetches are not allowed
+          return typeof url === 'string'
+            && /^data:image\/(?:png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(url)
+            && url.length <= MAX_IMAGE_DATA_URL_CHARS;
+        }
+        return false;
+      });
+    };
     for (const m of messages) {
-      if (!m || typeof m.content !== 'string') return bad('Every message needs string content');
+      if (!m || !validContent(m.content)) return bad('Every message needs string content (or text + image_url parts with data: URLs)');
       if (!['system', 'user', 'assistant'].includes(m.role)) return bad('Invalid message role');
-      if (m.content.length > MAX_CONTENT_CHARS) return bad('A message exceeds the size limit');
     }
     const maxTokens = Math.min(Math.max(1, Math.round(body.maxTokens ?? 1024)), MAX_TOKENS_CAP);
     const temperature = Math.min(Math.max(0, body.temperature ?? 0.3), 2);

@@ -313,6 +313,17 @@ export const prodApi = {
     return data as unknown as Profile;
   },
 
+  /** Self-service password change (My Settings page): verifies the CURRENT
+   *  password by re-authenticating with it, then updates the session user. */
+  async changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+    const { data: { user: u } } = await sb().auth.getUser();
+    if (!u?.email) throw new Error('No signed-in session found.');
+    const { error: authError } = await sb().auth.signInWithPassword({ email: u.email, password: currentPassword });
+    if (authError) throw new Error('The current password is incorrect.');
+    const { error } = await sb().auth.updateUser({ password: newPassword });
+    if (error) throw new Error(error.message);
+  },
+
   async getMenuPermissions(profileId: string): Promise<MenuPermissionMap> {
     const { data, error } = await sb().from('menu_permission')
       .select('menu_key, allowed').eq('profile_id', profileId);

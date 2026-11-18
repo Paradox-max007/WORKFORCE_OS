@@ -580,6 +580,16 @@ export const demoApi = {
     return stripPassword(row);
   },
 
+  /** Self-service password change (My Settings page). */
+  async changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+    const p = currentProfile();
+    if (!p) throw new Error('Not signed in');
+    const row = db.profiles.find((x) => x.id === p.id)!;
+    if (row.password !== currentPassword) throw new Error('The current password is incorrect.');
+    row.password = newPassword;
+    saveAndEmit(['profiles']);
+  },
+
   async getMenuPermissions(profileId: string): Promise<MenuPermissionMap> {
     // config defaults first (lib/menus.ts) — new sidebar menus automatically
     // visible per their defaultOn flag until a super admin toggles them

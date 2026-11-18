@@ -12,8 +12,9 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
-  ChevronRight, Clock3, CreditCard, Crown, FileDown, FileText, Loader2, MessageCircle,
-  Pencil, Plus, RotateCcw, Tent, TriangleAlert, UserRound, X,
+  ChevronRight, Clock3, CreditCard, Crown, Eye, FileDown, FileSignature, FileText,
+  Loader2, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
+  TriangleAlert, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -33,7 +34,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { EmployeeDocViewer } from '@/components/employees/employee-doc-viewer';
 import { dataApi } from '@/lib/data';
+import {
+  EMPLOYEE_DOC_KINDS, downloadEmployeeDoc, employeeDocUrl, listEmployeeDocs,
+  type EmployeeDoc, type EmployeeDocKind,
+} from '@/lib/files/employee-docs';
 import { fmtDate, fmtDateTime, fmtSar, fmtTimeAgo, initials } from '@/lib/format';
 import { downloadEmployeeCv } from '@/lib/pdf';
 import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
@@ -213,6 +219,101 @@ function InfoCard({ index, icon, title, sub, children }: {
       <SectionTitle icon={icon} title={title} sub={sub} />
       <div className="mt-4 grid gap-x-4 gap-y-4 sm:grid-cols-2">{children}</div>
     </motion.section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Attached documents — the encrypted passport / visa / contract files uploaded
+// on the Add/Edit form. Preview opens the decrypted file in the in-app viewer;
+// Print decrypts and sends it straight to the printer.
+// ---------------------------------------------------------------------------
+const ATTACHED_DOC_META: Record<EmployeeDocKind, { icon: LucideIcon; cls: string }> = {
+  passport: { icon: Plane, cls: 'bg-sky-500/10 text-sky-500' },
+  visa: { icon: Stamp, cls: 'bg-amber-500/10 text-amber-500' },
+  contract: { icon: FileSignature, cls: 'bg-emerald-500/10 text-emerald-500' },
+};
+
+function fmtDocSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index }: {
+  docs: EmployeeDoc[] | null;
+  busyKind: string | null;
+  onOpen: (doc: EmployeeDoc) => void;
+  onPrint: (doc: EmployeeDoc) => void;
+  index: number;
+}) {
+  return (
+    <InfoCard
+      index={index}
+      icon={<FileText size={16} />}
+      title="Attached Documents"
+      sub="Passport / visa / contract — stored encrypted (AES-256)"
+    >
+      <div className="space-y-2.5 sm:col-span-2">
+        {docs === null ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" /> Loading documents…
+          </p>
+        ) : (
+          EMPLOYEE_DOC_KINDS.map(({ kind, label }) => {
+            const doc = docs.find((d) => d.kind === kind);
+            const meta = ATTACHED_DOC_META[kind];
+            const Icon = meta.icon;
+            const busy = busyKind === kind;
+            return (
+              <div
+                key={kind}
+                className={cn(
+                  'flex flex-wrap items-center gap-2.5 rounded-xl border p-3',
+                  doc ? 'border-border bg-background/40' : 'border-dashed border-border/70 bg-transparent',
+                )}
+              >
+                <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-lg', meta.cls)}>
+                  {busy ? <Loader2 size={16} className="animate-spin" /> : <Icon size={16} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold">{label}</p>
+                  <p className="truncate text-[11px] text-muted-foreground">
+                    {doc
+                      ? `${doc.name} · ${fmtDocSize(doc.size)}${doc.updatedAt ? ` · uploaded ${doc.updatedAt.slice(0, 10)}` : ''} · encrypted`
+                      : 'Not uploaded'}
+                  </p>
+                </div>
+                {doc && (
+                  <div className="flex shrink-0 gap-1.5">
+                    <Button
+                      variant="outline" size="sm" className="h-8 gap-1.5"
+                      onClick={() => onOpen(doc)}
+                      disabled={busy}
+                      aria-label={`Preview ${label}`}
+                    >
+                      <Eye size={13} /> Preview
+                    </Button>
+                    <Button
+                      variant="outline" size="sm" className="h-8 gap-1.5"
+                      onClick={() => onPrint(doc)}
+                      disabled={busy}
+                      aria-label={`Print ${label}`}
+                    >
+                      <Printer size={13} /> Print
+                    </Button>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          To upload, replace or delete a document use the <Pencil size={11} className="inline" aria-hidden /> Edit button
+          at the top of this profile — changes are saved with the employee.
+        </p>
+      </div>
+    </InfoCard>
   );
 }
 
@@ -1045,6 +1146,11 @@ export function EmployeeDetailsPage() {
   // Notices & fines card — the employee's warnings + fines, newest first
   const [notices, setNotices] = useState<NoticeItem[] | null>(null);
 
+  // attached encrypted documents (passport / visa / contract)
+  const [empDocs, setEmpDocs] = useState<EmployeeDoc[] | null>(null);
+  const [docBusyKind, setDocBusyKind] = useState<string | null>(null);
+  const [docPreview, setDocPreview] = useState<{ name: string; ext: string; url: string } | null>(null);
+
   const trMonthKey = `${trYear}-${pad(trMonth)}`;
 
   // ---- resolve the employee ---------------------------------------------------
@@ -1072,6 +1178,87 @@ export function EmployeeDetailsPage() {
     })();
     return () => { cancelled = true; };
   }, [selectedEmployeeId, realtimeVersion]);
+
+  // ---- attached encrypted documents (passport / visa / contract) ----------
+  useEffect(() => {
+    const employeeId = selectedEmployeeId;
+    if (!employeeId) return;
+    let cancelled = false;
+    setEmpDocs(null);
+    listEmployeeDocs(employeeId)
+      .then((list) => { if (!cancelled) setEmpDocs(list); })
+      .catch(() => { if (!cancelled) setEmpDocs([]); });
+    return () => { cancelled = true; };
+  }, [selectedEmployeeId]);
+
+  const closeDocPreview = () => {
+    if (docPreview) URL.revokeObjectURL(docPreview.url);
+    setDocPreview(null);
+  };
+
+  /** Preview — decrypt in memory and open the in-app viewer (PDF zoom / image). */
+  const openAttachedDoc = async (doc: EmployeeDoc): Promise<void> => {
+    setDocBusyKind(doc.kind);
+    try {
+      const { url } = await employeeDocUrl(doc);
+      setDocPreview({ name: doc.name, ext: doc.ext, url });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'The document could not be opened.');
+    } finally {
+      setDocBusyKind(null);
+    }
+  };
+
+  /** Print — decrypt, then PDF via a hidden iframe / image via a print window. */
+  const printAttachedDoc = async (doc: EmployeeDoc): Promise<void> => {
+    setDocBusyKind(doc.kind);
+    let url: string | null = null;
+    try {
+      const blob = await downloadEmployeeDoc(doc);
+      url = URL.createObjectURL(blob);
+      if (doc.ext.toLowerCase() === 'pdf') {
+        const iframe = document.createElement('iframe');
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        iframe.src = url;
+        iframe.onload = () => {
+          try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          } catch {
+            toast.error('The browser refused the print dialog — open the preview and print from there.');
+          }
+          setTimeout(() => { iframe.remove(); if (url) URL.revokeObjectURL(url); }, 60_000);
+        };
+        document.body.appendChild(iframe);
+      } else {
+        const w = window.open('', '_blank', 'width=900,height=700');
+        if (!w) {
+          toast.error('The print window was blocked — allow popups for this site to print.');
+          return;
+        }
+        const safe = doc.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        w.document.write(
+          `<!doctype html><html><head><title>${safe}</title>` +
+          '<style>body{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff}' +
+          'img{max-width:100%;max-height:100vh;object-fit:contain}</style></head>' +
+          `<body><img src="${url}" alt="${safe}" onload="setTimeout(function(){window.focus();window.print();},200)"></body></html>`,
+        );
+        w.document.close();
+        setTimeout(() => { if (url) URL.revokeObjectURL(url); }, 60_000);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'The document could not be printed.');
+      if (url) URL.revokeObjectURL(url);
+    } finally {
+      setDocBusyKind(null);
+    }
+  };
 
   // ---- track record month ------------------------------------------------------
   useEffect(() => {
@@ -1326,11 +1513,20 @@ export function EmployeeDetailsPage() {
               onSaved={(patch) => setEmp((prev) => (prev ? { ...prev, ...patch } : prev))}
             />
           </InfoCard>
+
+          {/* encrypted passport / visa / contract files — preview & print */}
+          <AttachedDocsCard
+            index={3}
+            docs={empDocs}
+            busyKind={docBusyKind}
+            onOpen={(doc) => void openAttachedDoc(doc)}
+            onPrint={(doc) => void printAttachedDoc(doc)}
+          />
         </div>
 
         {/* ---- right column: professional stack ---- */}
         <div className="space-y-4">
-        <InfoCard index={3} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
+        <InfoCard index={4} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
           <div className="sm:col-span-2">
             <InfoRow
               label="Total Hours"
@@ -1490,7 +1686,7 @@ export function EmployeeDetailsPage() {
 
         </InfoCard>
 
-          <InfoCard index={4} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
+          <InfoCard index={5} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
             <InfoRow label="Employee Code" value={emp.employee_code} mono />
             <InfoRow label="Performance Rating" value={<RatingStars rating={emp.rating} size={13} />} />
             <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
@@ -1626,6 +1822,16 @@ export function EmployeeDetailsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* decrypted document preview (PDF zoom viewer / image lightbox) */}
+      {docPreview && (
+        <EmployeeDocViewer
+          name={docPreview.name}
+          ext={docPreview.ext}
+          url={docPreview.url}
+          onClose={closeDocPreview}
+        />
+      )}
     </motion.div>
   );
 }

@@ -15,8 +15,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
 import {
-  ArrowLeft, Building2, Clock, CreditCard, Crown, GitBranch, HeartPulse, IdCard,
-  ImagePlus, Loader2, Plus, Save, Tent, UserRound, Wrench,
+  ArrowLeft, Building2, Clock, CreditCard, Crown, Eye, FileSignature, GitBranch,
+  HeartPulse, IdCard, ImagePlus, Loader2, Plane, Plus, Save, Stamp, Tent,
+  Trash2, Undo2, Upload, UserRound, Wrench, type LucideIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,7 +32,19 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { NationalitySelect } from '@/components/shared/nationality-select';
 import { PhoneInput } from '@/components/shared/phone-input';
 import { RatingStars } from '@/components/shared/primitives';
-import { dataApi } from '@/lib/data';
+import { EmployeeDocViewer } from '@/components/employees/employee-doc-viewer';
+import { aiProxyHeaders } from '@/lib/ai/client';
+import { dataApi, isDemoMode } from '@/lib/data';
+import { db as demoDb } from '@/lib/data/demo-store';
+import {
+  EMPLOYEE_DOC_ACCEPT, EMPLOYEE_DOC_KINDS, MAX_EMPLOYEE_DOC_SIZE, deleteEmployeeDoc,
+  docKindLabel, employeeDocUrl, listEmployeeDocs, uploadEmployeeDoc,
+  type EmployeeDoc, type EmployeeDocKind,
+} from '@/lib/files/employee-docs';
+import {
+  extractDocumentFields, passportStatusFromExpiry,
+  type DocExtractAiOptions, type ExtractedDocFields,
+} from '@/lib/files/doc-extract';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
@@ -41,6 +54,7 @@ import {
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
+import { useSettingsStore } from '@/store/settings-store';
 
 const EMPTY_FORM: EmployeeInput = {
   full_name: '', employee_code: null, nationality: null, date_of_birth: null,
@@ -269,6 +283,163 @@ function FormSection({ icon, title, hint, children, className }: {
   );
 }
 
+// ---------------------------------------------------------------------------
+// One attached-document slot (Passport / Visa / Contract) — upload & auto-fill,
+// preview, replace and remove. Changes are staged; the encrypted vault is
+// written when the employee form saves.
+// ---------------------------------------------------------------------------
+const DOC_SLOT_META: Record<EmployeeDocKind, { icon: LucideIcon; cls: string }> = {
+  passport: { icon: Plane, cls: 'bg-sky-500/10 text-sky-500' },
+  visa: { icon: Stamp, cls: 'bg-amber-500/10 text-amber-500' },
+  contract: { icon: FileSignature, cls: 'bg-emerald-500/10 text-emerald-500' },
+};
+
+function fmtDocSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+function DocSlotCard({
+  kind, hint, existing, stagedFile, markedRemoved, extracting, filledLabels,
+  onPick, onRemoveStaged, onMarkRemoved, onUndoRemove, onPreview,
+}: {
+  kind: EmployeeDocKind;
+  hint: string;
+  existing: EmployeeDoc | undefined;
+  stagedFile: File | null;
+  markedRemoved: boolean;
+  extracting: boolean;
+  filledLabels: string[] | undefined;
+  onPick: (file: File) => void;
+  onRemoveStaged: () => void;
+  onMarkRemoved: () => void;
+  onUndoRemove: () => void;
+  onPreview: () => void;
+}) {
+  const meta = DOC_SLOT_META[kind];
+  const inputRef = useRef<HTMLInputElement>(null);
+  const Icon = meta.icon;
+  const hasDoc = !!stagedFile || (!!existing && !markedRemoved);
+
+  return (
+    <div
+      className={cn(
+        'flex flex-col gap-2.5 rounded-xl border p-3.5',
+        hasDoc ? 'border-border bg-card' : 'border-dashed border-border/80 bg-card/50',
+        markedRemoved && 'opacity-70',
+      )}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept={EMPLOYEE_DOC_ACCEPT}
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = ''; // allow re-picking the same file
+          if (f) onPick(f);
+        }}
+      />
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-lg', meta.cls)}>
+            <Icon size={17} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-[13px] font-semibold">{docKindLabel(kind)}</p>
+            <p className="text-[10.5px] leading-tight text-muted-foreground">{hint}</p>
+          </div>
+        </div>
+        {extracting && <Loader2 size={14} className="mt-1 shrink-0 animate-spin text-brand" />}
+      </div>
+
+      {extracting ? (
+        <p className="rounded-lg border border-brand/20 bg-brand/5 px-2.5 py-2 text-[11px] text-muted-foreground">
+          Reading the document — filling in what it recognises…
+        </p>
+      ) : stagedFile ? (
+        <div className="min-w-0 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] px-2.5 py-2">
+          <p className="truncate text-[11px] font-medium" title={stagedFile.name}>{stagedFile.name}</p>
+          <p className="text-[10.5px] text-muted-foreground">
+            {fmtDocSize(stagedFile.size)} · new upload{existing ? ' — replaces the current file on save' : ''}
+          </p>
+        </div>
+      ) : existing ? (
+        markedRemoved ? (
+          <div className="rounded-lg border border-rose-500/25 bg-rose-500/[0.06] px-2.5 py-2">
+            <p className="text-[11px] font-medium text-rose-500">Removed — deleted when you save</p>
+          </div>
+        ) : (
+          <div className="min-w-0 rounded-lg border border-border/70 bg-background/60 px-2.5 py-2">
+            <p className="truncate text-[11px] font-medium" title={existing.name}>{existing.name}</p>
+            <p className="text-[10.5px] text-muted-foreground">
+              {fmtDocSize(existing.size)} · encrypted · {existing.updatedAt ? existing.updatedAt.slice(0, 10) : ''}
+            </p>
+          </div>
+        )
+      ) : (
+        <p className="text-[10.5px] text-muted-foreground">Not attached yet — optional.</p>
+      )}
+
+      {filledLabels && filledLabels.length > 0 && (
+        <p className="text-[10.5px] leading-tight text-emerald-600 dark:text-emerald-400">
+          Auto-filled: {filledLabels.join(', ')}
+        </p>
+      )}
+
+      <div className="mt-auto flex flex-wrap gap-1.5">
+        {!markedRemoved && (
+          <Button
+            type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
+            onClick={() => inputRef.current?.click()}
+            disabled={extracting}
+          >
+            <Upload size={12} /> {hasDoc ? 'Replace' : 'Upload'}
+          </Button>
+        )}
+        {hasDoc && !markedRemoved && (
+          <Button
+            type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
+            onClick={onPreview}
+            disabled={extracting}
+          >
+            <Eye size={12} /> Preview
+          </Button>
+        )}
+        {stagedFile && (
+          <Button
+            type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
+            onClick={onRemoveStaged}
+            disabled={extracting}
+          >
+            <Undo2 size={12} /> Unstage
+          </Button>
+        )}
+        {existing && !stagedFile && !markedRemoved && (
+          <Button
+            type="button" size="sm" variant="outline"
+            className="h-7 gap-1 px-2 text-[11px] hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-500"
+            onClick={onMarkRemoved}
+            disabled={extracting}
+          >
+            <Trash2 size={12} /> Remove
+          </Button>
+        )}
+        {markedRemoved && (
+          <Button
+            type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]"
+            onClick={onUndoRemove}
+          >
+            <Undo2 size={12} /> Undo
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function EmployeeFormPage() {
   const mode = useAppStore((s) => s.employeeFormMode);
   const employeeId = useAppStore((s) => s.employeeFormId);
@@ -314,6 +485,23 @@ export function EmployeeFormPage() {
    *  saves the payment method back when the user actually changes them */
   const initialPayment = useRef<{ type: PaymentType | null; cardId: string | null }>({ type: null, cardId: null });
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- attached document files (passport / visa / contract) ----------------
+  // Changes are STAGED here and written to the encrypted vault only when the
+  // employee saves — canceling the form leaves the vault untouched.
+  const [existingDocs, setExistingDocs] = useState<Partial<Record<EmployeeDocKind, EmployeeDoc>>>({});
+  const [docSlots, setDocSlots] = useState<Record<EmployeeDocKind, { file: File | null; remove: boolean }>>({
+    passport: { file: null, remove: false },
+    visa: { file: null, remove: false },
+    contract: { file: null, remove: false },
+  });
+  /** the slot currently being read for auto-fill (spinner) */
+  const [docBusy, setDocBusy] = useState<EmployeeDocKind | null>(null);
+  /** per-slot labels of the fields the auto-fill populated */
+  const [docFilled, setDocFilled] = useState<Partial<Record<EmployeeDocKind, string[]>>>({});
+  const [docPreview, setDocPreview] = useState<{ name: string; ext: string; url: string } | null>(null);
+
+  const settings = useSettingsStore((s) => s.settings);
 
   // ---- load reference data (+ the employee being edited) ----------------------
   // Runs ONCE per mount: re-fetching on realtime changes would wipe the user's
@@ -403,6 +591,16 @@ export function EmployeeFormPage() {
             trade_id: emp.trade_id ?? null,
             salary_role: emp.salary_role ?? 'standard',
           });
+          // existing encrypted documents (passport / visa / contract) — best
+          // effort: a vault/listing failure just leaves the slots empty
+          listEmployeeDocs(employeeId)
+            .then((docs) => {
+              if (cancelled) return;
+              const byKind: Partial<Record<EmployeeDocKind, EmployeeDoc>> = {};
+              docs.forEach((d) => { byKind[d.kind] = d; });
+              setExistingDocs(byKind);
+            })
+            .catch(() => { /* slots simply show as empty */ });
         }
       } catch (err) {
         if (!cancelled) toast.error(err instanceof Error ? err.message : 'Failed to load');
@@ -579,6 +777,137 @@ export function EmployeeFormPage() {
     }
   };
 
+  // ---- attached document files (encrypted vault + auto-fill) --------------------
+  /** AI connection for reading documents — the org-wide one from Site Settings
+   *  (demo mode carries the raw key from the local demo store). */
+  const docAiOptions = (): DocExtractAiOptions => ({
+    enabled: settings.ai_enabled
+      && settings.ai_api_key_masked !== ''
+      && !!settings.ai_base_url
+      && !!settings.ai_model,
+    baseUrl: settings.ai_base_url,
+    model: settings.ai_model,
+    ...(isDemoMode ? { apiKey: demoDb.siteSettings.ai_api_key } : {}),
+  });
+
+  /** Merge extracted fields into the form — only EMPTY fields are filled so a
+   *  re-upload never clobbers what the admin already typed. Returns the labels
+   *  that were actually applied (for the toast + slot chip). */
+  const applyExtractedFields = (fields: ExtractedDocFields): string[] => {
+    const labels: string[] = [];
+    const next = { ...form };
+    const put = (key: keyof EmployeeInput, value: string | null, label: string): void => {
+      if (!value) return;
+      const current = next[key] as unknown;
+      if (typeof current === 'string' && current.trim() !== '') return;
+      (next as unknown as Record<string, unknown>)[key] = value;
+      labels.push(label);
+    };
+    put('full_name', fields.full_name, 'full name');
+    put('nationality', fields.nationality, 'nationality');
+    put('date_of_birth', fields.date_of_birth, 'date of birth');
+    put('passport_number', fields.passport_number, 'passport number');
+    put('id_number', fields.id_number, 'ID number');
+    put('position', fields.position, 'position');
+    put('join_date', fields.join_date, 'join date');
+    const status = passportStatusFromExpiry(fields.passport_expiry);
+    if (status && !next.passport_status) {
+      next.passport_status = status;
+      labels.push('passport status');
+    }
+    if (labels.length > 0) setForm(next);
+    return labels;
+  };
+
+  const handleDocPick = async (kind: EmployeeDocKind, file: File | undefined): Promise<void> => {
+    if (!file) return;
+    const ext = (/\.([a-z0-9]+)$/i.exec(file.name.trim())?.[1] ?? '').toLowerCase();
+    if (!['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
+      toast.error('Only PDF, JPG, PNG or WebP files can be attached');
+      return;
+    }
+    if (file.size > MAX_EMPLOYEE_DOC_SIZE) {
+      toast.error(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB) — the limit is 15 MB`);
+      return;
+    }
+    // stage the file; applied to the encrypted vault on Save
+    setDocSlots((s) => ({ ...s, [kind]: { file, remove: false } }));
+    setDocBusy(kind);
+    try {
+      const result = await extractDocumentFields(file, docAiOptions(), await aiProxyHeaders());
+      const labels = applyExtractedFields(result.fields);
+      setDocFilled((f) => ({ ...f, [kind]: labels }));
+      if (labels.length > 0) {
+        toast.success(`${docKindLabel(kind)} attached — auto-filled ${labels.join(', ')}`, {
+          description: result.note ?? 'Review the filled fields and complete the rest.',
+        });
+      } else {
+        toast.info(`${docKindLabel(kind)} attached`, {
+          description: result.note ?? 'No new fields could be read from this document.',
+        });
+      }
+    } catch (err) {
+      toast.warning(`${docKindLabel(kind)} attached, but the auto-fill failed`, {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setDocBusy(null);
+    }
+  };
+
+  /** Preview one slot — the staged file directly, or the stored document
+   *  decrypted on the fly. */
+  const openDocPreview = async (kind: EmployeeDocKind): Promise<void> => {
+    const slot = docSlots[kind];
+    try {
+      if (slot.file) {
+        const ext = (/\.([a-z0-9]+)$/i.exec(slot.file.name.trim())?.[1] ?? '').toLowerCase();
+        setDocPreview({
+          name: `${docKindLabel(kind)} (new upload, ${ext.toUpperCase()})`,
+          ext,
+          url: URL.createObjectURL(slot.file),
+        });
+        return;
+      }
+      const doc = existingDocs[kind];
+      if (!doc || slot.remove) return;
+      const { url } = await employeeDocUrl(doc);
+      setDocPreview({ name: doc.name, ext: doc.ext, url });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'The document could not be opened.');
+    }
+  };
+
+  const closeDocPreview = () => {
+    if (docPreview) URL.revokeObjectURL(docPreview.url);
+    setDocPreview(null);
+  };
+
+  /** Write the staged document changes to the encrypted vault (after the
+   *  employee row itself saved). Each operation reports its own failure. */
+  const applyDocChanges = async (empId: string): Promise<void> => {
+    const failures: string[] = [];
+    const jobs: Promise<void>[] = [];
+    for (const { kind } of EMPLOYEE_DOC_KINDS) {
+      const slot = docSlots[kind];
+      const existing = existingDocs[kind];
+      if (slot.remove && existing && !slot.file) {
+        jobs.push(deleteEmployeeDoc(existing).catch((e: Error) => {
+          failures.push(`${docKindLabel(kind)} removal — ${e.message}`);
+        }));
+      }
+      if (slot.file) {
+        jobs.push(uploadEmployeeDoc(empId, kind, slot.file).catch((e: Error) => {
+          failures.push(`${docKindLabel(kind)} upload — ${e.message}`);
+        }));
+      }
+    }
+    if (jobs.length > 0) await Promise.all(jobs);
+    if (failures.length > 0) {
+      toast.warning('Some documents could not be saved', { description: failures.join(' · ') });
+    }
+  };
+
   // ---- submit ------------------------------------------------------------------------
   const submit = async () => {
     if (!form.full_name.trim()) {
@@ -660,6 +989,8 @@ export function EmployeeFormPage() {
         if (paymentChanged) {
           await dataApi.setEmployeePaymentMethod(employeeId, paymentType, nextCardId);
         }
+        // staged passport / visa / contract files → encrypted vault
+        await applyDocChanges(employeeId);
         toast.success('Employee updated', {
           description: `${updated.full_name} saved.${paymentChanged ? ' Payment method updated.' : ''}`,
         });
@@ -678,6 +1009,8 @@ export function EmployeeFormPage() {
             });
           }
         }
+        // uploaded passport / visa / contract files → encrypted vault
+        await applyDocChanges(created.id);
         toast.success('Employee created', { description: `${created.full_name} — ID ${created.employee_code}` });
         // fresh employee → straight to the Employee Management page
         navigateToEmployees();
@@ -1124,7 +1457,7 @@ export function EmployeeFormPage() {
             <FormSection
               icon={<IdCard size={16} />}
               title="Documents"
-              hint="Passport, ID & payment method"
+              hint="Passport, ID, attached files & payment method"
             >
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
@@ -1167,6 +1500,42 @@ export function EmployeeFormPage() {
                       <span className="text-xs text-muted-foreground">Auto-calculated from attendance</span>
                     </div>
                   </div>
+                )}
+              </div>
+
+              {/* ---- attached document FILES (encrypted vault + auto-fill) ----
+                  Upload the passport / visa / contract BEFORE filling the form:
+                  recognised fields auto-fill, the admin completes the rest, and
+                  the files are stored AES-encrypted on save. */}
+              <div className="mt-5 rounded-xl border border-brand/15 bg-brand/[0.03] p-3.5">
+                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <Upload size={13} className="text-brand" /> Attach &amp; auto-fill from documents
+                  <span className="normal-case text-muted-foreground/70">— stored encrypted (AES-256-GCM), visible on the profile</span>
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  {EMPLOYEE_DOC_KINDS.map(({ kind, hint }) => (
+                    <DocSlotCard
+                      key={kind}
+                      kind={kind}
+                      hint={hint}
+                      existing={existingDocs[kind]}
+                      stagedFile={docSlots[kind].file}
+                      markedRemoved={docSlots[kind].remove}
+                      extracting={docBusy === kind}
+                      filledLabels={docFilled[kind]}
+                      onPick={(f) => void handleDocPick(kind, f)}
+                      onRemoveStaged={() => setDocSlots((s) => ({ ...s, [kind]: { file: null, remove: false } }))}
+                      onMarkRemoved={() => setDocSlots((s) => ({ ...s, [kind]: { file: null, remove: true } }))}
+                      onUndoRemove={() => setDocSlots((s) => ({ ...s, [kind]: { file: null, remove: false } }))}
+                      onPreview={() => void openDocPreview(kind)}
+                    />
+                  ))}
+                </div>
+                {!(settings.ai_enabled && settings.ai_api_key_masked !== '') && (
+                  <p className="mt-2.5 text-[10.5px] leading-tight text-muted-foreground">
+                    Tip: configure the AI connection (Site Settings → AI Bot) to auto-read scanned images too — PDFs
+                    with text and passport MRZ lines are already read offline.
+                  </p>
                 )}
               </div>
 
@@ -1264,6 +1633,16 @@ export function EmployeeFormPage() {
           setForm((f) => ({ ...f, trade_id: trade.id }));
         }}
       />
+
+      {/* decrypted document preview (PDF zoom viewer / image lightbox) */}
+      {docPreview && (
+        <EmployeeDocViewer
+          name={docPreview.name}
+          ext={docPreview.ext}
+          url={docPreview.url}
+          onClose={closeDocPreview}
+        />
+      )}
     </div>
   );
 }

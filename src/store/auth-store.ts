@@ -6,7 +6,6 @@
 
 import { create } from 'zustand';
 import { dataApi } from '@/lib/data';
-import { isSupabaseConfigured } from '@/lib/supabase/client';
 import type { AccentColor, MenuPermissionMap, Profile, ThemeMode } from '@/lib/types';
 import { defaultPermissionMap } from '@/lib/menus';
 
@@ -21,6 +20,7 @@ interface AuthStore {
   updateLocalUser: (patch: Partial<Profile>) => void;
   setTheme: (theme: ThemeMode) => Promise<void>;
   setAccent: (accent: AccentColor) => Promise<void>;
+  changeOwnPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   refreshPermissions: () => Promise<void>;
 }
 
@@ -72,18 +72,29 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     set((s) => (s.user ? { user: { ...s.user, ...patch } } : s));
   },
 
+  // Personal appearance (My Settings page + sidebar quick controls) — the
+  // profile row is the source of truth in BOTH modes, so the choice survives
+  // reloads and follows the admin to other browsers.
   setTheme: async (theme) => {
     get().updateLocalUser({ theme });
-    if (isSupabaseConfigured && get().user) {
-      await dataApi.setPreferences(theme, get().user!.accent);
-    }
+    try {
+      const profile = await dataApi.setPreferences(theme, get().user!.accent);
+      set({ user: profile });
+    } catch { /* keep the local (already applied) value */ }
   },
 
   setAccent: async (accent) => {
     get().updateLocalUser({ accent });
-    if (isSupabaseConfigured && get().user) {
-      await dataApi.setPreferences(get().user!.theme, accent);
-    }
+    try {
+      const profile = await dataApi.setPreferences(get().user!.theme, accent);
+      set({ user: profile });
+    } catch { /* keep the local (already applied) value */ }
+  },
+
+  // My Settings → Account: self-service password change (verifies the
+  // current password first; a super admin can always overwrite it instead)
+  changeOwnPassword: async (currentPassword, newPassword) => {
+    await dataApi.changeOwnPassword(currentPassword, newPassword);
   },
 
   refreshPermissions: async () => {

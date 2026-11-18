@@ -10,7 +10,9 @@ import { Button } from '@/components/ui/button';
 import { ChevronsUpDown, Plus } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
-const COUNTRIES: string[] = [
+/** Countries offered in the nationality combobox — exported for the document
+ *  auto-fill (passport/visa extraction normalises nationalities onto it). */
+export const COUNTRIES: string[] = [
   'Afghanistan', 'Bangladesh', 'Bhutan', 'Brunei', 'Cambodia', 'China', 'Egypt',
   'Eritrea', 'Ethiopia', 'Ghana', 'India', 'Indonesia', 'Iran', 'Iraq', 'Jordan',
   'Kenya', 'Kuwait', 'Laos', 'Lebanon', 'Madagascar', 'Malawi', 'Malaysia',

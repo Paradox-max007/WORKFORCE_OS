@@ -102,6 +102,7 @@ export function AdminPage() {
   const [permTarget, setPermTarget] = useState<Profile | null>(null);
   const [sitesTarget, setSitesTarget] = useState<Profile | null>(null);
   const [branchesTarget, setBranchesTarget] = useState<Profile | null>(null);
+  const [pwTarget, setPwTarget] = useState<Profile | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -360,6 +361,7 @@ export function AdminPage() {
                               profile={p}
                               canDelete={superCount > 1}
                               onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
+                              onResetPassword={() => setPwTarget(p)}
                               onDelete={() => requestDelete(p)}
                             />
                           </div>
@@ -402,6 +404,7 @@ export function AdminPage() {
                         profile={p}
                         canDelete={superCount > 1}
                         onEdit={() => setAccountTarget({ mode: 'edit', profile: p })}
+                        onResetPassword={() => setPwTarget(p)}
                         onDelete={() => requestDelete(p)}
                       />
                     </div>
@@ -534,6 +537,7 @@ export function AdminPage() {
                               onPermissions={() => setPermTarget(p)}
                               onBranches={() => setBranchesTarget(p)}
                               onSites={() => setSitesTarget(p)}
+                              onResetPassword={() => setPwTarget(p)}
                               onDelete={() => requestDelete(p)}
                             />
                           </div>
@@ -595,6 +599,7 @@ export function AdminPage() {
                           onPermissions={() => setPermTarget(p)}
                           onBranches={() => setBranchesTarget(p)}
                           onSites={() => setSitesTarget(p)}
+                          onResetPassword={() => setPwTarget(p)}
                           onDelete={() => requestDelete(p)}
                         />
                       </div>
@@ -612,6 +617,12 @@ export function AdminPage() {
         target={accountTarget}
         superCount={superCount}
         onClose={() => setAccountTarget(null)}
+      />
+
+      {/* ---- Reset password dialog (super admin overwrite) ---- */}
+      <ResetPasswordDialog
+        profile={pwTarget}
+        onClose={() => setPwTarget(null)}
       />
 
       {/* ---- Permissions dialog ---- */}
@@ -856,9 +867,10 @@ function SiteChips({
   );
 }
 
-/** Row action icon buttons (permissions + branch/site access for admins, edit, guarded delete). */
+/** Row action icon buttons (permissions + branch/site access for admins, edit,
+ *  super-admin password overwrite, guarded delete). */
 function RowActions({
-  profile, canDelete, onEdit, onPermissions, onBranches, onSites, onDelete,
+  profile, canDelete, onEdit, onPermissions, onBranches, onSites, onResetPassword, onDelete,
 }: {
   profile: Profile;
   canDelete: boolean;
@@ -866,6 +878,7 @@ function RowActions({
   onPermissions?: () => void;
   onBranches?: () => void;
   onSites?: () => void;
+  onResetPassword?: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -916,6 +929,18 @@ function RowActions({
       >
         <Pencil size={15} aria-hidden />
       </Button>
+      {onResetPassword && (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onResetPassword}
+          title="Reset password (super admin overwrite)"
+          aria-label={`Reset password — ${profile.name}`}
+          className="size-9 text-muted-foreground hover:bg-amber-500/10 hover:text-amber-500"
+        >
+          <Lock size={15} aria-hidden />
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="icon"
@@ -928,6 +953,110 @@ function RowActions({
         <Trash2 size={15} aria-hidden />
       </Button>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Reset password dialog — a super admin can overwrite ANY admin's password
+// at any time (no current password needed; also repairs SQL-damaged auth
+// accounts in Supabase mode through the /api/admin-users repair path).
+// ---------------------------------------------------------------------------
+function ResetPasswordDialog({ profile, onClose }: { profile: Profile | null; onClose: () => void }) {
+  const open = profile !== null;
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setPassword('');
+    setConfirm('');
+    setShowPw(false);
+    setError(null);
+    setSubmitting(false);
+  }, [profile]);
+
+  const submit = async (): Promise<void> => {
+    if (!profile) return;
+    if (password.length < 6) { setError('The new password must be at least 6 characters.'); return; }
+    if (password !== confirm) { setError('The passwords do not match.'); return; }
+    setSubmitting(true);
+    try {
+      await dataApi.updateProfile(profile.id, { password });
+      toast.success('Password overwritten', {
+        description: `${profile.name} can now sign in with the new password.`,
+      });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset the password');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Lock size={16} className="text-amber-500" /> Reset password
+          </DialogTitle>
+          <DialogDescription>
+            Overwrite {profile ? `${profile.name}'s (${profile.email})` : 'this account\u2019s'} password.
+            The admin does not need the old password — share the new one with them directly.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <div className="space-y-2">
+            <Label htmlFor="reset-pw">New password</Label>
+            <div className="relative">
+              <Input
+                id="reset-pw"
+                type={showPw ? 'text' : 'password'}
+                value={password}
+                onChange={(e) => { setPassword(e.target.value); setError(null); }}
+                placeholder="At least 6 characters"
+                autoComplete="new-password"
+                className="pr-9"
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPw((v) => !v)}
+                aria-label={showPw ? 'Hide password' : 'Show password'}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="reset-pw-confirm">Confirm new password</Label>
+            <Input
+              id="reset-pw-confirm"
+              type={showPw ? 'text' : 'password'}
+              value={confirm}
+              onChange={(e) => { setConfirm(e.target.value); setError(null); }}
+              autoComplete="new-password"
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } }}
+            />
+          </div>
+          {error && (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={submitting}>Cancel</Button>
+          <Button onClick={() => void submit()} disabled={submitting || !password || !confirm} className="font-semibold">
+            {submitting ? <Loader2 size={15} className="mr-1.5 animate-spin" /> : <Lock size={15} className="mr-1.5" />}
+            Overwrite password
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

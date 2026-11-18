@@ -29,6 +29,12 @@
 // ones cut from that period's salary) and the toolbar chip totals the given
 // vs recovered amounts for the picked period.
 //
+// BRANCH VIEW — the Branch dropdown scopes EVERYTHING to one branch: the
+// ledger, the Due / Overdue / Cleared cards and the monthwise chip all show
+// only that branch's employees (their branch = the owner branch of their
+// current site, exactly like the add dialog). "Add Advance" opens pre-set to
+// the picked branch; "All branches" restores the org-wide ledger.
+//
 // DEEP LINK — the Payroll page's red "− amount → next month" line under Net
 // Payable opens this ledger focused on that employee's time-card carryover
 // record (search preset + amber highlight).
@@ -135,6 +141,9 @@ export function AdvanceBookPage() {
   const [sites, setSites] = useState<Site[] | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  /** 'all' | branch id | '__none__' (sites without an owner branch) — scopes
+   *  the ledger, the summary cards and the monthwise chip to one branch */
+  const [branchFilter, setBranchFilter] = useState('all');
   /** 'all' | '1'..'12' — the monthwise filter over the SAME ledger table */
   const [monthFilter, setMonthFilter] = useState('all');
   /** 'all' | year string */
@@ -173,6 +182,7 @@ export function AdvanceBookPage() {
           useAppStore.setState({ advanceBookFocus: null });
           setSearch(focus.employeeName);
           setStatusFilter('all');
+          setBranchFilter('all');
           setMonthFilter('all');
           setYearFilter('all');
           const targets = book.records.filter((r) => r.employee_id === focus.employeeId
@@ -208,6 +218,41 @@ export function AdvanceBookPage() {
     () => new Map((branches ?? []).map((b) => [b.id, b.name] as const)),
     [branches],
   );
+  // employee id → their branch id (an employee's branch = their site's branch)
+  const branchIdOfEmployee = useMemo(
+    () => new Map((employees ?? []).map((e) => [
+      e.id,
+      e.current_site_id ? branchIdOfSite.get(e.current_site_id) ?? null : null,
+    ] as const)),
+    [employees, branchIdOfSite],
+  );
+
+  // ---- branch scope ---------------------------------------------------------
+  /** the ledger restricted to the picked branch ('all' → everything) — the
+   *  cards, the table and the monthwise chip all derive from THIS set */
+  const branchRecords = useMemo(() => {
+    if (!report) return [];
+    if (branchFilter === 'all') return report.records;
+    return report.records.filter((r) =>
+      (branchFilter === '__none__'
+        ? (branchIdOfEmployee.get(r.employee_id) ?? null) === null
+        : branchIdOfEmployee.get(r.employee_id) === branchFilter));
+  }, [report, branchFilter, branchIdOfEmployee]);
+
+  /** Due / Overdue / Cleared totals of the branch-scoped ledger (the same
+   *  derivation the status chips use: cleared wins, then overdue, then due) */
+  const branchTotals = useMemo(() => {
+    const t = { due_count: 0, due_amount: 0, overdue_count: 0, overdue_amount: 0, cleared_count: 0, cleared_amount: 0 };
+    branchRecords.forEach((r) => {
+      if (r.cleared) { t.cleared_count += 1; t.cleared_amount += r.amount; }
+      else if (r.overdue) { t.overdue_count += 1; t.overdue_amount += r.amount; }
+      else { t.due_count += 1; t.due_amount += r.amount; }
+    });
+    t.due_amount = round2(t.due_amount);
+    t.overdue_amount = round2(t.overdue_amount);
+    t.cleared_amount = round2(t.cleared_amount);
+    return t;
+  }, [branchRecords]);
 
   // ---- filtering -----------------------------------------------------------
   const filterMonth = monthFilter === 'all' ? null : Number(monthFilter);
@@ -215,9 +260,8 @@ export function AdvanceBookPage() {
   const periodActive = filterMonth !== null || filterYear !== null;
 
   const filtered = useMemo(() => {
-    if (!report) return [];
     const q = search.toLowerCase().trim();
-    return report.records.filter((r) => {
+    return branchRecords.filter((r) => {
       if (q && !r.full_name.toLowerCase().includes(q)
         && !r.employee_code.toLowerCase().includes(q)) return false;
       if (statusFilter === 'due') return !r.cleared && !r.overdue;
@@ -231,7 +275,7 @@ export function AdvanceBookPage() {
       }
       return true;
     });
-  }, [report, search, statusFilter, periodActive, filterMonth, filterYear]);
+  }, [branchRecords, search, statusFilter, periodActive, filterMonth, filterYear]);
 
   const visibleTotal = useMemo(
     () => filtered.reduce((n, r) => n + r.amount, 0), [filtered]);
@@ -241,20 +285,20 @@ export function AdvanceBookPage() {
   // month/year and the toolbar chip totals given vs recovered for the period.
   const filterYears = useMemo(() => {
     const ys = new Set<number>([new Date().getFullYear()]);
-    report?.records.forEach((r) => {
+    branchRecords.forEach((r) => {
       ys.add(Number(r.given_date.slice(0, 4)));
       ys.add(r.cut_year);
     });
     return [...ys].filter((n) => Number.isFinite(n)).sort((a, b) => b - a);
-  }, [report]);
+  }, [branchRecords]);
 
   const periodStats = useMemo(() => {
-    if (!report || !periodActive) return null;
+    if (!periodActive) return null;
     let gCount = 0;
     let gAmount = 0;
     let rCount = 0;
     let rAmount = 0;
-    report.records.forEach((r) => {
+    branchRecords.forEach((r) => {
       const { given, cut } = periodMatch(r, filterMonth, filterYear);
       if (given) { gCount += 1; gAmount += r.amount; }
       if (cut && r.cleared) { rCount += 1; rAmount += r.amount; }
@@ -264,7 +308,7 @@ export function AdvanceBookPage() {
       recovered: { count: rCount, amount: round2(rAmount) },
       net: round2(gAmount - rAmount),
     };
-  }, [report, periodActive, filterMonth, filterYear]);
+  }, [branchRecords, periodActive, filterMonth, filterYear]);
 
   const periodLabel = filterMonth !== null && filterYear !== null
     ? `${MONTH_NAMES[filterMonth - 1]} ${filterYear}`
@@ -276,7 +320,8 @@ export function AdvanceBookPage() {
   const openAdd = (): void => {
     const now = new Date();
     setBulk({
-      branchId: 'all', query: '', amounts: {}, applyAll: '',
+      // pre-set to the branch currently picked in the ledger toolbar
+      branchId: branchFilter, query: '', amounts: {}, applyAll: '',
       givenDate: todayYMD(),
       cutMonth: String(now.getMonth() + 1), cutYear: String(now.getFullYear()),
       note: '',
@@ -485,22 +530,25 @@ export function AdvanceBookPage() {
     );
   }
 
-  const t = report.totals;
+  const t = branchTotals;
+  const scopeName = branchFilter === 'all'
+    ? null
+    : branchFilter === '__none__' ? 'employees without a branch' : branchNameOf.get(branchFilter) ?? 'this branch';
   const cards = [
     {
       icon: <CircleDollarSign size={12} />, label: 'Due', tone: 'amber' as const,
       value: fmtMoney(t.due_amount),
-      hint: `${t.due_count} record${t.due_count === 1 ? '' : 's'} not yet recovered`,
+      hint: `${t.due_count} record${t.due_count === 1 ? '' : 's'} not yet recovered${scopeName ? ` — ${scopeName}` : ''}`,
     },
     {
       icon: <TriangleAlert size={12} />, label: 'Overdue', tone: 'rose' as const,
       value: fmtMoney(t.overdue_amount),
-      hint: `${t.overdue_count} past the cut month — reschedule or pay`,
+      hint: `${t.overdue_count} past the cut month — reschedule or pay${scopeName ? ` — ${scopeName}` : ''}`,
     },
     {
       icon: <BadgeCheck size={12} />, label: 'Cleared', tone: 'emerald' as const,
       value: fmtMoney(t.cleared_amount),
-      hint: `${t.cleared_count} record${t.cleared_count === 1 ? '' : 's'} recovered from paid salaries`,
+      hint: `${t.cleared_count} record${t.cleared_count === 1 ? '' : 's'} recovered from paid salaries${scopeName ? ` — ${scopeName}` : ''}`,
     },
   ];
 
@@ -569,7 +617,7 @@ export function AdvanceBookPage() {
         <SectionTitle
           icon={<BookOpenText size={18} />}
           title="Advance Book"
-          sub="The advance ledger — every advance, its cut month, and whether it is due or cleared"
+          sub="The advance ledger — every advance, its cut month and status; pick a branch to see only that branch's advances"
         />
         <Button className="brand-gradient text-white" onClick={openAdd}>
           <Plus size={15} className="mr-1" /> Add Advance
@@ -607,7 +655,7 @@ export function AdvanceBookPage() {
         ))}
       </div>
 
-      {/* toolbar — search, status, month + year (the monthwise record) */}
+      {/* toolbar — search, branch, status, month + year (the monthwise record) */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-56 flex-1 sm:max-w-xs">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -617,6 +665,24 @@ export function AdvanceBookPage() {
             placeholder="Search employee or code…"
             className="h-9 bg-card pl-9 text-sm"
           />
+        </div>
+        <div
+          className="flex items-center gap-1.5 text-xs text-muted-foreground"
+          title="Show only the advances of one branch — its employees and their payroll records"
+        >
+          <GitBranch size={14} className="shrink-0" />
+          <Select value={branchFilter} onValueChange={setBranchFilter}>
+            <SelectTrigger className="h-9 w-40 bg-card text-xs" aria-label="Filter by branch">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All branches</SelectItem>
+              {branches.map((b) => (
+                <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+              ))}
+              <SelectItem value="__none__">No branch (idle)</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <ListFilter size={14} />
@@ -838,9 +904,11 @@ export function AdvanceBookPage() {
                   <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
                     {report.records.length === 0
                       ? 'No advances recorded yet — use Add Advance to hand one out and pick its cut month.'
-                      : periodActive
-                        ? 'No records for this month / year — switch back to All months / All years.'
-                        : 'No records match the search / filter.'}
+                      : branchFilter !== 'all' && branchRecords.length === 0
+                        ? `No advances for ${scopeName ?? 'this branch'} yet — switch back to All branches to see the rest.`
+                        : periodActive
+                          ? 'No records for this month / year — switch back to All months / All years.'
+                          : 'No records match the search / filter.'}
                   </TableCell>
                 </TableRow>
               )}

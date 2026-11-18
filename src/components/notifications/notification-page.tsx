@@ -56,6 +56,7 @@ import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
+import { useSettingsStore } from '@/store/settings-store';
 
 // ---------------------------------------------------------------------------
 // Constants & small helpers
@@ -1175,7 +1176,7 @@ function NoticeCreateDialog({
           />
           {employee && (
             <p className="rounded-md bg-muted/60 px-2.5 py-1.5 text-[11px] text-muted-foreground">
-              {employee.position ?? '—'} · {employee.nationality ?? '—'} · {employee.site_name ?? 'No site'} · {employee.phone ?? 'No phone'}
+              {employee.trade_name ?? 'No trade'} · {employee.nationality ?? '—'} · {employee.site_name ?? 'No site'} · {employee.phone ?? 'No phone'}
             </p>
           )}
         </div>
@@ -1420,9 +1421,14 @@ export function NotificationPage() {
   const [letterFilter, setLetterFilter] = useState<NoticeKind | 'all'>('all');
   const [whatsapp, setWhatsapp] = useState<{ data: NoticeLetterData; nonce: number } | null>(null);
   /** open the WhatsApp send dialog — every open gets a fresh nonce so the
-   *  keyed inner form remounts with prefilled state (no effect resets) */
+   *  keyed inner form remounts with prefilled state (no effect resets). The
+   *  letterhead company (Site Settings → company name) is stamped on the
+   *  payload so the message text matches the PDF heading. */
   const openWhatsApp = useCallback((data: NoticeLetterData) => {
-    setWhatsapp((prev) => ({ data, nonce: (prev?.nonce ?? 0) + 1 }));
+    const companyName = data.companyName?.trim()
+      || useSettingsStore.getState().settings.company_name?.trim()
+      || null;
+    setWhatsapp((prev) => ({ data: { ...data, companyName }, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 
   // Review confirmations (AlertDialog state)

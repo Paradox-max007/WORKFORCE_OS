@@ -22,12 +22,19 @@
 //   deduction_settings table (20261111c); read by payroll_upsert_employee when
 //   a payroll is generated. DRAFT periods recalculate on their next view;
 //   FINALIZED periods stay locked as paid.
+//
+//   BRANCH VIEW (Trades tab) — the Branch dropdown scopes the trade grid to one
+//   branch's employees: only trades carried by that branch's workforce stay
+//   visible and every card shows how many of the branch's employees use it.
+//   Hourly RATES stay company-wide (effective-dated) — the branch view is a
+//   workforce lens, not a separate rate book. "All branches" restores the
+//   full grid.
 // ============================================================================
 
 import { motion } from 'framer-motion';
 import {
-  BadgeCheck, BadgeX, History, Loader2, Pencil, Percent, Plus, Power, PowerOff,
-  Save, Wrench,
+  BadgeCheck, BadgeX, GitBranch, History, Loader2, Pencil, Percent, Plus,
+  Power, PowerOff, Save, Users, Wrench,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
@@ -38,6 +45,9 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -45,8 +55,9 @@ import { dataApi } from '@/lib/data';
 import { fmtDate, fmtDateTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  EXPERIENCE_TIERS, SALARY_ROLES, type DeductionSettings, type ExperienceTier,
-  type SalaryRole, type Trade, type TradeRate, type TradeRateInput,
+  EXPERIENCE_TIERS, SALARY_ROLES, type BranchWithCount, type DeductionSettings,
+  type EmployeeVM, type ExperienceTier, type SalaryRole, type Site, type Trade,
+  type TradeRate, type TradeRateInput,
 } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -449,11 +460,14 @@ function EditTradeDialog({ trade, open, onOpenChange }: {
 // ---------------------------------------------------------------------------
 // Trade card
 // ---------------------------------------------------------------------------
-function TradeCard({ trade, index, onEditRates, onEditDetails }: {
+function TradeCard({ trade, index, onEditRates, onEditDetails, usage }: {
   trade: TradeWithRates;
   index: number;
   onEditRates: () => void;
   onEditDetails: () => void;
+  /** branch lens (set when a specific branch is picked): how many of that
+   *   branch's employees carry this trade */
+  usage?: { count: number; label: string };
 }) {
   return (
     <motion.section
@@ -469,6 +483,12 @@ function TradeCard({ trade, index, onEditRates, onEditDetails }: {
           </h3>
           {trade.description && (
             <p className="mt-0.5 truncate text-xs text-muted-foreground">{trade.description}</p>
+          )}
+          {usage && usage.count > 0 && (
+            <p className="mt-1 inline-flex items-center gap-1 rounded-full border border-brand/25 bg-brand/[0.06] px-2 py-0.5 text-[11px] font-medium text-brand">
+              <Users size={11} className="shrink-0" />
+              {usage.count} employee{usage.count === 1 ? '' : 's'} · {usage.label}
+            </p>
           )}
         </div>
         {trade.is_active ? (
@@ -739,7 +759,7 @@ function round2(n: number): number { return Math.round(n * 100) / 100; }
 // Page
 // ---------------------------------------------------------------------------
 export function TradePage() {
-  const realtimeVersion = useRealtimeVersion(['trades', 'trade_rate_history', 'payroll_period', 'payroll_employee']);
+  const realtimeVersion = useRealtimeVersion(['trades', 'trade_rate_history', 'payroll_period', 'payroll_employee', 'employee', 'site', 'branch']);
   const isSuperAdmin = useAuthStore((s) => s.user?.role) === 'super_admin';
 
   const [trades, setTrades] = useState<TradeWithRates[] | null>(null);
@@ -747,6 +767,13 @@ export function TradePage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [ratesTarget, setRatesTarget] = useState<TradeWithRates | null>(null);
   const [editTarget, setEditTarget] = useState<TradeWithRates | null>(null);
+
+  // ---- branch lens (Trades tab) — branches / sites / employees of the org ---
+  /** 'all' | branch id | '__none__' (sites without an owner branch) */
+  const [branchFilter, setBranchFilter] = useState('all');
+  const [branches, setBranches] = useState<BranchWithCount[] | null>(null);
+  const [sites, setSites] = useState<Site[] | null>(null);
+  const [employees, setEmployees] = useState<EmployeeVM[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -761,10 +788,61 @@ export function TradePage() {
     return () => { cancelled = true; };
   }, [realtimeVersion]);
 
-  const visible = useMemo(
-    () => (trades ?? []).filter((t) => t.is_active || showInactive),
-    [trades, showInactive],
+  // the branch lens data — failures fall back to empty lists (the All-branches
+  // view keeps working even without them)
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      dataApi.listBranches().catch(() => [] as BranchWithCount[]),
+      dataApi.listSites().catch(() => [] as Site[]),
+      dataApi.listEmployees().catch(() => [] as EmployeeVM[]),
+    ]).then(([brs, sts, emps]) => {
+      if (cancelled) return;
+      setBranches(brs);
+      setSites(sts);
+      setEmployees(emps);
+    });
+    return () => { cancelled = true; };
+  }, [realtimeVersion]);
+
+  // site id → owning branch id (an employee's branch = their site's branch)
+  const branchIdOfSite = useMemo(
+    () => new Map((sites ?? []).map((s) => [s.id, s.branch_id ?? null] as const)),
+    [sites],
   );
+  const branchNameOf = useMemo(
+    () => new Map((branches ?? []).map((b) => [b.id, b.name] as const)),
+    [branches],
+  );
+
+  /** trade id → how many of the picked branch's ACTIVE employees carry it,
+   *  plus that branch's total active-employee count */
+  const branchUsage = useMemo(() => {
+    const counts = new Map<string, number>();
+    let employeeCount = 0;
+    (employees ?? []).forEach((e) => {
+      if (e.status !== 'active') return;
+      const branch = e.current_site_id ? branchIdOfSite.get(e.current_site_id) ?? null : null;
+      const inScope = branchFilter === 'all' ? true
+        : branchFilter === '__none__' ? branch === null
+          : branch === branchFilter;
+      if (!inScope) return;
+      employeeCount += 1;
+      if (e.trade_id) counts.set(e.trade_id, (counts.get(e.trade_id) ?? 0) + 1);
+    });
+    return { counts, employeeCount };
+  }, [employees, branchIdOfSite, branchFilter]);
+
+  const branchScopeName = branchFilter === 'all'
+    ? null
+    : branchFilter === '__none__' ? 'No branch' : branchNameOf.get(branchFilter) ?? 'this branch';
+
+  const visible = useMemo(() => {
+    let list = (trades ?? []).filter((t) => t.is_active || showInactive);
+    // a specific branch → only the trades its employees actually carry
+    if (branchFilter !== 'all') list = list.filter((t) => (branchUsage.counts.get(t.id) ?? 0) > 0);
+    return list;
+  }, [trades, showInactive, branchFilter, branchUsage]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
@@ -787,14 +865,42 @@ export function TradePage() {
         {/* ---- TRADES tab ------------------------------------------------- */}
         <TabsContent value="trades" className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <label className="inline-flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
-              <Switch checked={showInactive} onCheckedChange={setShowInactive} aria-label="Show inactive trades" />
-              Show inactive trades
-            </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <div
+                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                title="Show only the trades this branch's employees carry — rates stay company-wide"
+              >
+                <GitBranch size={14} className="shrink-0" />
+                <Select value={branchFilter} onValueChange={setBranchFilter}>
+                  <SelectTrigger className="h-9 w-44 bg-card text-xs" aria-label="Filter trades by branch">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All branches</SelectItem>
+                    {(branches ?? []).map((b) => (
+                      <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                    ))}
+                    <SelectItem value="__none__">No branch (idle)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <label className="inline-flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
+                <Switch checked={showInactive} onCheckedChange={setShowInactive} aria-label="Show inactive trades" />
+                Show inactive trades
+              </label>
+            </div>
             <Button onClick={() => setCreateOpen(true)} className="brand-gradient font-semibold text-white shadow-lg shadow-[var(--glow)] transition-transform active:scale-[0.98]">
               <Plus size={16} className="mr-1.5" /> Add Trade
             </Button>
           </div>
+
+          {branchScopeName && (
+            <p className="text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">{branchScopeName === 'No branch' ? 'Employees without a branch' : `${branchScopeName} branch`}</span>
+              {' '}— {branchUsage.employeeCount} active employee{branchUsage.employeeCount === 1 ? '' : 's'} across{' '}
+              {visible.length} trade{visible.length === 1 ? '' : 's'}. Hourly rates stay company-wide.
+            </p>
+          )}
 
           {trades === null ? (
             <div className="grid gap-4 md:grid-cols-2">
@@ -803,8 +909,12 @@ export function TradePage() {
           ) : visible.length === 0 ? (
             <EmptyState
               icon={<Wrench size={22} />}
-              title={showInactive ? 'No trades yet' : 'No active trades'}
-              description="Create a trade with its six rate cells to start pricing salary."
+              title={branchFilter !== 'all' && (trades.length > 0 || branchUsage.employeeCount === 0)
+                ? 'No trades in use in this branch'
+                : showInactive ? 'No trades yet' : 'No active trades'}
+              description={branchFilter !== 'all' && trades.length > 0
+                ? `None of this branch's ${branchUsage.employeeCount} active employee${branchUsage.employeeCount === 1 ? '' : 's'} carry a configured trade yet — switch to All branches to see every trade and its rates.`
+                : 'Create a trade with its six rate cells to start pricing salary.'}
             />
           ) : (
             <div className="grid gap-4 md:grid-cols-2">
@@ -815,6 +925,7 @@ export function TradePage() {
                   index={i}
                   onEditRates={() => setRatesTarget(t)}
                   onEditDetails={() => setEditTarget(t)}
+                  usage={branchScopeName ? { count: branchUsage.counts.get(t.id) ?? 0, label: branchScopeName } : undefined}
                 />
               ))}
             </div>

@@ -35,6 +35,16 @@ export const noticeTitle = (kind: NoticeKind): string =>
 export const noticeLabel = (kind: NoticeKind): string =>
   NOTICE_KINDS.find((k) => k.kind === kind)?.label ?? 'Notice';
 
+/** Letterhead company of every formal notice — the COMPANY NAME SET IN THE
+ *  SITE SETTINGS (Admin → Site Settings → company name). Falls back to the
+ *  app brand when nothing is set. */
+export const DEFAULT_COMPANY_NAME = 'PULSE WORKFORCE OS LLC.';
+
+export function noticeCompanyHeading(companyName: string | null | undefined): string {
+  const name = companyName?.trim();
+  return name || DEFAULT_COMPANY_NAME;
+}
+
 /** Short, stable document reference (mirrors LEAVE-XXXXXXXX on leave forms). */
 export function noticeRef(kind: NoticeKind, recordId: string): string {
   const prefix = kind === 'warning' ? 'WARN' : kind === 'termination' ? 'TERM' : 'FINE';
@@ -84,6 +94,9 @@ export interface NoticeLetterData {
   noticeBasis?: TerminationNoticeBasis;
   /** termination: free-text body — when present it replaces the standard text */
   customBody?: string | null;
+  /** issuing company for the letterhead — the Site Settings company name
+   *  (filled in by the PDF generator / WhatsApp sender when the caller omits it) */
+  companyName?: string | null;
 }
 
 const fmtDay = (iso: string | null | undefined): string => {
@@ -141,10 +154,13 @@ export function buildNoticeBody(data: NoticeLetterData): string[] {
         : basis === 'payment_in_lieu'
           ? 'In lieu of the applicable notice period, a payment in lieu of notice will be made to you as per your employment contract.'
           : 'You are required to serve the applicable notice period as per your employment contract.';
-      const company = data.employee.company_name?.trim() || 'the Company';
+      // the issuing company from the Site Settings (the employee's stored
+      // company is the secondary fallback); "the Company" when neither is set
+      const named = (data.companyName ?? data.employee.company_name)?.trim();
+      const employer = named || 'the Company';
       return [
         `${salutation(data.employee)}`,
-        `We regret to inform you that your employment with ${company} is hereby terminated, effective `
+        `We regret to inform you that your employment with ${employer} is hereby terminated, effective `
         + `${fmtDay(data.effectiveDate)}, for the following reason: ${data.reason.trim()}`,
         basisText,
         'Your final settlement, including any dues and end-of-service benefits, will be processed in '
@@ -177,7 +193,7 @@ export function sanitizeWhatsAppNumber(phone: string | null | undefined): string
 export function buildNoticeWhatsAppText(data: NoticeLetterData): string {
   const clip = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
   const lines = [
-    `*PULSE WORKFORCE OS — ${noticeTitle(data.kind)}*`,
+    `*${noticeCompanyHeading(data.companyName ?? data.employee.company_name)} — ${noticeTitle(data.kind)}*`,
     `To: ${data.employee.full_name} (${data.employee.employee_code})`,
     `Ref: ${noticeRef(data.kind, data.recordId)} · ${fmtDay(data.createdAt)}`,
   ];

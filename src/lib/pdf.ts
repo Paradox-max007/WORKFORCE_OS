@@ -8,6 +8,7 @@ import {
   TERMINATION_BASIS_LABELS,
   buildNoticeBody,
   buildNoticeWhatsAppText,
+  noticeCompanyHeading,
   noticeCreatorLine,
   noticePdfFilename,
   noticeRef,
@@ -15,6 +16,7 @@ import {
   sanitizeWhatsAppNumber,
   type NoticeLetterData,
 } from '@/lib/notices';
+import { useSettingsStore } from '@/store/settings-store';
 
 const BRAND = 'PULSE WORKFORCE OS';
 const BRAND_SHORT = 'PULSE Workforce';
@@ -370,7 +372,19 @@ export function printElement(el: HTMLElement): void {
 // One generator for all three documents issued from the Notifications Hub:
 // full employee details, type-specific notice details, the formal letter body
 // (custom body wins) and the creator identification (user name / System).
-export function generateNoticePdf(data: NoticeLetterData): jsPDF {
+// The LETTERHEAD is the company name set in the Site Settings.
+
+/** The notice data with the issuing company resolved: the explicit value wins,
+ *  otherwise the Site Settings company name (org-wide branding) fills in. */
+function withSettingsCompany(data: NoticeLetterData): NoticeLetterData {
+  if (data.companyName?.trim()) return data;
+  const fromSettings = useSettingsStore.getState().settings.company_name;
+  return fromSettings?.trim() ? { ...data, companyName: fromSettings } : data;
+}
+
+export function generateNoticePdf(raw: NoticeLetterData): jsPDF {
+  const data = withSettingsCompany(raw);
+  const heading = noticeCompanyHeading(data.companyName);
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -384,11 +398,11 @@ export function generateNoticePdf(data: NoticeLetterData): jsPDF {
     }
   };
 
-  // ---- header -------------------------------------------------------------
+  // ---- header — the company name from the Site Settings ---------------------
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
+  doc.setFontSize(heading.length > 40 ? 11 : heading.length > 28 ? 13 : 16);
   doc.setTextColor(...INK);
-  doc.text('PULSE WORKFORCE OS LLC.', pageW / 2, y, { align: 'center' });
+  doc.text(heading, pageW / 2, y, { align: 'center' });
   y += 5;
   doc.setDrawColor(...BRAND_COLOR);
   doc.setLineWidth(0.8);
@@ -435,7 +449,6 @@ export function generateNoticePdf(data: NoticeLetterData): jsPDF {
     ['Nationality', emp.nationality ?? '—'],
     ['Date of Birth', emp.date_of_birth ?? '—'],
     ['Phone', emp.phone ?? '—'],
-    ['Position', emp.position ?? '—'],
     ['Trade', emp.trade_name ?? '—'],
     ['Company', emp.company_name ?? '—'],
   ];
@@ -447,7 +460,6 @@ export function generateNoticePdf(data: NoticeLetterData): jsPDF {
     ['Passport No.', emp.passport_number ?? '—'],
     ['ID / Iqama No.', emp.id_number ?? '—'],
     ['Employment Status', emp.status === 'active' ? 'Active' : emp.status === 'pending_deletion' ? 'Pending Deletion' : 'Deleted'],
-    ['Performance Rating', `${emp.rating.toFixed(1)} / 5.0`],
   ];
   section('EMPLOYEE INFORMATION');
   const col2X = pageW / 2 + 4;
@@ -548,7 +560,8 @@ export function openNoticeWhatsAppMessage(phoneDigitsOrRaw: string, text: string
 }
 
 /** Share the letter PDF through WhatsApp (Web Share API, download fallback). */
-export async function shareNoticePdfViaWhatsApp(data: NoticeLetterData): Promise<void> {
+export async function shareNoticePdfViaWhatsApp(raw: NoticeLetterData): Promise<void> {
+  const data = withSettingsCompany(raw);
   const doc = generateNoticePdf(data);
   const blob = doc.output('blob');
   const file = new File([blob], noticePdfFilename(data), { type: 'application/pdf' });

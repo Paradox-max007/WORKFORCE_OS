@@ -428,10 +428,11 @@ alter table public.site_transfer       enable row level security;
 alter table public.branch              enable row level security;
 alter table public.admin_branch        enable row level security;
 
--- profiles: read self, super admins read all
+-- profiles: every admin (admin / super_admin) reads the directory — powers the
+-- Sites attendance-marker picker (20261118c_profiles_staff_read.sql)
 drop policy if exists profiles_select on public.profiles;
 create policy profiles_select on public.profiles
-  for select using (id = auth.uid() or public.is_super_admin());
+  for select using (public.is_staff());
 
 -- menu permissions: read self, super admins read all
 drop policy if exists menu_perm_select on public.menu_permission;

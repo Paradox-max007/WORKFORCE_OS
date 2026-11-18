@@ -23,6 +23,7 @@ import {
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { EmployeeCombobox } from '@/components/shared/employee-combobox';
+import { AdminCombobox } from '@/components/shared/admin-combobox';
 import {
   EmptyState, EmployeeStatusBadge, PageHeader, RatingStars, SectionTitle,
 } from '@/components/shared/primitives';
@@ -49,7 +50,7 @@ import { fmtDate, initials } from '@/lib/format';
 import { gridCellKeyDown, type GridNavConfig } from '@/lib/grid-nav';
 import { exportElementToPdf, printElement } from '@/lib/pdf';
 import { cn } from '@/lib/utils';
-import type { BranchWithCount, EmployeeInput, EmployeeVM, SiteWithCount } from '@/lib/types';
+import type { BranchWithCount, EmployeeInput, EmployeeVM, Profile, SiteWithCount } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
 import { useSettingsStore } from '@/store/settings-store';
@@ -1109,8 +1110,12 @@ function SiteFormDialog({
   const [supervisor, setSupervisor] = useState('');
   const [branchId, setBranchId] = useState<string>('__none__');
   const [busy, setBusy] = useState(false);
+  // admin directory for the attendance-marker picker (all admins + super
+  // admins). null = still loading — fetched fresh every time the dialog opens.
+  const [admins, setAdmins] = useState<Profile[] | null>(null);
+  const [adminsFailed, setAdminsFailed] = useState(false);
 
-  // Reset the form every time the dialog opens
+  // Reset the form (and pull the admin directory) every time the dialog opens
   useEffect(() => {
     if (open) {
       setName(editing?.name ?? '');
@@ -1119,6 +1124,14 @@ function SiteFormDialog({
       setSupervisor(editing?.supervisor ?? '');
       setBranchId(editing?.branch_id ?? '__none__');
       setBusy(false);
+      setAdmins(null);
+      setAdminsFailed(false);
+      dataApi.listProfiles()
+        .then((ps) => setAdmins(ps))
+        .catch(() => {
+          setAdmins([]);
+          setAdminsFailed(true);
+        });
     }
   }, [open, editing]);
 
@@ -1219,21 +1232,21 @@ function SiteFormDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="site-supervisor">
+            <Label>
               Supervisor <span className="text-muted-foreground/60">(attendance marker)</span>
             </Label>
-            <Input
-              id="site-supervisor"
-              value={supervisor}
-              onChange={(e) => setSupervisor(e.target.value)}
-              placeholder="Who marks this site's attendance? e.g. Ibrahim Khalil"
-              className="h-11"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') submit();
-              }}
+            <AdminCombobox
+              admins={admins ?? []}
+              value={supervisor || null}
+              onChange={(n) => setSupervisor(n ?? '')}
+              placeholder={admins === null ? 'Loading admins…' : "Pick who marks this site's attendance…"}
+              emptyText={adminsFailed ? 'Admin list unavailable — try reopening the form.' : 'No matching admins.'}
+              disabled={admins === null}
             />
             <p className="text-[11px] text-muted-foreground">
-              Shown as “Supervised by” on the site's attendance sheet — powers “View by Supervisors” on the Attendance page. Admins assigned to this site (Admins → Site Access) are listed there too.
+              Search every admin and super admin — shown as “Supervised by” on the site's attendance sheet and
+              grouped in “View by Supervisors” on the Attendance page. Admins assigned to this site (Admins →
+              Site Access) are listed there too.
             </p>
           </div>
           <div className="space-y-2">

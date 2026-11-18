@@ -284,13 +284,14 @@ function FormSection({ icon, title, hint, children, className }: {
 }
 
 // ---------------------------------------------------------------------------
-// One attached-document slot (Passport / Visa / Contract) — upload & auto-fill,
-// preview, replace and remove. Changes are staged; the encrypted vault is
-// written when the employee form saves.
+// One attached-document slot (Passport / Visa / Emirates ID / Contract) —
+// upload & auto-fill, preview, replace and remove. Changes are staged; the
+// encrypted vault is written when the employee form saves.
 // ---------------------------------------------------------------------------
 const DOC_SLOT_META: Record<EmployeeDocKind, { icon: LucideIcon; cls: string }> = {
   passport: { icon: Plane, cls: 'bg-sky-500/10 text-sky-500' },
   visa: { icon: Stamp, cls: 'bg-amber-500/10 text-amber-500' },
+  emirates_id: { icon: IdCard, cls: 'bg-violet-500/10 text-violet-500' },
   contract: { icon: FileSignature, cls: 'bg-emerald-500/10 text-emerald-500' },
 };
 
@@ -486,13 +487,14 @@ export function EmployeeFormPage() {
   const initialPayment = useRef<{ type: PaymentType | null; cardId: string | null }>({ type: null, cardId: null });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // ---- attached document files (passport / visa / contract) ----------------
+  // ---- attached document files (passport / visa / Emirates ID / contract) ---
   // Changes are STAGED here and written to the encrypted vault only when the
   // employee saves — canceling the form leaves the vault untouched.
   const [existingDocs, setExistingDocs] = useState<Partial<Record<EmployeeDocKind, EmployeeDoc>>>({});
   const [docSlots, setDocSlots] = useState<Record<EmployeeDocKind, { file: File | null; remove: boolean }>>({
     passport: { file: null, remove: false },
     visa: { file: null, remove: false },
+    emirates_id: { file: null, remove: false },
     contract: { file: null, remove: false },
   });
   /** the slot currently being read for auto-fill (spinner) */
@@ -591,8 +593,9 @@ export function EmployeeFormPage() {
             trade_id: emp.trade_id ?? null,
             salary_role: emp.salary_role ?? 'standard',
           });
-          // existing encrypted documents (passport / visa / contract) — best
-          // effort: a vault/listing failure just leaves the slots empty
+          // existing encrypted documents (passport / visa / Emirates ID /
+          // contract) — best effort: a vault/listing failure just leaves the
+          // slots empty
           listEmployeeDocs(employeeId)
             .then((docs) => {
               if (cancelled) return;
@@ -792,8 +795,9 @@ export function EmployeeFormPage() {
 
   /** Merge extracted fields into the form — only EMPTY fields are filled so a
    *  re-upload never clobbers what the admin already typed. Returns the labels
-   *  that were actually applied (for the toast + slot chip). */
-  const applyExtractedFields = (fields: ExtractedDocFields): string[] => {
+   *  that were actually applied (for the toast + slot chip). An Emirates ID
+   *  upload drives id_status; other documents drive passport_status. */
+  const applyExtractedFields = (fields: ExtractedDocFields, kind: EmployeeDocKind): string[] => {
     const labels: string[] = [];
     const next = { ...form };
     const put = (key: keyof EmployeeInput, value: string | null, label: string): void => {
@@ -811,9 +815,16 @@ export function EmployeeFormPage() {
     put('position', fields.position, 'position');
     put('join_date', fields.join_date, 'join date');
     const status = passportStatusFromExpiry(fields.passport_expiry);
-    if (status && !next.passport_status) {
-      next.passport_status = status;
-      labels.push('passport status');
+    if (status) {
+      if (kind === 'emirates_id') {
+        if (!next.id_status) {
+          next.id_status = status;
+          labels.push('ID status');
+        }
+      } else if (!next.passport_status) {
+        next.passport_status = status;
+        labels.push('passport status');
+      }
     }
     if (labels.length > 0) setForm(next);
     return labels;
@@ -835,7 +846,7 @@ export function EmployeeFormPage() {
     setDocBusy(kind);
     try {
       const result = await extractDocumentFields(file, docAiOptions(), await aiProxyHeaders());
-      const labels = applyExtractedFields(result.fields);
+      const labels = applyExtractedFields(result.fields, kind);
       setDocFilled((f) => ({ ...f, [kind]: labels }));
       if (labels.length > 0) {
         toast.success(`${docKindLabel(kind)} attached — auto-filled ${labels.join(', ')}`, {
@@ -989,7 +1000,7 @@ export function EmployeeFormPage() {
         if (paymentChanged) {
           await dataApi.setEmployeePaymentMethod(employeeId, paymentType, nextCardId);
         }
-        // staged passport / visa / contract files → encrypted vault
+        // staged passport / visa / Emirates ID / contract files → encrypted vault
         await applyDocChanges(employeeId);
         toast.success('Employee updated', {
           description: `${updated.full_name} saved.${paymentChanged ? ' Payment method updated.' : ''}`,
@@ -1009,7 +1020,7 @@ export function EmployeeFormPage() {
             });
           }
         }
-        // uploaded passport / visa / contract files → encrypted vault
+        // uploaded passport / visa / Emirates ID / contract files → encrypted vault
         await applyDocChanges(created.id);
         toast.success('Employee created', { description: `${created.full_name} — ID ${created.employee_code}` });
         // fresh employee → straight to the Employee Management page
@@ -1504,9 +1515,10 @@ export function EmployeeFormPage() {
               </div>
 
               {/* ---- attached document FILES (encrypted vault + auto-fill) ----
-                  Upload the passport / visa / contract BEFORE filling the form:
-                  recognised fields auto-fill, the admin completes the rest, and
-                  the files are stored AES-encrypted on save. */}
+                  Upload the passport / visa / Emirates ID / contract BEFORE
+                  filling the form: recognised fields auto-fill, the admin
+                  completes the rest, and the files are stored AES-encrypted on
+                  save. */}
               <div className="mt-5 rounded-xl border border-brand/15 bg-brand/[0.03] p-3.5">
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                   <Upload size={13} className="text-brand" /> Attach &amp; auto-fill from documents

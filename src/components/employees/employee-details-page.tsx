@@ -13,7 +13,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
   ChevronRight, Clock3, CreditCard, Crown, Eye, FileDown, FileSignature, FileText,
-  Loader2, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
+  Loader2, IdCard, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
   TriangleAlert, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -223,13 +223,14 @@ function InfoCard({ index, icon, title, sub, children }: {
 }
 
 // ---------------------------------------------------------------------------
-// Attached documents — the encrypted passport / visa / contract files uploaded
-// on the Add/Edit form. Preview opens the decrypted file in the in-app viewer;
-// Print decrypts and sends it straight to the printer.
+// Attached documents — the encrypted passport / visa / Emirates ID / contract
+// files uploaded on the Add/Edit form. Preview opens the decrypted file in the
+// in-app viewer; Print decrypts and sends it straight to the printer.
 // ---------------------------------------------------------------------------
 const ATTACHED_DOC_META: Record<EmployeeDocKind, { icon: LucideIcon; cls: string }> = {
   passport: { icon: Plane, cls: 'bg-sky-500/10 text-sky-500' },
   visa: { icon: Stamp, cls: 'bg-amber-500/10 text-amber-500' },
+  emirates_id: { icon: IdCard, cls: 'bg-violet-500/10 text-violet-500' },
   contract: { icon: FileSignature, cls: 'bg-emerald-500/10 text-emerald-500' },
 };
 
@@ -252,7 +253,7 @@ function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index }: {
       index={index}
       icon={<FileText size={16} />}
       title="Attached Documents"
-      sub="Passport / visa / contract — stored encrypted (AES-256)"
+      sub="Passport / visa / Emirates ID / contract — stored encrypted (AES-256)"
     >
       <div className="space-y-2.5 sm:col-span-2">
         {docs === null ? (
@@ -1146,7 +1147,7 @@ export function EmployeeDetailsPage() {
   // Notices & fines card — the employee's warnings + fines, newest first
   const [notices, setNotices] = useState<NoticeItem[] | null>(null);
 
-  // attached encrypted documents (passport / visa / contract)
+  // attached encrypted documents (passport / visa / Emirates ID / contract)
   const [empDocs, setEmpDocs] = useState<EmployeeDoc[] | null>(null);
   const [docBusyKind, setDocBusyKind] = useState<string | null>(null);
   const [docPreview, setDocPreview] = useState<{ name: string; ext: string; url: string } | null>(null);
@@ -1179,7 +1180,7 @@ export function EmployeeDetailsPage() {
     return () => { cancelled = true; };
   }, [selectedEmployeeId, realtimeVersion]);
 
-  // ---- attached encrypted documents (passport / visa / contract) ----------
+  // ---- attached encrypted documents (passport / visa / Emirates ID / contract) ----
   useEffect(() => {
     const employeeId = selectedEmployeeId;
     if (!employeeId) return;
@@ -1514,7 +1515,7 @@ export function EmployeeDetailsPage() {
             />
           </InfoCard>
 
-          {/* encrypted passport / visa / contract files — preview & print */}
+          {/* encrypted passport / visa / Emirates ID / contract files — preview & print */}
           <AttachedDocsCard
             index={3}
             docs={empDocs}

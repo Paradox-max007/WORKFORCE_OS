@@ -1,14 +1,14 @@
 // ============================================================================
 // PULSE Workforce OS — Document field extraction (Add Employee auto-fill)
 // ----------------------------------------------------------------------------
-// Turns an uploaded passport / visa / contract file (PDF or image) into form
-// fields, powering "upload → automatically fill → complete the rest" on the
-// Add/Edit Employee page.
+// Turns an uploaded passport / visa / Emirates ID / contract file (PDF or
+// image) into form fields, powering "upload → automatically fill → complete
+// the rest" on the Add/Edit Employee page.
 //
 // Pipeline per file type:
 //   PDF   → local text extraction (pdf.js text layer, 1–3 pages)
-//         → MRZ parse (machine-readable zone, TD3 passports / TD1 visas) —
-//           deterministic, works fully offline
+//         → MRZ parse (machine-readable zone, TD3 passports / TD1 visas &
+//           UAE Emirates ID cards) — deterministic, works fully offline
 //         → + AI polish when the org configured an AI connection
 //           (Site Settings → AI Bot): the raw text goes to the model with a
 //           strict "reply ONLY JSON" prompt
@@ -187,7 +187,7 @@ async function extractPdfText(file: File, maxPages = 3): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// MRZ parsing (TD3 passport, TD1 visa) — deterministic, offline
+// MRZ parsing (TD3 passport, TD1 visa / ID card) — deterministic, offline
 // ---------------------------------------------------------------------------
 interface MrzFields {
   full_name: string | null;
@@ -199,6 +199,24 @@ interface MrzFields {
 }
 
 const mrzLine = (s: string): string => s.replace(/\s/g, '').toUpperCase();
+
+/** UAE Emirates ID number: 784 + birth year + 7 digits + check digit (15
+ *  digits, printed 784-YYYY-NNNNNNN-C). Normalised to the dashed form. */
+export function normaliseEmiratesId(input: unknown): string | null {
+  const s = clean(input);
+  if (!s) return null;
+  const digits = s.replace(/[^0-9]/g, '');
+  if (digits.length !== 15 || !digits.startsWith('784')) return null;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7, 14)}-${digits.slice(14)}`;
+}
+
+/** Sweep raw document text for a printed Emirates ID number (labelled or
+ *  not) — UAE IDs always start with 784. */
+function emiratesIdFromText(text: string): string | null {
+  const m = /\b784[-\s–]?\d{4}[-\s–]?\d{7}[-\s–]?\d\b/.exec(text)
+    ?? /\b(784\d{12})\b/.exec(text);
+  return m ? normaliseEmiratesId(m[0] ?? m[1]) : null;
+}
 
 /** TD3 (passport): two 44-char lines. */
 function parseTd3(l1: string, l2: string): MrzFields | null {
@@ -218,19 +236,24 @@ function parseTd3(l1: string, l2: string): MrzFields | null {
   };
 }
 
-/** TD1 (visa / ID card): three 30-char lines. */
+/** TD1 (visa / ID card): three 30-char lines. Doc codes "I<" / "ID<" (ID
+ *  cards incl. the UAE Emirates ID), "A<"/"AC<" (visas), "V<". */
 function parseTd1(l1: string, l2: string, l3: string): MrzFields | null {
-  if (!/^[ACI][A-Z]</.test(l1) || l2.length < 28) return null;
+  if (!/^[ACIV][A-Z0-9]?</.test(l1) || l2.length < 28) return null;
   const namePart = l3;
   const [surname, given] = namePart.split('<<');
   const pretty = (s: string): string => s.replace(/</g, ' ').replace(/\s+/g, ' ').trim();
+  // UAE Emirates ID: line 1 = I<ARE + the 15-digit ID (784-YYYY-NNNNNNN-C)
+  // laid across the standard document-number + optional fields — read it as a
+  // whole instead of the generic slices.
+  const eid = /^I<?[A-Z]{3}(784\d{12})/.exec(l1) ? normaliseEmiratesId(l1.slice(5, 20)) : null;
   return {
     full_name: [pretty(given ?? ''), pretty(surname ?? '')].filter(Boolean).join(' ') || null,
     nationality: normaliseNationality(l2.slice(15, 18)) ?? null,
     date_of_birth: mrzDate(l2.slice(0, 2), l2.slice(2, 4), l2.slice(4, 6)) ?? null,
-    passport_number: l1.slice(5, 14).replace(/</g, '') || null,
+    passport_number: eid ? null : (l1.slice(5, 14).replace(/</g, '') || null),
     passport_expiry: mrzDate(l2.slice(8, 10), l2.slice(10, 12), l2.slice(12, 14), true) ?? null,
-    id_number: l1.slice(15, 30).replace(/</g, '') || null,
+    id_number: eid ?? (l1.slice(15, 30).replace(/</g, '') || null),
   };
 }
 
@@ -287,8 +310,9 @@ function parseLabeledText(text: string): Partial<ExtractedDocFields> {
   if (pos) out.position = pos.replace(/\s+/g, ' ');
   const joined = grab(['start date', 'joining date', 'join date', 'commencement date', 'employment date']);
   if (joined) out.join_date = normaliseDate(joined);
-  const idn = grab(['id no', 'id number', 'emirates id', 'identity no', 'unified no']);
+  const idn = grab(['emirates id', 'id no', 'id number', 'identity no', 'unified no']);
   if (idn) out.id_number = idn.toUpperCase().replace(/[^A-Z0-9/-]/g, '');
+  if (!out.id_number) out.id_number = emiratesIdFromText(text);
   return out;
 }
 
@@ -296,10 +320,11 @@ function parseLabeledText(text: string): Partial<ExtractedDocFields> {
 // AI round (text or vision) through the same /api/ai proxy Pebby uses
 // ---------------------------------------------------------------------------
 const EXTRACT_SYSTEM_PROMPT = [
-  'You extract structured fields from workforce identity documents (passports, visas / residence permits, employment contracts).',
+  'You extract structured fields from workforce identity documents (passports, visas / residence permits, UAE Emirates ID cards, employment contracts).',
   'Reply with ONLY a minified JSON object, no markdown, no explanations, with exactly these keys:',
   'full_name, nationality, date_of_birth, passport_number, passport_expiry, id_number, position, join_date.',
   'Rules: dates as YYYY-MM-DD; nationality as the country name in English; position = job title/occupation as printed;',
+  'id_number = the Emirates ID number when the document is an Emirates ID card or shows one (784-YYYY-NNNNNNN-C, keep the dashes);',
   'join_date = contract start date when the document is a contract.',
   'Use null for EVERY value you cannot read confidently. NEVER invent or guess values.',
 ].join(' ');
@@ -319,7 +344,7 @@ function parseModelJson(reply: string): Partial<ExtractedDocFields> | null {
       date_of_birth: normaliseDate(raw.date_of_birth),
       passport_number: clean(raw.passport_number)?.toUpperCase().replace(/[^A-Z0-9/-]/g, '') ?? null,
       passport_expiry: normaliseDate(raw.passport_expiry),
-      id_number: clean(raw.id_number)?.toUpperCase().replace(/[^A-Z0-9/-]/g, '') ?? null,
+      id_number: normaliseEmiratesId(raw.id_number) ?? (clean(raw.id_number)?.toUpperCase().replace(/[^A-Z0-9/-]/g, '') ?? null),
       position: clean(raw.position),
       join_date: normaliseDate(raw.join_date),
     };

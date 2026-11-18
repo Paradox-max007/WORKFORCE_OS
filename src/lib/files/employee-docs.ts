@@ -1,12 +1,14 @@
 // ============================================================================
-// PULSE Workforce OS — Employee documents (Passport / Visa / Contract) vault
+// PULSE Workforce OS — Employee documents (Passport / Visa / Emirates ID /
+// Contract) vault
 // ----------------------------------------------------------------------------
 // Per-employee identity documents attached on the Add/Edit Employee form and
 // shown (preview / print / replace / delete) on the Employee Details page.
 //
-//   passport  — passport scan (PDF or image)
-//   visa      — visa / residence permit scan
-//   contract  — employment contract scan
+//   passport    — passport scan (PDF or image)
+//   visa        — visa / residence permit scan
+//   emirates_id — UAE Emirates ID card scan
+//   contract    — employment contract scan
 //
 // SECURITY: every file is encrypted in the BROWSER with AES-256-GCM before it
 // is written to storage, and decrypted only in memory for preview/print:
@@ -29,7 +31,7 @@
 import { isDemoMode } from '@/lib/data';
 import { supabase } from '@/lib/supabase/client';
 
-export type EmployeeDocKind = 'passport' | 'visa' | 'contract';
+export type EmployeeDocKind = 'passport' | 'visa' | 'emirates_id' | 'contract';
 
 export interface EmployeeDoc {
   employeeId: string;
@@ -57,6 +59,7 @@ export const EMPLOYEE_DOC_KINDS: {
 }[] = [
   { kind: 'passport', label: 'Passport', hint: 'Passport scan — auto-fills name, nationality, DOB & passport number' },
   { kind: 'visa', label: 'Visa / Permit', hint: 'Visa or residence permit — auto-fills position & nationality' },
+  { kind: 'emirates_id', label: 'Emirates ID', hint: 'UAE Emirates ID card — auto-fills name, DOB & ID number' },
   { kind: 'contract', label: 'Contract', hint: 'Employment contract — auto-fills position & join date' },
 ];
 
@@ -278,6 +281,7 @@ async function demoStaleKeys(employeeId: string, kind: EmployeeDocKind, keepKey:
 const kindFromFileName = (name: string): EmployeeDocKind | null => {
   if (name.startsWith('passport.')) return 'passport';
   if (name.startsWith('visa.')) return 'visa';
+  if (name.startsWith('emirates_id.')) return 'emirates_id';
   if (name.startsWith('contract.')) return 'contract';
   return null;
 };

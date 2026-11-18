@@ -1,5 +1,6 @@
 -- ============================================================================
--- PULSE Workforce OS — Employee documents vault (passport / visa / contract)
+-- PULSE Workforce OS — Employee documents vault (passport / visa / Emirates
+-- ID / contract)
 -- ----------------------------------------------------------------------------
 -- Encrypted per-employee document storage for the Add/Edit Employee form and
 -- the Employee Details page.

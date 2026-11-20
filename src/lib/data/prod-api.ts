@@ -706,12 +706,14 @@ export const prodApi = {
     return (data ?? []) as SiteTransfer[];
   },
 
-  /** Cancelled employees (approved Cancellation Requests) — the Employees
-   *  page "Cancelled" status filter. All past records remain available. */
+  /** Archived employees — the Employees page "Cancelled / Deleted" status
+   *  filter: CANCELLED ones (approved Cancellation Requests) plus SOFT-DELETED
+   *  ones (super-admin delete never removes rows, it only hides them).
+   *  All past records remain available and restorable. */
   async listCancelledEmployees(): Promise<EmployeeVM[]> {
     const { data, error } = await sb().from('employee')
       .select('*, site:current_site_id(name, branch:branch_id(name)), leader_site:team_leader_site_id(name), camp:camp_id(name), trade:trade_id(name), card_type:card_type_id(name)')
-      .eq('status', 'cancelled')
+      .in('status', ['cancelled', 'deleted'])
       .order('updated_at', { ascending: false });
     assertOk(error);
     return ((data ?? []) as unknown as {
@@ -729,8 +731,10 @@ export const prodApi = {
     }));
   },
 
-  /** Super admin brings a cancelled employee back to the active roster
-   *  (restore_employee RPC — 20261115 migration). */
+  /** Super admin brings an archived employee back to the active roster
+   *  (restore_employee RPC — cancelled AND soft-deleted employees; the
+   *  20261120 migration made restore unhide the records a soft delete
+   *  hid). */
   async restoreEmployee(id: string): Promise<void> {
     const { error } = await sb().rpc('restore_employee', { p_id: id });
     assertOk(error);
@@ -815,6 +819,9 @@ export const prodApi = {
   },
 
   async deleteEmployeeCascade(id: string): Promise<void> {
+    // SOFT delete — the delete_employee_cascade RPC never removes a row:
+    // the employee gets status 'deleted' and related records are hidden;
+    // restore_employee (cancelled or deleted) brings everything back.
     const { error } = await sb().rpc('delete_employee_cascade', { p_id: id });
     assertOk(error);
   },

@@ -906,32 +906,49 @@ export const demoApi = {
 
   // ---- employees ---------------------------------------------------------------
   /** The WORKING roster — active + pending-deletion employees. Cancelled
-   *  employees are archived (listCancelledEmployees) and deleted ones are
-   *  gone; both keep their records for future reference. */
+   *  and soft-deleted employees are archived (listCancelledEmployees);
+   *  deleted rows are only HIDDEN, never removed, so both stay available
+   *  for future reference. */
   async listEmployees(): Promise<EmployeeVM[]> {
     return db.employees.filter(isRosterEmployee).map(attachEmployeeVM);
   },
 
-  /** Cancelled employees (approved Cancellation Requests) — listed on the
-   *  Employees page via the "Cancelled" status filter. All past records
-   *  (attendance, salary, advances, uniforms…) remain available. */
+  /** Archived employees — the Employees page "Cancelled / Deleted" status
+   *  filter. CANCELLED ones arrive via approved Cancellation Requests;
+   *  DELETED ones via the super-admin delete (a SOFT delete — every past
+   *  record stays in the store, only hidden). A super admin can restore
+   * either kind. */
   async listCancelledEmployees(): Promise<EmployeeVM[]> {
     return db.employees
-      .filter((e) => e.status === 'cancelled')
+      .filter((e) => e.status === 'cancelled' || e.status === 'deleted')
       .map(attachEmployeeVM)
       .sort((a, b) => (b.updated_at ?? b.created_at).localeCompare(a.updated_at ?? a.created_at));
   },
 
-  /** Super admin brings a cancelled employee back to the active roster. */
+  /** Super admin brings an archived employee back to the active roster —
+   *  works for CANCELLED and soft-DELETED employees alike. A soft delete
+   *  only hid the employee's records, so restoring one unhides every
+   *  record again (attendance, warnings, fines, leaves, uniforms…). */
   async restoreEmployee(id: string): Promise<void> {
     const me = currentProfile();
-    if (me?.role !== 'super_admin') throw new Error('Only super admins can restore cancelled employees');
+    if (me?.role !== 'super_admin') throw new Error('Only super admins can restore archived employees');
     const e = db.employees.find((x) => x.id === id);
     if (!e) throw new Error('Employee not found');
-    if (e.status !== 'cancelled') throw new Error('Only cancelled employees can be restored');
+    if (e.status !== 'cancelled' && e.status !== 'deleted') {
+      throw new Error('Only cancelled or deleted employees can be restored');
+    }
+    if (e.status === 'deleted') {
+      // the soft delete only flagged rows hidden — bring every past record back
+      db.attendance.filter((a) => a.employee_id === id).forEach((a) => { a.is_hidden = false; });
+      db.warnings.filter((w) => w.employee_id === id).forEach((w) => { w.is_hidden = false; });
+      db.fines.filter((f) => f.employee_id === id).forEach((f) => { f.is_hidden = false; });
+      db.leaveRequests.filter((r) => r.employee_id === id).forEach((r) => { r.is_hidden = false; });
+      db.cancellationRequests.filter((r) => r.employee_id === id).forEach((r) => { r.is_hidden = false; });
+      db.uniforms.filter((u) => u.employee_id === id).forEach((u) => { u.is_deleted = false; u.is_hidden = false; });
+    }
     e.status = 'active';
     e.updated_at = nowISO();
-    saveAndEmit(['employee']);
+    saveAndEmit(['employee', 'attendance', 'warning', 'fine', 'leave_request', 'cancellation_request', 'uniform_registry']);
   },
 
   async listSiteTransfers(): Promise<SiteTransfer[]> {
@@ -1201,6 +1218,11 @@ export const demoApi = {
   },
 
   async deleteEmployeeCascade(id: string): Promise<void> {
+    // SOFT DELETE ONLY — no row is ever removed from the store: the employee
+    // leaves the working roster (status 'deleted') and their related records
+    // are merely HIDDEN. listCancelledEmployees surfaces them under the
+    // "Cancelled / Deleted" filter and restoreEmployee brings everything
+    // back (records included).
     const e = db.employees.find((x) => x.id === id);
     if (!e) throw new Error('Employee not found');
     if (e.status === 'pending_deletion') throw new Error('This employee already has a pending deletion request');

@@ -1190,11 +1190,26 @@ create or replace function public.restore_employee(p_id uuid)
 returns void language plpgsql
 security definer set search_path = public
 as $$
+declare emp public.employee;
 begin
-  if not public.is_super_admin() then raise exception 'Only super admins can restore cancelled employees'; end if;
-  if not exists (select 1 from public.employee where id = p_id and status = 'cancelled') then
-    raise exception 'Only cancelled employees can be restored';
+  if not public.is_super_admin() then raise exception 'Only super admins can restore archived employees'; end if;
+  select * into emp from public.employee where id = p_id;
+  if emp.id is null then raise exception 'Employee not found'; end if;
+  if emp.status not in ('cancelled', 'deleted') then
+    raise exception 'Only cancelled or deleted employees can be restored';
   end if;
+
+  -- a soft delete only HID the employee's records — restoring one brings
+  -- every hidden row back (attendance, warnings, fines, leaves, uniforms…)
+  if emp.status = 'deleted' then
+    update public.attendance           set is_hidden = false where employee_id = p_id;
+    update public.warning              set is_hidden = false where employee_id = p_id;
+    update public.fine                 set is_hidden = false where employee_id = p_id;
+    update public.leave_request        set is_hidden = false where employee_id = p_id;
+    update public.cancellation_request set is_hidden = false where employee_id = p_id;
+    update public.uniform_registry     set is_deleted = false, is_hidden = false where employee_id = p_id;
+  end if;
+
   update public.employee set status = 'active' where id = p_id;
 end; $$;
 

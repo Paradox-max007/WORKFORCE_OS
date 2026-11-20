@@ -14,7 +14,7 @@ import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
   ChevronRight, Clock3, CreditCard, Crown, Eye, FileDown, FileSignature, FileText,
   Loader2, IdCard, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
-  TriangleAlert, UserRound, X, type LucideIcon,
+  Trash2, TriangleAlert, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -34,6 +34,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Textarea } from '@/components/ui/textarea';
 import { EmployeeDocViewer } from '@/components/employees/employee-doc-viewer';
 import { dataApi } from '@/lib/data';
 import {
@@ -255,9 +256,11 @@ function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index }: {
       title="Attached Documents"
       sub="Passport / visa / Emirates ID / contract — stored encrypted (AES-256)"
     >
-      <div className="space-y-2.5 sm:col-span-2">
+      {/* full-width strip — two document slots per row so all four stay
+          visible at a glance instead of one long single-column stack */}
+      <div className="grid gap-2.5 sm:col-span-2 sm:grid-cols-2">
         {docs === null ? (
-          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+          <p className="flex items-center gap-2 text-sm text-muted-foreground sm:col-span-2">
             <Loader2 size={14} className="animate-spin" /> Loading documents…
           </p>
         ) : (
@@ -309,7 +312,7 @@ function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index }: {
             );
           })
         )}
-        <p className="text-[11px] leading-tight text-muted-foreground">
+        <p className="text-[11px] leading-tight text-muted-foreground sm:col-span-2">
           To upload, replace or delete a document use the <Pencil size={11} className="inline" aria-hidden /> Edit button
           at the top of this profile — changes are saved with the employee.
         </p>
@@ -1119,9 +1122,18 @@ export function EmployeeDetailsPage() {
 
   const [emp, setEmp] = useState<EmployeeVM | null>(null);
   const [loading, setLoading] = useState(true);
-  // super-admin restore of a cancelled employee (archived, records kept)
+  // super-admin restore of an archived employee (cancelled or soft-deleted;
+  // records are kept — a soft delete only hides them)
   const [restoreTarget, setRestoreTarget] = useState<EmployeeVM | null>(null);
   const [restoring, setRestoring] = useState(false);
+
+  // delete lives HERE (not on the list): super admins soft-delete directly,
+  // normal admins file a deletion request for review
+  const [deleteTarget, setDeleteTarget] = useState<EmployeeVM | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [requestDeleteTarget, setRequestDeleteTarget] = useState<EmployeeVM | null>(null);
+  const [requestReason, setRequestReason] = useState('');
+  const [requesting, setRequesting] = useState(false);
 
   const initialPoint = currentMonthPoint();
   const [trYear, setTrYear] = useState(initialPoint.y);
@@ -1433,9 +1445,11 @@ export function EmployeeDetailsPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2 lg:flex-col lg:items-stretch xl:flex-row xl:items-center">
-            {emp.status === 'cancelled' ? (
-              // archived — restore instead of edit (super admin only); the
-              // profile + every record below stays fully readable
+            {(emp.status === 'cancelled' || emp.status === 'deleted') ? (
+              // archived (cancelled or soft-deleted) — restore instead of edit
+              // (super admin only); the profile + every record below stays
+              // fully readable, and a soft-deleted employee's records were
+              // only HIDDEN — restore brings every one of them back
               isSuperAdmin && (
                 <Button
                   variant="outline" size="sm"
@@ -1472,6 +1486,30 @@ export function EmployeeDetailsPage() {
             >
               <MessageCircle size={14} /> Share via WhatsApp
             </Button>
+            {/* delete lives HERE on the details page (hidden once archived or
+                while a deletion request is already pending): super admins
+                soft-delete directly, normal admins file a request for review */}
+            {emp.status !== 'cancelled' && emp.status !== 'deleted' && emp.status !== 'pending_deletion' && (
+              isSuperAdmin ? (
+                <Button
+                  variant="outline" size="sm"
+                  onClick={() => setDeleteTarget(emp)}
+                  aria-label={`Delete ${emp.full_name}`}
+                  className="border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-600 dark:text-rose-400"
+                >
+                  <Trash2 size={14} /> Delete
+                </Button>
+              ) : (
+                <Button
+                  variant="outline" size="sm"
+                  onClick={() => { setRequestDeleteTarget(emp); setRequestReason(''); }}
+                  aria-label={`Request deletion of ${emp.full_name}`}
+                  className="border-rose-500/40 text-rose-600 hover:bg-rose-500/10 hover:text-rose-600 dark:text-rose-400"
+                >
+                  <Trash2 size={14} /> Request Deletion
+                </Button>
+              )
+            )}
           </div>
         </div>
       </section>
@@ -1514,20 +1552,11 @@ export function EmployeeDetailsPage() {
               onSaved={(patch) => setEmp((prev) => (prev ? { ...prev, ...patch } : prev))}
             />
           </InfoCard>
-
-          {/* encrypted passport / visa / Emirates ID / contract files — preview & print */}
-          <AttachedDocsCard
-            index={3}
-            docs={empDocs}
-            busyKind={docBusyKind}
-            onOpen={(doc) => void openAttachedDoc(doc)}
-            onPrint={(doc) => void printAttachedDoc(doc)}
-          />
         </div>
 
         {/* ---- right column: professional stack ---- */}
         <div className="space-y-4">
-        <InfoCard index={4} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
+        <InfoCard index={3} icon={<Briefcase size={16} />} title="Professional Information" sub="Employment & assignment">
           <div className="sm:col-span-2">
             <InfoRow
               label="Total Hours"
@@ -1687,7 +1716,7 @@ export function EmployeeDetailsPage() {
 
         </InfoCard>
 
-          <InfoCard index={5} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
+          <InfoCard index={4} icon={<Clock3 size={16} />} title="Record Information" sub="Audit metadata">
             <InfoRow label="Employee Code" value={emp.employee_code} mono />
             <InfoRow label="Performance Rating" value={<RatingStars rating={emp.rating} size={13} />} />
             <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
@@ -1695,6 +1724,17 @@ export function EmployeeDetailsPage() {
           </InfoCard>
         </div>
       </div>
+
+      {/* encrypted passport / visa / Emirates ID / contract files — FULL-WIDTH
+          strip below the two info columns: two document slots per row (all
+          four visible at a glance), preview & print */}
+      <AttachedDocsCard
+        index={5}
+        docs={empDocs}
+        busyKind={docBusyKind}
+        onOpen={(doc) => void openAttachedDoc(doc)}
+        onPrint={(doc) => void printAttachedDoc(doc)}
+      />
 
       {/* ============================ Track record ============================ */}
       <section className="card-glow rounded-xl border bg-card p-5 md:p-6">
@@ -1783,7 +1823,9 @@ export function EmployeeDetailsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ====================== Restore cancelled employee ====================== */}
+      {/* ====================== Restore archived employee ======================
+          Works for CANCELLED and SOFT-DELETED employees alike — nothing is
+          ever erased, restore reactivates the profile and unhides records. */}
       <AlertDialog open={!!restoreTarget} onOpenChange={(o) => { if (!o) setRestoreTarget(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1823,6 +1865,101 @@ export function EmployeeDetailsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ====================== Delete employee (super admin — SOFT delete) ======================
+          Nothing is permanently erased: the employee leaves every list and their
+          records are hidden from view, but every row stays in the database and
+          a super admin can restore them from the Employees archive at any time. */}
+      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Employee?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <strong>{deleteTarget?.full_name}</strong> will be removed from every list and their
+              attendance, warnings, fines, requests and uniform records hidden from view. This is a
+              soft delete — <strong>nothing is permanently erased from the database</strong>, and a
+              super admin can restore them later from the Employees page (status filter →
+              Cancelled / Deleted).
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleting}
+              className="bg-rose-600 text-white hover:bg-rose-600/90"
+              onClick={async (ev) => {
+                // keep the dialog open until the API answers (default closes it)
+                ev.preventDefault();
+                if (!deleteTarget) return;
+                setDeleting(true);
+                try {
+                  await dataApi.deleteEmployeeCascade(deleteTarget.id);
+                  toast.success('Employee deleted', {
+                    description: `${deleteTarget.full_name} was removed from view — their records are kept in the database and can be restored.`,
+                  });
+                  setDeleteTarget(null);
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : 'Delete failed');
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+            >
+              {deleting ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ====================== Request deletion (admin) ======================
+          Normal admins never delete directly — their request moves the employee
+          to "Pending Deletion" until a super admin approves or rejects it. */}
+      <Dialog open={!!requestDeleteTarget} onOpenChange={(o) => { if (!o) setRequestDeleteTarget(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Request Employee Deletion</DialogTitle>
+            <DialogDescription>
+              <strong>{requestDeleteTarget?.full_name}</strong> will be marked as “Pending Deletion”
+              until a super admin approves or rejects the request. Nothing is erased — approval
+              archives the employee and every record stays in the database.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Reason</Label>
+            <Textarea
+              value={requestReason}
+              onChange={(e) => setRequestReason(e.target.value)}
+              placeholder="Why should this employee be removed?"
+              rows={3}
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" disabled={requesting} onClick={() => setRequestDeleteTarget(null)}>Cancel</Button>
+            <Button
+              className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90"
+              disabled={requesting}
+              onClick={async () => {
+                if (!requestDeleteTarget) return;
+                setRequesting(true);
+                try {
+                  await dataApi.requestEmployeeDeletion(requestDeleteTarget.id, requestReason.trim() || null);
+                  toast.success('Deletion requested', { description: 'A super admin will review this request.' });
+                  setRequestDeleteTarget(null);
+                  setRequestReason('');
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : 'Request failed');
+                } finally {
+                  setRequesting(false);
+                }
+              }}
+            >
+              {requesting ? <Loader2 size={14} className="mr-1 animate-spin" /> : null}
+              Submit Request
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* decrypted document preview (PDF zoom viewer / image lightbox) */}
       {docPreview && (

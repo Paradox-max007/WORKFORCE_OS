@@ -6,7 +6,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Building2, Crown, FileSpreadsheet, GitBranch, Loader2, MapPin, Pencil, Plus, RotateCcw, Search, Tent, Trash2,
+  Building2, Crown, Eye, FileSpreadsheet, GitBranch, Loader2, MapPin, Plus, RotateCcw, Search, Tent,
   UserRound, UserX, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -14,11 +14,8 @@ import { toast } from 'sonner';
 import { EmptyState, BranchBadge, EmployeeStatusBadge, RatingStars, SiteBadge, SkeletonRows } from '@/components/shared/primitives';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
 import { dataApi } from '@/lib/data';
 import { initials } from '@/lib/format';
 import { NATIONALITY_REGIONS, countriesByRegion } from '@/lib/nationality-groups';
@@ -62,11 +59,8 @@ export function EmployeePage() {
   const [page, setPage] = useState(1);
   const PER_PAGE = 20;
 
-  // delete / request-deletion dialogs (add & edit moved to the dedicated form page)
-  const [deleteTarget, setDeleteTarget] = useState<EmployeeVM | null>(null);
-  const [requestDeleteTarget, setRequestDeleteTarget] = useState<EmployeeVM | null>(null);
-  const [requestReason, setRequestReason] = useState('');
-  // bringing a cancelled employee back to the active roster (super admin)
+  // bringing an archived employee (cancelled or soft-deleted) back to the
+  // active roster (super admin) — edit & delete live on the details page only
   const [restoreTarget, setRestoreTarget] = useState<EmployeeVM | null>(null);
 
   // cross-page filter (e.g. dashboard "Idle" card)
@@ -229,9 +223,9 @@ export function EmployeePage() {
   const pageRows = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
   // ---- actions ---------------------------------------------------------------
-  // add / edit live on the dedicated form page
+  // add lives on the dedicated form page; edit & delete live on the employee
+  // DETAILS page — the list only routes you there
   const openAdd = () => navigateToEmployeeForm('create');
-  const openEdit = (emp: EmployeeVM) => navigateToEmployeeForm('edit', emp.id, 'employees');
 
   const campOptions = useMemo(() => (camps ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)), [camps]);
 
@@ -297,30 +291,6 @@ export function EmployeePage() {
     }, 120);
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    try {
-      await dataApi.deleteEmployeeCascade(deleteTarget.id);
-      toast.success('Employee deleted', { description: `${deleteTarget.full_name} and related records were removed from view.` });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Delete failed');
-    } finally {
-      setDeleteTarget(null);
-    }
-  };
-
-  const confirmRequestDeletion = async () => {
-    if (!requestDeleteTarget) return;
-    try {
-      await dataApi.requestEmployeeDeletion(requestDeleteTarget.id, requestReason.trim() || null);
-      toast.success('Deletion requested', { description: 'A super admin will review this request.' });
-      setRequestDeleteTarget(null);
-      setRequestReason('');
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Request failed');
-    }
-  };
-
   const confirmRestore = async () => {
     if (!restoreTarget) return;
     try {
@@ -343,7 +313,7 @@ export function EmployeePage() {
           <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Employee Management</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {statusFilter === 'cancelled'
-              ? <>Cancelled employees — archived, every past record kept for reference</>
+              ? <>Employee archive — cancelled or deleted staff; every record kept in the database and restorable</>
               : <>{filtered.length} employee{filtered.length !== 1 ? 's' : ''} · full HR profiles, documents and ratings</>}
           </p>
         </motion.div>
@@ -410,7 +380,7 @@ export function EmployeePage() {
             <SelectItem value="working">Currently Working</SelectItem>
             <SelectItem value="idle">Idle (No Site)</SelectItem>
             <SelectItem value="pending_deletion">Pending Deletion</SelectItem>
-            <SelectItem value="cancelled">Cancelled</SelectItem>
+            <SelectItem value="cancelled">Cancelled / Deleted</SelectItem>
           </SelectContent>
         </Select>
         {/* payment method filter (cash / card types from the card_type table) */}
@@ -495,10 +465,10 @@ export function EmployeePage() {
       ) : pageRows.length === 0 ? (
         <EmptyState
           icon={<UserRound size={22} />}
-          title={statusFilter === 'cancelled' ? 'No cancelled employees' : 'No employees found'}
+          title={statusFilter === 'cancelled' ? 'No archived employees' : 'No employees found'}
           description={
             statusFilter === 'cancelled'
-              ? 'Employees land here after a cancellation request is approved. They are never deleted — all past records stay available.'
+              ? 'Employees land here after a cancellation request is approved or a delete removes them from view. Nothing is erased — all records stay in the database and a super admin can restore them.'
               : !viewAllBranches && effectiveSiteIds !== null && effectiveSiteIds.size === 0
               ? 'You have no branch or site access yet — ask a super admin to grant your branches (Admin Management → Manage Permissions → Branch access).'
               : search || statusFilter !== 'all' || branchFilter !== 'all' || siteFilter !== 'all'
@@ -600,28 +570,27 @@ export function EmployeePage() {
                       <td className="px-4 py-3"><RatingStars rating={emp.rating} /></td>
                       <td className="px-4 py-3"><EmployeeStatusBadge status={emp.status} /></td>
                       <td className="px-4 py-3">
-                        <div className="flex items-center justify-end gap-1">
-                          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}>
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                        {/* edit & delete live on the DETAILS page — the list
+                            only routes you there; archived rows (cancelled or
+                            soft-deleted) offer a super-admin Restore */}
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button
+                            size="sm"
+                            className="brand-gradient font-semibold text-white shadow-md shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+                            onClick={() => navigateToEmployeeDetails(emp.id)}
+                            aria-label={`View ${emp.full_name}'s details`}
+                          >
+                            <Eye size={14} /> View
                           </Button>
-                          {emp.status === 'cancelled' ? (
-                            // archived — restore only (super admin); records stay
-                            isSuperAdmin && (
-                              <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-emerald-500/10 hover:text-emerald-500" title="Restore to active" onClick={() => setRestoreTarget(emp)}>
-                                <RotateCcw size={14} />
-                              </Button>
-                            )
-                          ) : (
-                            <>
-                              <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:text-brand" title="Edit" onClick={() => openEdit(emp)}>
-                                <Pencil size={14} />
-                              </Button>
-                              {emp.status !== 'pending_deletion' && (
-                                <Button variant="ghost" size="icon" className="size-8 text-muted-foreground hover:bg-rose-500/10 hover:text-rose-500" title="Delete" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}>
-                                  <Trash2 size={14} />
-                                </Button>
-                              )}
-                            </>
+                          {(emp.status === 'cancelled' || emp.status === 'deleted') && isSuperAdmin && (
+                            <Button
+                              variant="outline" size="sm"
+                              className="h-8 gap-1.5 border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400"
+                              title="Restore to active"
+                              onClick={() => setRestoreTarget(emp)}
+                            >
+                              <RotateCcw size={13} /> Restore
+                            </Button>
                           )}
                         </div>
                       </td>
@@ -678,19 +647,20 @@ export function EmployeePage() {
                       )}
                       <RatingStars rating={emp.rating} size={12} />
                     </div>
-                    <div className="flex gap-1">
-                      <Button variant="outline" size="icon" className="size-8" title="View details" onClick={() => navigateToEmployeeDetails(emp.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></Button>
-                      {emp.status === 'cancelled' ? (
-                        isSuperAdmin && (
-                          <Button variant="outline" size="icon" className="size-8 hover:border-emerald-500/40 hover:text-emerald-500" title="Restore to active" onClick={() => setRestoreTarget(emp)}><RotateCcw size={13} /></Button>
-                        )
-                      ) : (
-                        <>
-                          <Button variant="outline" size="icon" className="size-8" onClick={() => openEdit(emp)}><Pencil size={13} /></Button>
-                          {emp.status !== 'pending_deletion' && (
-                            <Button variant="outline" size="icon" className="size-8 hover:border-rose-500/40 hover:text-rose-500" onClick={() => (isSuperAdmin ? setDeleteTarget(emp) : setRequestDeleteTarget(emp))}><Trash2 size={13} /></Button>
-                          )}
-                        </>
+                    <div className="flex items-center gap-1.5">
+                      {/* view routes to the details page — edit & delete live there */}
+                      <Button
+                        size="sm"
+                        className="brand-gradient font-semibold text-white"
+                        onClick={() => navigateToEmployeeDetails(emp.id)}
+                        aria-label={`View ${emp.full_name}'s details`}
+                      >
+                        <Eye size={13} /> View
+                      </Button>
+                      {(emp.status === 'cancelled' || emp.status === 'deleted') && isSuperAdmin && (
+                        <Button variant="outline" size="sm" className="h-8 gap-1.5 border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600 dark:text-emerald-400" onClick={() => setRestoreTarget(emp)}>
+                          <RotateCcw size={12} /> Restore
+                        </Button>
                       )}
                     </div>
                   </div>
@@ -726,26 +696,9 @@ export function EmployeePage() {
       )}
 
 
-      {/* ============ Delete (super admin) ============ */}
-      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Employee?</AlertDialogTitle>
-            <AlertDialogDescription>
-              <strong>{deleteTarget?.full_name}</strong> will be permanently removed. Their attendance, warnings, fines,
-              requests and uniform records will be hidden from the system.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction className="bg-rose-600 text-white hover:bg-rose-600/90" onClick={confirmDelete}>
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* ============ Restore cancelled employee (super admin) ============ */}
+      {/* ============ Restore archived employee (super admin) ============
+          Works for CANCELLED employees and SOFT-DELETED ones alike — a soft
+          delete only hides rows, so everything comes back on restore. */}
       <AlertDialog open={!!restoreTarget} onOpenChange={(o) => { if (!o) setRestoreTarget(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -763,27 +716,6 @@ export function EmployeePage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      {/* ============ Request deletion (admin) ============ */}
-      <Dialog open={!!requestDeleteTarget} onOpenChange={(o) => { if (!o) setRequestDeleteTarget(null); }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Request Employee Deletion</DialogTitle>
-            <DialogDescription>
-              <strong>{requestDeleteTarget?.full_name}</strong> will be marked as “Pending Deletion” until a super admin
-              approves or rejects the request.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label>Reason</Label>
-            <Textarea value={requestReason} onChange={(e) => setRequestReason(e.target.value)} placeholder="Why should this employee be removed?" rows={3} />
-          </div>
-          <div className="flex justify-end gap-2 pt-1">
-            <Button variant="outline" onClick={() => setRequestDeleteTarget(null)}>Cancel</Button>
-            <Button className="bg-rose-600 font-semibold text-white hover:bg-rose-600/90" onClick={confirmRequestDeletion}>Submit Request</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
 
     </div>
   );

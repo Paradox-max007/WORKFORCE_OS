@@ -13,7 +13,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
   ChevronRight, Clock3, CreditCard, Crown, Eye, FileDown, FileSignature, FileText,
-  Loader2, IdCard, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
+  Loader2, MapPin, IdCard, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
   Trash2, TriangleAlert, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -44,10 +44,11 @@ import {
 import { fmtDate, fmtDateTime, fmtSar, fmtTimeAgo, initials } from '@/lib/format';
 import { downloadEmployeeCv } from '@/lib/pdf';
 import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
+import { getEmployeeSiteForDate, type SiteTimelineInput } from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
 import type {
   Attendance, CardType, DocumentStatus, EmployeeStatus, EmployeeVM, FineVM,
-  PaymentType, SalaryEligibility, WarningVM,
+  PaymentType, SalaryEligibility, SiteTransfer, SiteWithCount, WarningVM,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -122,6 +123,12 @@ const invalidMonthTokens = (raw: string): string[] => {
     return !Number.isInteger(n) || n < 1 || n > 12;
   });
 };
+
+/** Track-record site filter value: the combined OVERALL view — every site of
+ *  the month merged into one sheet (the default). */
+const TR_SITE_ALL = '__all__';
+/** Track-record site filter value: days the employee spent idle/unassigned. */
+const TR_SITE_IDLE = '__idle__';
 
 const totalsFor = (records: Attendance[]): { hours: number; absents: number } => {
   let hours = 0;
@@ -445,9 +452,16 @@ function NoticesCard({ notices, onOpen, index }: {
  *  - themed (default): app tokens, used on the Track Record page section.
  *  - print: explicit white/black classes so the captured PDF looks the same in
  *    light & dark themes (html2canvas-pro captures the real computed colors).
+ * Site-aware (themed only): pass `siteByDate` to tag each recorded day with the
+ * site it belonged to (multi-site months), and `activeDates` to fade out the
+ * days of the OTHER sites while a single site is selected.
  */
-function MonthGrid({ year, month, records, print = false }: {
+function MonthGrid({ year, month, records, print = false, siteByDate, activeDates }: {
   year: number; month: number; records: Attendance[]; print?: boolean;
+  /** date → site name: shows a tiny site tag on recorded days */
+  siteByDate?: Map<string, string | null>;
+  /** site-filter mode: days OUTSIDE the set fade out; null = every day active */
+  activeDates?: Set<string> | null;
 }) {
   const today = todayYMD();
   const lead = new Date(year, month - 1, 1).getDay();
@@ -480,6 +494,10 @@ function MonthGrid({ year, month, records, print = false }: {
         const rec = byDate.get(date);
         const future = date > today;
         const sun = isSunday(date);
+        // site context (themed multi-site view): a tag under the value, and
+        // days of other sites fade out while a single site is selected
+        const siteTag = siteByDate ? (siteByDate.get(date) || 'No Site') : null;
+        const inactive = activeDates ? !activeDates.has(date) : false;
         const absent = rec?.status === 'absent';
         const hasHours = rec?.status === 'present' && rec.hours != null;
         const marker = rec?.status === 'present' && rec.hours == null ? rec.note ?? null : null;
@@ -487,19 +505,23 @@ function MonthGrid({ year, month, records, print = false }: {
           <div
             key={d}
             role="img"
-            aria-label={`${date}${sun ? ', Sunday' : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : marker ? `, marked ${marker}` : ', not marked'}`}
+            aria-label={`${date}${sun ? ', Sunday' : ''}${siteTag && !inactive ? `, at ${siteTag}` : ''}${future ? ', upcoming' : absent ? ', absent' : hasHours ? `, ${rec?.hours} hours worked` : marker ? `, marked ${marker}` : ', not marked'}${inactive ? ', other site' : ''}`}
             className={cn(
               'relative flex min-h-16 flex-col items-center justify-center rounded-lg border text-sm',
               print ? 'border-zinc-300 bg-white text-zinc-900' : 'border-border/60 bg-background/60',
               sun && (print ? 'border-rose-200 bg-rose-50' : 'border-rose-500/20 bg-rose-500/[0.04]'),
               future && 'opacity-40',
+              inactive && 'opacity-30',
               date === today && (print ? 'ring-2 ring-zinc-500' : 'ring-2 ring-brand/50'),
+              siteByDate && !print && 'pb-3.5',
             )}
           >
             <span className={cn('absolute left-1.5 top-1 text-[10px]', print ? 'text-zinc-500' : 'text-muted-foreground')}>
               {d}
             </span>
-            {absent ? (
+            {inactive ? (
+              <span className="text-xs text-muted-foreground/50">—</span>
+            ) : absent ? (
               <span className={cn('text-lg font-bold', print ? 'text-rose-600' : 'text-rose-500')}>A</span>
             ) : hasHours ? (
               <span className={cn('text-base font-semibold tabular-nums', print ? 'text-emerald-700' : 'text-emerald-500')}>
@@ -511,6 +533,17 @@ function MonthGrid({ year, month, records, print = false }: {
               </span>
             ) : (
               <span className={cn('text-xs', print ? 'text-zinc-400' : 'text-muted-foreground/50')}>—</span>
+            )}
+            {siteTag && rec && !inactive && (
+              <span
+                title={siteTag}
+                className={cn(
+                  'absolute bottom-0.5 left-0 right-0 truncate px-1 text-center text-[9px] font-medium',
+                  print ? 'text-zinc-500' : 'text-muted-foreground/70',
+                )}
+              >
+                {siteTag}
+              </span>
             )}
           </div>
         );
@@ -1141,6 +1174,15 @@ export function EmployeeDetailsPage() {
   const [trLoading, setTrLoading] = useState(true);
   const [trRecords, setTrRecords] = useState<Attendance[] | null>(null);
 
+  // Site context for the track-record calendar — which site did each day of
+  // the viewed month belong to. Uses the SAME date-effective engine as the
+  // attendance marking sheet (transfers + pre-marked-day rule + current-site
+  // fallback — src/lib/site-timeline.ts), so the calendar and the sheet can
+  // never disagree about where an employee worked.
+  const [trSites, setTrSites] = useState<SiteWithCount[] | null>(null);
+  const [trTransfers, setTrTransfers] = useState<SiteTransfer[] | null>(null);
+  const [trSiteFilter, setTrSiteFilter] = useState<string>(TR_SITE_ALL);
+
   const [shareOpen, setShareOpen] = useState(false);
   const [sharePreviewActive, setSharePreviewActive] = useState(false);
 
@@ -1292,6 +1334,21 @@ export function EmployeeDetailsPage() {
     return () => { cancelled = true; };
   }, [selectedEmployeeId, trMonthKey, realtimeVersion]);
 
+  // ---- sites + logged site moves (site attribution of the calendar) -----------
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      dataApi.listSites().catch(() => [] as SiteWithCount[]),
+      dataApi.listSiteTransfers().catch(() => [] as SiteTransfer[]),
+    ]).then(([sts, trs]) => {
+      if (!cancelled) {
+        setTrSites(sts);
+        setTrTransfers(trs);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [realtimeVersion]);
+
   // ---- lifetime total hours -----------------------------------------------------
   useEffect(() => {
     const employeeId = selectedEmployeeId;
@@ -1348,7 +1405,104 @@ export function EmployeeDetailsPage() {
     return () => { cancelled = true; };
   }, [selectedEmployeeId, realtimeVersion]);
 
-  const trTotals = useMemo(() => totalsFor(trRecords ?? []), [trRecords]);
+  // ---- track-record site attribution (per day of the viewed month) ------------
+  const trSiteNameById = useMemo(
+    () => new Map((trSites ?? []).map((s) => [s.id, s.name])),
+    [trSites],
+  );
+
+  /** siteId per day of the viewed month (null = idle / unassigned) */
+  const trSiteIdByDate = useMemo(() => {
+    const map = new Map<string, string | null>();
+    if (!emp) return map;
+    const input: SiteTimelineInput = {
+      transfers: trTransfers ?? [],
+      records: trRecords ?? [],
+      currentSiteId: emp.current_site_id,
+    };
+    const days = daysInMonth(trYear, trMonth);
+    for (let d = 1; d <= days; d++) {
+      const date = ymd(trYear, trMonth, d);
+      map.set(date, getEmployeeSiteForDate(emp.id, date, input));
+    }
+    return map;
+  }, [emp, trTransfers, trRecords, trYear, trMonth]);
+
+  /** every site this employee actually has records at this month (day order,
+   *  first appearance) — powers the site dropdown / the static site label.
+   *  Placeholder not_marked rows render as "—" and never count as worked. */
+  const trWorkedSites = useMemo(() => {
+    const list: { id: string; name: string; hours: number }[] = [];
+    const seen = new Map<string, { id: string; name: string; hours: number }>();
+    for (const r of trRecords ?? []) {
+      if (r.status === 'not_marked') continue;
+      const key = trSiteIdByDate.get(r.date) ?? TR_SITE_IDLE;
+      const name = key === TR_SITE_IDLE
+        ? 'No Site (Idle)'
+        : trSiteNameById.get(key) ?? 'Unassigned Site';
+      const prev = seen.get(key);
+      if (prev) {
+        if (r.status === 'present' && r.hours != null) prev.hours += r.hours;
+        continue;
+      }
+      const entry = { id: key, name, hours: r.status === 'present' && r.hours != null ? r.hours : 0 };
+      seen.set(key, entry);
+      list.push(entry);
+    }
+    return list;
+  }, [trRecords, trSiteIdByDate, trSiteNameById]);
+
+  /** the selected site filter, healed back to the combined view when the month
+   *  changes and the employee has no records at the previously selected site */
+  const trEffectiveSiteFilter = useMemo(
+    () => (trSiteFilter !== TR_SITE_ALL && trWorkedSites.some((s) => s.id === trSiteFilter)
+      ? trSiteFilter
+      : TR_SITE_ALL),
+    [trSiteFilter, trWorkedSites],
+  );
+
+  /** the viewed month's records narrowed to the selected site (all when overall) */
+  const trVisibleRecords = useMemo(() => {
+    const all = trRecords ?? [];
+    if (trEffectiveSiteFilter === TR_SITE_ALL) return all;
+    return all.filter((r) => (trSiteIdByDate.get(r.date) ?? TR_SITE_IDLE) === trEffectiveSiteFilter);
+  }, [trRecords, trEffectiveSiteFilter, trSiteIdByDate]);
+
+  /** days belonging to the selected site — null = every day (overall view) */
+  const trActiveDates = useMemo(() => {
+    if (trEffectiveSiteFilter === TR_SITE_ALL) return null;
+    const set = new Set<string>();
+    trSiteIdByDate.forEach((sid, date) => {
+      if ((sid ?? TR_SITE_IDLE) === trEffectiveSiteFilter) set.add(date);
+    });
+    return set;
+  }, [trEffectiveSiteFilter, trSiteIdByDate]);
+
+  /** date → site NAME, for the per-day site tags of the multi-site overall view */
+  const trSiteNameByDate = useMemo(() => {
+    const map = new Map<string, string | null>();
+    trSiteIdByDate.forEach((sid, date) => {
+      map.set(date, sid ? trSiteNameById.get(sid) ?? null : null);
+    });
+    return map;
+  }, [trSiteIdByDate, trSiteNameById]);
+
+  /** static site label for single-site months — the dropdown only appears at 2+ */
+  const trSingleSiteName = useMemo(() => {
+    if (trWorkedSites.length === 1) return trWorkedSites[0].name;
+    if (trWorkedSites.length > 1) return null;
+    // no records this month — the day-1 site (or their assigned site) labels the sheet
+    const day1Site = trSiteIdByDate.get(ymd(trYear, trMonth, 1)) ?? null;
+    if (day1Site) return trSiteNameById.get(day1Site) ?? null;
+    return emp?.site_name ?? 'No Site Assigned';
+  }, [trWorkedSites, trSiteIdByDate, trSiteNameById, emp, trYear, trMonth]);
+
+  /** name of the selected site filter (null = overall view) */
+  const trFilterSiteName = trEffectiveSiteFilter === TR_SITE_ALL
+    ? null
+    : trWorkedSites.find((s) => s.id === trEffectiveSiteFilter)?.name ?? null;
+
+  const trTotals = useMemo(() => totalsFor(trVisibleRecords), [trVisibleRecords]);
 
   // ---- loading ------------------------------------------------------------------
   if (loading) {
@@ -1742,13 +1896,45 @@ export function EmployeeDetailsPage() {
           <SectionTitle
             icon={<CalendarCheck size={16} />}
             title="Track Record"
-            sub="Monthly timesheet — hours worked per day"
+            sub="Monthly timesheet — hours worked per day, per site"
           />
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {trLoading && <Loader2 size={14} className="animate-spin text-brand" aria-label="Loading attendance" />}
+            {/* Site scope of the sheet: a static label when the employee only
+                worked at one site this month, a dropdown of every worked site
+                (+ the combined overall record) when there are several */}
+            {trLoading || trSites === null || trTransfers === null ? (
+              <Skeleton className="h-9 w-40 rounded-lg" aria-label="Loading sites" />
+            ) : trWorkedSites.length > 1 ? (
+              <Select value={trEffectiveSiteFilter} onValueChange={setTrSiteFilter}>
+                <SelectTrigger className="h-9 w-56 bg-card" aria-label="Track record site">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={TR_SITE_ALL}>All Sites — Overall</SelectItem>
+                  {trWorkedSites.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}{s.hours > 0 ? ` · ${fmtHours(Math.round(s.hours * 10) / 10)}h` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <span
+                title="Site this employee worked at in the selected month"
+                className="inline-flex h-9 max-w-[240px] items-center gap-1.5 rounded-lg border bg-card px-3 text-sm font-medium"
+              >
+                <MapPin size={13} className="shrink-0 text-brand" aria-hidden="true" />
+                <span className="truncate">{trSingleSiteName}</span>
+              </span>
+            )}
             <Select
               value={MONTH_NAMES[trMonth - 1]}
-              onValueChange={(m) => { setTrLoading(true); setTrMonth(MONTH_NAMES.indexOf(m) + 1); }}
+              onValueChange={(m) => {
+                setTrLoading(true);
+                setTrSiteFilter(TR_SITE_ALL); // the site list is per month
+                setTrMonth(MONTH_NAMES.indexOf(m) + 1);
+              }}
             >
               <SelectTrigger className="h-9 w-32 bg-card" aria-label="Track record month">
                 <SelectValue />
@@ -1761,7 +1947,11 @@ export function EmployeeDetailsPage() {
             </Select>
             <Select
               value={String(trYear)}
-              onValueChange={(y) => { setTrLoading(true); setTrYear(Number(y)); }}
+              onValueChange={(y) => {
+                setTrLoading(true);
+                setTrSiteFilter(TR_SITE_ALL); // the site list is per month
+                setTrYear(Number(y));
+              }}
             >
               <SelectTrigger className="h-9 w-20 bg-card" aria-label="Track record year">
                 <SelectValue />
@@ -1785,16 +1975,23 @@ export function EmployeeDetailsPage() {
           ) : (
             <AnimatePresence mode="wait">
               <motion.div
-                key={trMonthKey}
+                key={`${trMonthKey}|${trEffectiveSiteFilter}`}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.25, ease: EASE }}
               >
-                <MonthGrid year={trYear} month={trMonth} records={trRecords ?? []} />
+                <MonthGrid
+                  year={trYear}
+                  month={trMonth}
+                  records={trVisibleRecords}
+                  siteByDate={trWorkedSites.length > 1 && trEffectiveSiteFilter === TR_SITE_ALL ? trSiteNameByDate : undefined}
+                  activeDates={trActiveDates}
+                />
                 <div className="mt-4 flex flex-wrap items-center gap-3 border-t pt-4">
                   <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-4 py-1.5 text-sm font-semibold text-emerald-500">
-                    Total Hours: <AnimatedCounter value={trTotals.hours} decimals={Number.isInteger(trTotals.hours) ? 0 : 1} />
+                    {trFilterSiteName ? `${trFilterSiteName} — Hours: ` : 'Total Hours: '}
+                    <AnimatedCounter value={trTotals.hours} decimals={Number.isInteger(trTotals.hours) ? 0 : 1} />
                   </span>
                   <span
                     className={cn(
@@ -1804,10 +2001,15 @@ export function EmployeeDetailsPage() {
                         : 'border-border bg-muted text-muted-foreground',
                     )}
                   >
-                    Total Absent: <AnimatedCounter value={trTotals.absents} />
+                    {trFilterSiteName ? `${trFilterSiteName} — Absent: ` : 'Total Absent: '}
+                    <AnimatedCounter value={trTotals.absents} />
                   </span>
                   <span className="ml-auto hidden text-[11px] text-muted-foreground sm:block">
-                    A = Absent · — = Not marked
+                    {trWorkedSites.length > 1
+                      ? (trEffectiveSiteFilter === TR_SITE_ALL
+                        ? 'A = Absent · — = Not marked · site under each day'
+                        : 'A = Absent · faded days = other sites')
+                      : 'A = Absent · — = Not marked'}
                   </span>
                 </div>
               </motion.div>

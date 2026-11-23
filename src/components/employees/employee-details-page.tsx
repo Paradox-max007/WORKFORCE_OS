@@ -44,11 +44,14 @@ import {
 import { fmtDate, fmtDateTime, fmtSar, fmtTimeAgo, initials } from '@/lib/format';
 import { downloadEmployeeCv } from '@/lib/pdf';
 import { exportTrackRecordPdf, trackRecordFilename } from '@/lib/pdf-trackrecord';
+import {
+  cancellationPaperUrl, getCancellationPaper, type CancellationPaper,
+} from '@/lib/files/cancellation-paper';
 import { getEmployeeSiteForDate, type SiteTimelineInput } from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
 import type {
-  Attendance, CardType, DocumentStatus, EmployeeStatus, EmployeeVM, FineVM,
-  PaymentType, SalaryEligibility, SiteTransfer, SiteWithCount, WarningVM,
+  Attendance, CancellationRequestVM, CardType, DocumentStatus, EmployeeStatus, EmployeeVM,
+  FineVM, PaymentType, SalaryEligibility, SiteTransfer, SiteWithCount, WarningVM,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
 import { useAuthStore } from '@/store/auth-store';
@@ -1145,7 +1148,7 @@ function PaymentMethodEditor({ emp, onSaved }: {
 // Page
 // ---------------------------------------------------------------------------
 export function EmployeeDetailsPage() {
-  const realtimeVersion = useRealtimeVersion(['employee', 'attendance', 'site', 'camp', 'warning', 'fine']);
+  const realtimeVersion = useRealtimeVersion(['employee', 'attendance', 'site', 'camp', 'warning', 'fine', 'cancellation_request']);
   const selectedEmployeeId = useAppStore((s) => s.selectedEmployeeId);
   const navigateToEmployees = useAppStore((s) => s.navigateToEmployees);
   const navigateToEmployeeForm = useAppStore((s) => s.navigateToEmployeeForm);
@@ -1206,6 +1209,10 @@ export function EmployeeDetailsPage() {
   const [docBusyKind, setDocBusyKind] = useState<string | null>(null);
   const [docPreview, setDocPreview] = useState<{ name: string; ext: string; url: string } | null>(null);
 
+  // the APPROVED cancellation request of a cancelled employee + its attached
+  // paper (encrypted vault) — powers the Cancellation Record card
+  const [cancelRecord, setCancelRecord] = useState<{ req: CancellationRequestVM; paper: CancellationPaper | null } | null>(null);
+
   const trMonthKey = `${trYear}-${pad(trMonth)}`;
 
   // ---- resolve the employee ---------------------------------------------------
@@ -1246,6 +1253,29 @@ export function EmployeeDetailsPage() {
     return () => { cancelled = true; };
   }, [selectedEmployeeId]);
 
+  // ---- cancellation record & signed paper (cancelled employees) ---------------
+  // The latest APPROVED cancellation request of this employee + the paper
+  // attached to it (view / download in the Cancellation Record card).
+  const empStatus = emp?.status;
+  useEffect(() => {
+    const employeeId = selectedEmployeeId;
+    if (!employeeId || empStatus !== 'cancelled') { setCancelRecord(null); return; }
+    let cancelled = false;
+    dataApi.listCancellationRequests()
+      .then(async (reqs) => {
+        if (cancelled) return;
+        const approved = reqs
+          .filter((r) => r.employee_id === employeeId && r.status === 'approved')
+          .sort((a, b) => (b.reviewed_at ?? b.created_at).localeCompare(a.reviewed_at ?? a.created_at));
+        const req = approved[0] ?? null;
+        if (!req) { setCancelRecord(null); return; }
+        const paper = await getCancellationPaper(req.id).catch(() => null);
+        if (!cancelled) setCancelRecord({ req, paper });
+      })
+      .catch(() => { if (!cancelled) setCancelRecord(null); });
+    return () => { cancelled = true; };
+  }, [selectedEmployeeId, empStatus, realtimeVersion]);
+
   const closeDocPreview = () => {
     if (docPreview) URL.revokeObjectURL(docPreview.url);
     setDocPreview(null);
@@ -1261,6 +1291,39 @@ export function EmployeeDetailsPage() {
       toast.error(err instanceof Error ? err.message : 'The document could not be opened.');
     } finally {
       setDocBusyKind(null);
+    }
+  };
+
+  /** Cancellation paper — decrypt in memory and open the in-app viewer. */
+  const openCancelPaper = async (): Promise<void> => {
+    if (!cancelRecord?.paper || !emp) return;
+    try {
+      const { url } = await cancellationPaperUrl(cancelRecord.paper);
+      setDocPreview({
+        name: `Cancellation Paper — ${emp.full_name} (${emp.employee_code})`,
+        ext: cancelRecord.paper.ext,
+        url,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'The paper could not be opened.');
+    }
+  };
+
+  /** Cancellation paper — decrypt in memory and save with a readable name. */
+  const downloadCancelPaper = async (): Promise<void> => {
+    if (!cancelRecord?.paper || !emp) return;
+    try {
+      const { url, revoke } = await cancellationPaperUrl(cancelRecord.paper);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Cancellation Paper — ${emp.full_name} (${emp.employee_code}).${cancelRecord.paper.ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(revoke, 30_000);
+      toast.success('Cancellation paper downloaded');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Download failed.');
     }
   };
 
@@ -1876,6 +1939,65 @@ export function EmployeeDetailsPage() {
             <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
             <InfoRow label="Last Updated" value={fmtDateTime(emp.updated_at)} />
           </InfoCard>
+
+          {/* CANCELLED employees — the approved cancellation request plus its
+              signed paper (attached after approval on the Cancellation
+              Requests page); view / download decrypts in memory only */}
+          {emp.status === 'cancelled' && cancelRecord && (
+            <InfoCard
+              index={5}
+              icon={<FileSignature size={16} />}
+              title="Cancellation Record"
+              sub="Approved cancellation & signed paper"
+            >
+              <InfoRow label="Reason" value={cancelRecord.req.reason ?? '—'} />
+              <InfoRow label="Requested By" value={cancelRecord.req.requested_by_name ?? '—'} />
+              <InfoRow label="Approved By" value={cancelRecord.req.reviewed_by_name ?? '—'} />
+              <InfoRow label="Cancelled On" value={fmtDate(cancelRecord.req.reviewed_at ?? cancelRecord.req.created_at)} />
+              <div className="rounded-xl border bg-background/40 p-3.5 sm:col-span-2">
+                {cancelRecord.paper ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-rose-500/10 text-rose-500">
+                        <FileSignature size={16} aria-hidden="true" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">
+                          Cancellation Paper ({cancelRecord.paper.ext.toUpperCase()})
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {fmtDocSize(cancelRecord.paper.size) || 'encrypted'}
+                          {cancelRecord.paper.updatedAt ? ` · uploaded ${cancelRecord.paper.updatedAt.slice(0, 10)}` : ''}
+                          {' '}· encrypted
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => void openCancelPaper()}
+                        aria-label={`View ${emp.full_name}'s cancellation paper`}
+                      >
+                        <Eye size={14} /> View
+                      </Button>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={() => void downloadCancelPaper()}
+                        aria-label={`Download ${emp.full_name}'s cancellation paper`}
+                      >
+                        <FileDown size={14} /> Download
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm italic text-muted-foreground">
+                    No cancellation paper attached yet
+                    {isSuperAdmin ? ' — attach it from the Cancellation Requests page.' : '.'}
+                  </p>
+                )}
+              </div>
+            </InfoCard>
+          )}
         </div>
       </div>
 
@@ -1883,7 +2005,7 @@ export function EmployeeDetailsPage() {
           strip below the two info columns: two document slots per row (all
           four visible at a glance), preview & print */}
       <AttachedDocsCard
-        index={5}
+        index={6}
         docs={empDocs}
         busyKind={docBusyKind}
         onOpen={(doc) => void openAttachedDoc(doc)}

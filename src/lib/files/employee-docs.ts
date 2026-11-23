@@ -105,7 +105,6 @@ function b64encode(bytes: Uint8Array): string {
   bytes.forEach((b) => { bin += String.fromCharCode(b); });
   return btoa(bin);
 }
-
 function b64decode(s: string): Uint8Array {
   const bin = atob(s);
   const out = new Uint8Array(bin.length);
@@ -165,7 +164,7 @@ async function getVaultKey(): Promise<CryptoKey> {
 }
 
 /** Encrypt file bytes → opaque Blob `iv ‖ ciphertext` (application/octet-stream). */
-async function encryptFile(file: File): Promise<Blob> {
+export async function encryptFile(file: File): Promise<Blob> {
   const key = await getVaultKey();
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const plaintext = new Uint8Array(await file.arrayBuffer());
@@ -174,7 +173,7 @@ async function encryptFile(file: File): Promise<Blob> {
 }
 
 /** Decrypt a stored Blob back to a usable file Blob (for preview / print). */
-async function decryptBlob(stored: Blob, mime: string): Promise<Blob> {
+export async function decryptBlob(stored: Blob, mime: string): Promise<Blob> {
   const key = await getVaultKey();
   const bytes = new Uint8Array(await stored.arrayBuffer());
   if (bytes.length <= 12) throw new Error('The stored document is damaged (too short to decrypt).');
@@ -195,12 +194,13 @@ async function decryptBlob(stored: Blob, mime: string): Promise<Blob> {
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
-function extOf(name: string): string {
+// shared with the cancellation-paper vault (same key, same object layout)
+export function extOf(name: string): string {
   const m = /\.([a-z0-9]+)$/i.exec(name.trim());
   return m ? m[1].toLowerCase() : '';
 }
 
-function validateDocFile(file: File): string {
+export function validateDocFile(file: File): string {
   const ext = extOf(file.name);
   if (!['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
     return 'Only PDF, JPG, PNG or WebP files can be attached.';

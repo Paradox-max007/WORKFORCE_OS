@@ -6,10 +6,10 @@
 
 import { motion } from 'framer-motion';
 import {
-  Ban, Check, CheckCircle2, ChevronsUpDown, Clock, FileX2, Loader2,
-  RotateCcw, Search, Trash2, TriangleAlert, X, XCircle,
+  Ban, Check, CheckCircle2, ChevronsUpDown, Clock, Eye, FileDown, FileX2, Loader2,
+  Paperclip, RotateCcw, Search, Trash2, TriangleAlert, Upload, X, XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
   EmptyState, EmployeeStatusBadge, PageHeader, RequestStatusBadge, SkeletonRows, StatCard,
@@ -34,7 +34,12 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
+import { EmployeeDocViewer } from '@/components/employees/employee-doc-viewer';
 import { dataApi } from '@/lib/data';
+import {
+  CANCELLATION_PAPER_ACCEPT, cancellationPaperUrl, getCancellationPaper,
+  uploadCancellationPaper, type CancellationPaper,
+} from '@/lib/files/cancellation-paper';
 import { fmtDate, initials } from '@/lib/format';
 import type { CancellationRequestVM, EmployeeVM } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -70,6 +75,15 @@ export function CancellationRequestPage() {
   const [reviewTarget, setReviewTarget] = useState<{ req: CancellationRequestVM; approve: boolean } | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
 
+  // cancellation papers of APPROVED requests (encrypted vault): request id →
+  // paper (undefined = still checking, null = nothing attached)
+  const [papers, setPapers] = useState<Record<string, CancellationPaper | null>>({});
+  const [attachTarget, setAttachTarget] = useState<CancellationRequestVM | null>(null);
+  const [attachFile, setAttachFile] = useState<File | null>(null);
+  const [attachBusy, setAttachBusy] = useState(false);
+  const [paperPreview, setPaperPreview] = useState<{ name: string; ext: string; url: string } | null>(null);
+  const attachInputRef = useRef<HTMLInputElement>(null);
+
   // ---- data loading (re-fetches whenever cancellation requests change) --------
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +110,19 @@ export function CancellationRequestPage() {
     const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 300);
     return () => clearTimeout(t);
   }, [search]);
+
+  // ---- cancellation papers of the approved requests (encrypted vault) --------
+  useEffect(() => {
+    const approved = (requests ?? []).filter((r) => r.status === 'approved');
+    if (approved.length === 0) { setPapers({}); return; }
+    let cancelled = false;
+    Promise.all(
+      approved.map(async (r) => [r.id, await getCancellationPaper(r.id).catch(() => null)] as const),
+    ).then((entries) => {
+      if (!cancelled) setPapers(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, [requests]);
 
   // ---- derived values ---------------------------------------------------------
   // employee id → record (scope lookup for the request rows); requests of
@@ -186,6 +213,118 @@ export function CancellationRequestPage() {
       </Button>
     </div>
   );
+
+  // ---- cancellation paper (approved requests) ---------------------------------
+  const openPaper = async (r: CancellationRequestVM) => {
+    const paper = papers[r.id];
+    if (!paper) return;
+    try {
+      const { url } = await cancellationPaperUrl(paper);
+      setPaperPreview({
+        name: `Cancellation Paper — ${r.employee_name} (${r.employee_code})`,
+        ext: paper.ext,
+        url,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'The paper could not be decrypted.');
+    }
+  };
+
+  const downloadPaper = async (r: CancellationRequestVM) => {
+    const paper = papers[r.id];
+    if (!paper) return;
+    try {
+      const { url, revoke } = await cancellationPaperUrl(paper);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Cancellation Paper — ${r.employee_name} (${r.employee_code}).${paper.ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(revoke, 30_000);
+      toast.success('Cancellation paper downloaded');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Download failed.');
+    }
+  };
+
+  const handleAttach = async () => {
+    if (!attachTarget || !attachFile) return;
+    setAttachBusy(true);
+    try {
+      const wasReplacing = !!papers[attachTarget.id];
+      await uploadCancellationPaper(attachTarget.id, attachFile);
+      const saved = await getCancellationPaper(attachTarget.id).catch(() => null);
+      setPapers((p) => ({ ...p, [attachTarget.id]: saved }));
+      toast.success(wasReplacing ? 'Cancellation paper updated' : 'Cancellation paper attached', {
+        description: `${attachTarget.employee_name} (${attachTarget.employee_code}) — encrypted and stored with the approved request.`,
+      });
+      setAttachTarget(null);
+      setAttachFile(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Upload failed.');
+    } finally {
+      setAttachBusy(false);
+    }
+  };
+
+  /** paper state + actions of one APPROVED request (view/download for every
+   *  admin, attach/replace for super admins) */
+  const paperActions = (r: CancellationRequestVM, full = false) => {
+    const paper = papers[r.id];
+    return (
+      <div className={cn('flex items-center gap-1.5', full && 'w-full flex-wrap')}>
+        {paper === undefined ? (
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+            <Loader2 size={12} className="animate-spin" aria-label="Checking for a cancellation paper" /> Paper…
+          </span>
+        ) : paper ? (
+          <>
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-500"
+              title={`${paper.name} · encrypted${paper.updatedAt ? ` · uploaded ${paper.updatedAt.slice(0, 10)}` : ''}`}
+            >
+              <Paperclip size={10} aria-hidden="true" /> Paper
+            </span>
+            <Button
+              variant="outline" size="sm" className="h-7 gap-1 px-2 text-[11px]"
+              onClick={() => void openPaper(r)}
+              aria-label={`View the cancellation paper of ${r.employee_name}`}
+            >
+              <Eye size={12} /> View
+            </Button>
+            <Button
+              variant="outline" size="sm" className="h-7 gap-1 px-2 text-[11px]"
+              onClick={() => void downloadPaper(r)}
+              aria-label={`Download the cancellation paper of ${r.employee_name}`}
+            >
+              <FileDown size={12} /> Download
+            </Button>
+            {isSuperAdmin && (
+              <Button
+                variant="outline" size="sm" className="h-7 gap-1 px-2 text-[11px]"
+                onClick={() => { setAttachFile(null); setAttachTarget(r); }}
+                aria-label={`Replace the cancellation paper of ${r.employee_name}`}
+              >
+                <Upload size={12} /> Replace
+              </Button>
+            )}
+          </>
+        ) : isSuperAdmin ? (
+          <Button
+            variant="outline" size="sm"
+            className={cn('h-7 gap-1 px-2 text-[11px]', full && 'flex-1')}
+            onClick={() => { setAttachFile(null); setAttachTarget(r); }}
+            aria-label={`Attach the cancellation paper of ${r.employee_name}`}
+          >
+            <Paperclip size={12} /> Attach Paper
+          </Button>
+        ) : (
+          <span className="text-xs italic text-muted-foreground/60">No paper attached</span>
+        )}
+      </div>
+    );
+  };
 
   const statCards = [
     { label: 'Total Requests', value: stats.total, icon: <FileX2 size={20} />, tone: 'brand' as const, hint: 'All cancellation requests' },
@@ -306,9 +445,7 @@ export function CancellationRequestPage() {
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Request Status</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Requested By</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Created</TableHead>
-                    {isSuperAdmin && (
-                      <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Review Actions</TableHead>
-                    )}
+                    <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -351,17 +488,19 @@ export function CancellationRequestPage() {
                       <TableCell className="px-3 py-3">
                         <p className="text-sm">{fmtDate(r.created_at)}</p>
                       </TableCell>
-                      {isSuperAdmin && (
-                        <TableCell className="px-3 py-3">
-                          {r.status === 'pending' ? (
-                            <div className="flex items-center justify-end">
-                              {reviewButtons(r)}
-                            </div>
+                      <TableCell className="px-3 py-3">
+                        {r.status === 'pending' ? (
+                          isSuperAdmin ? (
+                            <div className="flex items-center justify-end">{reviewButtons(r)}</div>
                           ) : (
                             <p className="text-right text-xs text-muted-foreground/50">—</p>
-                          )}
-                        </TableCell>
-                      )}
+                          )
+                        ) : r.status === 'approved' ? (
+                          <div className="flex items-center justify-end">{paperActions(r)}</div>
+                        ) : (
+                          <p className="text-right text-xs text-muted-foreground/50">—</p>
+                        )}
+                      </TableCell>
                     </motion.tr>
                   ))}
                 </TableBody>
@@ -408,6 +547,12 @@ export function CancellationRequestPage() {
                   {isSuperAdmin && r.status === 'pending' && (
                     <div className="mt-3 border-t pt-3">
                       {reviewButtons(r, true)}
+                    </div>
+                  )}
+
+                  {r.status === 'approved' && (
+                    <div className="mt-3 border-t pt-3">
+                      {paperActions(r, true)}
                     </div>
                   )}
                 </motion.div>
@@ -466,6 +611,97 @@ export function CancellationRequestPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ---- Attach / replace cancellation paper (approved requests) ---- */}
+      <Dialog
+        open={!!attachTarget}
+        onOpenChange={(o) => { if (!o) { setAttachTarget(null); setAttachFile(null); } }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {papers[attachTarget?.id ?? ''] ? 'Replace Cancellation Paper' : 'Attach Cancellation Paper'}
+            </DialogTitle>
+            <DialogDescription>
+              {attachTarget && (
+                <>
+                  The signed cancellation document of{' '}
+                  <span className="font-medium text-foreground">
+                    {attachTarget.employee_name} ({attachTarget.employee_code})
+                  </span>{' '}
+                  — a PDF or image scan. It is encrypted (AES-256-GCM) before storage and becomes
+                  viewable and downloadable on the employee&apos;s details page.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          <input
+            ref={attachInputRef}
+            type="file"
+            accept={CANCELLATION_PAPER_ACCEPT}
+            className="hidden"
+            data-testid="cancellation-paper-input"
+            aria-label="Cancellation paper file"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = ''; // allow re-picking the same file
+              setAttachFile(f ?? null);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => attachInputRef.current?.click()}
+            className="flex w-full flex-col items-center gap-1.5 rounded-xl border border-dashed border-border/80 bg-card/50 px-4 py-6 text-center transition-colors hover:border-brand/50 hover:bg-brand/5"
+          >
+            <Paperclip size={20} className="text-brand" aria-hidden="true" />
+            <span className="text-sm font-medium">
+              {attachFile ? 'Choose a different file' : 'Click to choose a PDF or image scan'}
+            </span>
+            <span className="text-xs text-muted-foreground">PDF, JPG, PNG or WebP · up to 15 MB</span>
+          </button>
+
+          {attachFile && (
+            <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2.5">
+              <p className="truncate text-sm font-medium" title={attachFile.name}>{attachFile.name}</p>
+              <p className="text-xs text-muted-foreground">
+                {(attachFile.size / 1024 / 1024).toFixed(2)} MB · will be encrypted before upload
+              </p>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={attachBusy}
+              onClick={() => { setAttachTarget(null); setAttachFile(null); }}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={!attachFile || attachBusy}
+              onClick={() => void handleAttach()}
+              className="brand-gradient font-semibold text-white shadow-md shadow-[var(--glow)] transition-transform active:scale-[0.98]"
+            >
+              {attachBusy ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+              {papers[attachTarget?.id ?? ''] ? 'Replace Paper' : 'Attach Paper'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- Decrypted paper preview (PDF zoom viewer / image lightbox) ---- */}
+      {paperPreview && (
+        <EmployeeDocViewer
+          name={paperPreview.name}
+          ext={paperPreview.ext}
+          url={paperPreview.url}
+          onClose={() => {
+            URL.revokeObjectURL(paperPreview.url);
+            setPaperPreview(null);
+          }}
+        />
+      )}
     </div>
   );
 }

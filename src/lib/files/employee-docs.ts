@@ -1,14 +1,15 @@
 // ============================================================================
 // PULSE Workforce OS — Employee documents (Passport / Visa / Emirates ID /
-// Contract) vault
+// Contract / Work Permit) vault
 // ----------------------------------------------------------------------------
 // Per-employee identity documents attached on the Add/Edit Employee form and
 // shown (preview / print / replace / delete) on the Employee Details page.
 //
-//   passport    — passport scan (PDF or image)
-//   visa        — visa / residence permit scan
-//   emirates_id — UAE Emirates ID card scan
-//   contract    — employment contract scan
+//   passport     — passport scan (PDF or image)
+//   visa         — visa / residence permit scan
+//   emirates_id  — UAE Emirates ID card scan
+//   contract     — employment contract scan
+//   work_permit  — work permit / labour card scan
 //
 // SECURITY: every file is encrypted in the BROWSER with AES-256-GCM before it
 // is written to storage, and decrypted only in memory for preview/print:
@@ -31,7 +32,7 @@
 import { isDemoMode } from '@/lib/data';
 import { supabase } from '@/lib/supabase/client';
 
-export type EmployeeDocKind = 'passport' | 'visa' | 'emirates_id' | 'contract';
+export type EmployeeDocKind = 'passport' | 'visa' | 'emirates_id' | 'contract' | 'work_permit';
 
 export interface EmployeeDoc {
   employeeId: string;
@@ -61,6 +62,7 @@ export const EMPLOYEE_DOC_KINDS: {
   { kind: 'visa', label: 'Visa / Permit', hint: 'Visa or residence permit — auto-fills position & nationality' },
   { kind: 'emirates_id', label: 'Emirates ID', hint: 'UAE Emirates ID card — auto-fills name, DOB & ID number' },
   { kind: 'contract', label: 'Contract', hint: 'Employment contract — auto-fills position & join date' },
+  { kind: 'work_permit', label: 'Work Permit', hint: 'Work permit / labour card — auto-fills position' },
 ];
 
 export function docKindLabel(kind: EmployeeDocKind): string {
@@ -283,6 +285,7 @@ const kindFromFileName = (name: string): EmployeeDocKind | null => {
   if (name.startsWith('visa.')) return 'visa';
   if (name.startsWith('emirates_id.')) return 'emirates_id';
   if (name.startsWith('contract.')) return 'contract';
+  if (name.startsWith('work_permit.')) return 'work_permit';
   return null;
 };
 

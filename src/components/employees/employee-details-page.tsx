@@ -13,7 +13,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft, BadgeCheck, Banknote, Bell, Briefcase, CalendarCheck, ChevronLeft,
   ChevronRight, Clock3, CreditCard, Crown, Eye, FileDown, FileSignature, FileText,
-  Loader2, MapPin, IdCard, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
+  HardHat, Loader2, MapPin, IdCard, MessageCircle, Pencil, Plane, Plus, Printer, RotateCcw, Stamp, Tent,
   Trash2, TriangleAlert, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -235,14 +235,16 @@ function InfoCard({ index, icon, title, sub, children }: {
 
 // ---------------------------------------------------------------------------
 // Attached documents — the encrypted passport / visa / Emirates ID / contract
-// files uploaded on the Add/Edit form. Preview opens the decrypted file in the
-// in-app viewer; Print decrypts and sends it straight to the printer.
+// / work permit files uploaded on the Add/Edit form. Preview opens the
+// decrypted file in the in-app viewer; Print decrypts and sends it straight
+// to the printer.
 // ---------------------------------------------------------------------------
 const ATTACHED_DOC_META: Record<EmployeeDocKind, { icon: LucideIcon; cls: string }> = {
   passport: { icon: Plane, cls: 'bg-sky-500/10 text-sky-500' },
   visa: { icon: Stamp, cls: 'bg-amber-500/10 text-amber-500' },
   emirates_id: { icon: IdCard, cls: 'bg-violet-500/10 text-violet-500' },
   contract: { icon: FileSignature, cls: 'bg-emerald-500/10 text-emerald-500' },
+  work_permit: { icon: HardHat, cls: 'bg-cyan-500/10 text-cyan-500' },
 };
 
 function fmtDocSize(bytes: number): string {
@@ -252,25 +254,30 @@ function fmtDocSize(bytes: number): string {
   return `${bytes} B`;
 }
 
-function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index }: {
+function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index, singleColumn }: {
   docs: EmployeeDoc[] | null;
   busyKind: string | null;
   onOpen: (doc: EmployeeDoc) => void;
   onPrint: (doc: EmployeeDoc) => void;
   index: number;
+  /** true when the card shares a row with the Cancellation Record card
+   *  (cancelled employees) — the slots stack in one column instead of the
+   *  two-per-row full-width strip */
+  singleColumn?: boolean;
 }) {
   return (
     <InfoCard
       index={index}
       icon={<FileText size={16} />}
       title="Attached Documents"
-      sub="Passport / visa / Emirates ID / contract — stored encrypted (AES-256)"
+      sub="Passport / visa / Emirates ID / contract / work permit — stored encrypted (AES-256)"
     >
-      {/* full-width strip — two document slots per row so all four stay
-          visible at a glance instead of one long single-column stack */}
-      <div className="grid gap-2.5 sm:col-span-2 sm:grid-cols-2">
+      {/* two document slots per row on the full-width strip so all of them
+          stay visible at a glance; a single column when the card sits beside
+          the Cancellation Record (cancelled employees) */}
+      <div className={cn('grid gap-2.5 sm:col-span-2', singleColumn ? 'grid-cols-1' : 'sm:grid-cols-2')}>
         {docs === null ? (
-          <p className="flex items-center gap-2 text-sm text-muted-foreground sm:col-span-2">
+          <p className={cn('flex items-center gap-2 text-sm text-muted-foreground', !singleColumn && 'sm:col-span-2')}>
             <Loader2 size={14} className="animate-spin" /> Loading documents…
           </p>
         ) : (
@@ -322,10 +329,83 @@ function AttachedDocsCard({ docs, busyKind, onOpen, onPrint, index }: {
             );
           })
         )}
-        <p className="text-[11px] leading-tight text-muted-foreground sm:col-span-2">
+        {/* NB: no col-span in single-column mode — a spanning item would
+            force an implicit second column into the one-column grid */}
+        <p className={cn('text-[11px] leading-tight text-muted-foreground', !singleColumn && 'sm:col-span-2')}>
           To upload, replace or delete a document use the <Pencil size={11} className="inline" aria-hidden /> Edit button
           at the top of this profile — changes are saved with the employee.
         </p>
+      </div>
+    </InfoCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation Record — the latest APPROVED cancellation request of a
+// CANCELLED employee plus its signed paper (attached after approval on the
+// Cancellation Requests page). Rendered BESIDE the Attached Documents card;
+// view / download decrypts in memory only.
+// ---------------------------------------------------------------------------
+function CancellationRecordCard({ emp, record, isSuperAdmin, onOpenPaper, onDownloadPaper, index }: {
+  emp: EmployeeVM;
+  record: { req: CancellationRequestVM; paper: CancellationPaper | null };
+  isSuperAdmin: boolean;
+  onOpenPaper: () => void;
+  onDownloadPaper: () => void;
+  index: number;
+}) {
+  return (
+    <InfoCard
+      index={index}
+      icon={<FileSignature size={16} />}
+      title="Cancellation Record"
+      sub="Approved cancellation & signed paper"
+    >
+      <InfoRow label="Reason" value={record.req.reason ?? '—'} />
+      <InfoRow label="Requested By" value={record.req.requested_by_name ?? '—'} />
+      <InfoRow label="Approved By" value={record.req.reviewed_by_name ?? '—'} />
+      <InfoRow label="Cancelled On" value={fmtDate(record.req.reviewed_at ?? record.req.created_at)} />
+      <div className="rounded-xl border bg-background/40 p-3.5 sm:col-span-2">
+        {record.paper ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5">
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-rose-500/10 text-rose-500">
+                <FileSignature size={16} aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">
+                  Cancellation Paper ({record.paper.ext.toUpperCase()})
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {fmtDocSize(record.paper.size) || 'encrypted'}
+                  {record.paper.updatedAt ? ` · uploaded ${record.paper.updatedAt.slice(0, 10)}` : ''}
+                  {' '}· encrypted
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <Button
+                variant="outline" size="sm"
+                onClick={onOpenPaper}
+                aria-label={`View ${emp.full_name}'s cancellation paper`}
+              >
+                <Eye size={14} /> View
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                onClick={onDownloadPaper}
+                aria-label={`Download ${emp.full_name}'s cancellation paper`}
+              >
+                <FileDown size={14} /> Download
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm italic text-muted-foreground">
+            No cancellation paper attached yet
+            {isSuperAdmin ? ' — attach it from the Cancellation Requests page.' : '.'}
+          </p>
+        )}
       </div>
     </InfoCard>
   );
@@ -1210,8 +1290,12 @@ export function EmployeeDetailsPage() {
   const [docPreview, setDocPreview] = useState<{ name: string; ext: string; url: string } | null>(null);
 
   // the APPROVED cancellation request of a cancelled employee + its attached
-  // paper (encrypted vault) — powers the Cancellation Record card
+  // paper (encrypted vault) — powers the Cancellation Record card that sits
+  // BESIDE the Attached Documents card (cancelled employees only)
   const [cancelRecord, setCancelRecord] = useState<{ req: CancellationRequestVM; paper: CancellationPaper | null } | null>(null);
+  /** true while the cancellation record is being resolved — keeps the
+   *  side-by-side row (documents + cancellation record) from reflowing */
+  const [cancelRecordLoading, setCancelRecordLoading] = useState(false);
 
   const trMonthKey = `${trYear}-${pad(trMonth)}`;
 
@@ -1259,8 +1343,9 @@ export function EmployeeDetailsPage() {
   const empStatus = emp?.status;
   useEffect(() => {
     const employeeId = selectedEmployeeId;
-    if (!employeeId || empStatus !== 'cancelled') { setCancelRecord(null); return; }
+    if (!employeeId || empStatus !== 'cancelled') { setCancelRecord(null); setCancelRecordLoading(false); return; }
     let cancelled = false;
+    setCancelRecordLoading(true);
     dataApi.listCancellationRequests()
       .then(async (reqs) => {
         if (cancelled) return;
@@ -1268,11 +1353,17 @@ export function EmployeeDetailsPage() {
           .filter((r) => r.employee_id === employeeId && r.status === 'approved')
           .sort((a, b) => (b.reviewed_at ?? b.created_at).localeCompare(a.reviewed_at ?? a.created_at));
         const req = approved[0] ?? null;
-        if (!req) { setCancelRecord(null); return; }
+        if (!req) { setCancelRecord(null); setCancelRecordLoading(false); return; }
         const paper = await getCancellationPaper(req.id).catch(() => null);
-        if (!cancelled) setCancelRecord({ req, paper });
+        if (cancelled) return;
+        setCancelRecord({ req, paper });
+        setCancelRecordLoading(false);
       })
-      .catch(() => { if (!cancelled) setCancelRecord(null); });
+      .catch(() => {
+        if (cancelled) return;
+        setCancelRecord(null);
+        setCancelRecordLoading(false);
+      });
     return () => { cancelled = true; };
   }, [selectedEmployeeId, empStatus, realtimeVersion]);
 
@@ -1939,78 +2030,73 @@ export function EmployeeDetailsPage() {
             <InfoRow label="Created" value={fmtDateTime(emp.created_at)} />
             <InfoRow label="Last Updated" value={fmtDateTime(emp.updated_at)} />
           </InfoCard>
+        </div>
+      </div>
 
-          {/* CANCELLED employees — the approved cancellation request plus its
-              signed paper (attached after approval on the Cancellation
-              Requests page); view / download decrypts in memory only */}
-          {emp.status === 'cancelled' && cancelRecord && (
+      {/* =============== Attached documents (+ cancellation record) ===============
+          CANCELLED employees: the encrypted documents card and the Cancellation
+          Record card share one row — documents on the left, the approved
+          cancellation (with its signed paper) on the right — instead of
+          stacking them. Every other employee keeps the full-width strip.
+          View / download decrypts in memory only. */}
+      {emp.status === 'cancelled' ? (
+        <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
+          <AttachedDocsCard
+            index={5}
+            docs={empDocs}
+            busyKind={docBusyKind}
+            onOpen={(doc) => void openAttachedDoc(doc)}
+            onPrint={(doc) => void printAttachedDoc(doc)}
+            singleColumn
+          />
+          {cancelRecord ? (
+            <CancellationRecordCard
+              index={6}
+              emp={emp}
+              record={cancelRecord}
+              isSuperAdmin={isSuperAdmin}
+              onOpenPaper={() => void openCancelPaper()}
+              onDownloadPaper={() => void downloadCancelPaper()}
+            />
+          ) : cancelRecordLoading ? (
             <InfoCard
-              index={5}
+              index={6}
               icon={<FileSignature size={16} />}
               title="Cancellation Record"
               sub="Approved cancellation & signed paper"
             >
-              <InfoRow label="Reason" value={cancelRecord.req.reason ?? '—'} />
-              <InfoRow label="Requested By" value={cancelRecord.req.requested_by_name ?? '—'} />
-              <InfoRow label="Approved By" value={cancelRecord.req.reviewed_by_name ?? '—'} />
-              <InfoRow label="Cancelled On" value={fmtDate(cancelRecord.req.reviewed_at ?? cancelRecord.req.created_at)} />
-              <div className="rounded-xl border bg-background/40 p-3.5 sm:col-span-2">
-                {cancelRecord.paper ? (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-rose-500/10 text-rose-500">
-                        <FileSignature size={16} aria-hidden="true" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">
-                          Cancellation Paper ({cancelRecord.paper.ext.toUpperCase()})
-                        </p>
-                        <p className="text-[11px] text-muted-foreground">
-                          {fmtDocSize(cancelRecord.paper.size) || 'encrypted'}
-                          {cancelRecord.paper.updatedAt ? ` · uploaded ${cancelRecord.paper.updatedAt.slice(0, 10)}` : ''}
-                          {' '}· encrypted
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 gap-2">
-                      <Button
-                        variant="outline" size="sm"
-                        onClick={() => void openCancelPaper()}
-                        aria-label={`View ${emp.full_name}'s cancellation paper`}
-                      >
-                        <Eye size={14} /> View
-                      </Button>
-                      <Button
-                        variant="outline" size="sm"
-                        onClick={() => void downloadCancelPaper()}
-                        aria-label={`Download ${emp.full_name}'s cancellation paper`}
-                      >
-                        <FileDown size={14} /> Download
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-sm italic text-muted-foreground">
-                    No cancellation paper attached yet
-                    {isSuperAdmin ? ' — attach it from the Cancellation Requests page.' : '.'}
-                  </p>
-                )}
+              <div className="space-y-2.5 sm:col-span-2" aria-label="Loading cancellation record">
+                <Skeleton className="h-9 rounded-lg" />
+                <Skeleton className="h-9 rounded-lg" />
+                <Skeleton className="h-9 rounded-lg" />
+                <Skeleton className="h-[74px] rounded-xl" />
               </div>
+            </InfoCard>
+          ) : (
+            <InfoCard
+              index={6}
+              icon={<FileSignature size={16} />}
+              title="Cancellation Record"
+              sub="Approved cancellation & signed paper"
+            >
+              <p className="text-sm italic text-muted-foreground sm:col-span-2">
+                No approved cancellation request found for this employee.
+              </p>
             </InfoCard>
           )}
         </div>
-      </div>
-
-      {/* encrypted passport / visa / Emirates ID / contract files — FULL-WIDTH
-          strip below the two info columns: two document slots per row (all
-          four visible at a glance), preview & print */}
-      <AttachedDocsCard
-        index={6}
-        docs={empDocs}
-        busyKind={docBusyKind}
-        onOpen={(doc) => void openAttachedDoc(doc)}
-        onPrint={(doc) => void printAttachedDoc(doc)}
-      />
+      ) : (
+        /* encrypted passport / visa / Emirates ID / contract / work permit
+           files — FULL-WIDTH strip below the two info columns: two document
+           slots per row, preview & print */
+        <AttachedDocsCard
+          index={5}
+          docs={empDocs}
+          busyKind={docBusyKind}
+          onOpen={(doc) => void openAttachedDoc(doc)}
+          onPrint={(doc) => void printAttachedDoc(doc)}
+        />
+      )}
 
       {/* ============================ Track record ============================ */}
       <section className="card-glow rounded-xl border bg-card p-5 md:p-6">

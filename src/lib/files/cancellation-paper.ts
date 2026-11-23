@@ -12,12 +12,13 @@
 //   • the key lives in the one-row `document_vault_key` table (Supabase mode)
 //     or the local demo store (demo mode) — never inside the bucket;
 //   • the stored object is `iv(12 bytes) + ciphertext` under
-//     cancel_<requestId>/paper.<ext>.bin in the PRIVATE 'employee-documents'
-//     bucket — its policies (migrations/20261118b_employee_documents.sql) are
-//     bucket-wide, so no extra migration is needed for the new folder scheme.
+//     cancel_<requestId>/paper.<ext>.bin in the DEDICATED PRIVATE
+//     'cancellation-papers' bucket — its policies
+//     (migrations/20261123_cancellation_papers_bucket.sql) keep the papers
+//     separate from the employee identity documents.
 //
 // Two interchangeable backends behind one interface:
-//   PROD — Supabase Storage bucket 'employee-documents', folder cancel_<id>
+//   PROD — Supabase Storage bucket 'cancellation-papers', folder cancel_<id>
 //   DEMO — an IndexedDB "mini bucket" holding the same encrypted blobs
 //
 // Object identity is the PATH, so re-uploading replaces the paper.
@@ -26,7 +27,7 @@
 import { isDemoMode } from '@/lib/data';
 import { supabase } from '@/lib/supabase/client';
 import {
-  EMPLOYEE_DOC_BUCKET, MAX_EMPLOYEE_DOC_SIZE, decryptBlob, encryptFile,
+  MAX_EMPLOYEE_DOC_SIZE, decryptBlob, encryptFile,
   extOf, mimeForExt, validateDocFile,
 } from '@/lib/files/employee-docs';
 
@@ -46,6 +47,22 @@ export interface CancellationPaper {
 
 export const CANCELLATION_PAPER_ACCEPT = '.pdf,.jpg,.jpeg,.png,.webp';
 export const MAX_CANCELLATION_PAPER_SIZE = MAX_EMPLOYEE_DOC_SIZE; // 15 MB
+
+/** The DEDICATED private bucket holding the encrypted cancellation papers
+ *  (created by supabase/migrations/20261123_cancellation_papers_bucket.sql). */
+export const CANCELLATION_PAPER_BUCKET = 'cancellation-papers';
+
+/** Friendly hint when Supabase storage rejects an operation because the
+ *  cancellation-papers bucket / policies / vault-key table are missing. */
+export function paperStorageSetupHint(message: string): string | null {
+  if (/policy|rls|row-level|permission|not found|bucket/i.test(message)) {
+    return `${message} — run supabase/migrations/20261123_cancellation_papers_bucket.sql in the Supabase SQL editor (once), then retry.`;
+  }
+  if (/document_vault_key/i.test(message)) {
+    return `${message} — the cancellation-papers migration creates this table; run supabase/migrations/20261123_cancellation_papers_bucket.sql once.`;
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // DEMO backend — IndexedDB mini bucket
@@ -108,8 +125,8 @@ export async function getCancellationPaper(requestId: string): Promise<Cancellat
   }
   if (!supabase) return null;
   const folder = `cancel_${requestId}`;
-  const { data, error } = await supabase.storage.from(EMPLOYEE_DOC_BUCKET).list(folder, { limit: 5 });
-  if (error) throw new Error(error.message);
+  const { data, error } = await supabase.storage.from(CANCELLATION_PAPER_BUCKET).list(folder, { limit: 5 });
+  if (error) throw new Error(paperStorageSetupHint(error.message) ?? error.message);
   const hit = (data ?? []).find((f) => f.id !== null && paperFileRe.test(f.name));
   if (!hit) return null;
   const ext = paperFileRe.exec(hit.name)![1];
@@ -158,16 +175,16 @@ export async function uploadCancellationPaper(requestId: string, file: File): Pr
   const path = `${folder}/paper.${ext}.bin`;
 
   // replace cleanly: drop the previous object if it had another extension
-  const { data: existing } = await supabase.storage.from(EMPLOYEE_DOC_BUCKET).list(folder, { limit: 5 });
+  const { data: existing } = await supabase.storage.from(CANCELLATION_PAPER_BUCKET).list(folder, { limit: 5 });
   const stale = (existing ?? [])
     .filter((f) => f.id !== null && paperFileRe.test(f.name) && f.name !== `paper.${ext}.bin`)
     .map((f) => `${folder}/${f.name}`);
-  if (stale.length > 0) await supabase.storage.from(EMPLOYEE_DOC_BUCKET).remove(stale);
+  if (stale.length > 0) await supabase.storage.from(CANCELLATION_PAPER_BUCKET).remove(stale);
 
   const { error } = await supabase.storage
-    .from(EMPLOYEE_DOC_BUCKET)
+    .from(CANCELLATION_PAPER_BUCKET)
     .upload(path, encrypted, { contentType: 'application/octet-stream', upsert: true });
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(paperStorageSetupHint(error.message) ?? error.message);
 }
 
 /** The DECRYPTED paper bytes (preview / download). */
@@ -178,8 +195,8 @@ export async function downloadCancellationPaper(paper: CancellationPaper): Promi
     return decryptBlob(rec.blob, rec.mime || mimeForExt(rec.ext));
   }
   if (!supabase) throw new Error('Supabase is not configured on this server.');
-  const { data, error } = await supabase.storage.from(EMPLOYEE_DOC_BUCKET).download(paper.path);
-  if (error || !data) throw new Error(error?.message ?? 'Download failed.');
+  const { data, error } = await supabase.storage.from(CANCELLATION_PAPER_BUCKET).download(paper.path);
+  if (error || !data) throw new Error(paperStorageSetupHint(error?.message ?? 'Download failed') ?? 'Download failed.');
   return decryptBlob(data, paper.mime || mimeForExt(paper.ext));
 }
 
@@ -197,6 +214,6 @@ export async function deleteCancellationPaper(paper: CancellationPaper): Promise
     return;
   }
   if (!supabase) throw new Error('Supabase is not configured on this server.');
-  const { error } = await supabase.storage.from(EMPLOYEE_DOC_BUCKET).remove([paper.path]);
-  if (error) throw new Error(error.message);
+  const { error } = await supabase.storage.from(CANCELLATION_PAPER_BUCKET).remove([paper.path]);
+  if (error) throw new Error(paperStorageSetupHint(error.message) ?? error.message);
 }

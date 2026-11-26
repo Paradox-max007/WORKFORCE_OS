@@ -416,6 +416,10 @@ export interface DemoPayrollEmployeeRow {
   gross_salary: number;
   advance: number;
   deduction: number;
+  /** how much of the deduction came from UNPAID medicine records scheduled
+   *  for this period — folded in by syncMedicinePeriod (mirrors the
+   *  payroll_employee.medicine_deduction_applied column) */
+  medicine_deduction_applied: number;
   /** automatic absent deduction — the configured rule value at generation
    *  time; when EDITED on the Payroll page it holds the ACTUAL amount and
    *  absent_deduction_edited is true (the stored value has priority) */
@@ -552,6 +556,7 @@ export const refreshPayrollEmployee = (
       advance: 0,
       advance_book_applied: 0,
       deduction: 0,
+      medicine_deduction_applied: 0,
       absent_deduction: calc.absent_deduction,
       absent_deduction_edited: false,
       net_salary: round2(calc.gross_salary - calc.absent_deduction),
@@ -653,6 +658,8 @@ export const refreshPayrollPeriod = (
 
   // fold due advance records scheduled for this month into the Advance column
   syncAdvanceBookPeriod(database, year, month);
+  // fold UNPAID medicine records scheduled for this month into the Deduction
+  syncMedicinePeriod(database, year, month);
 
   return period;
 };
@@ -705,6 +712,39 @@ export const syncAdvanceBookPeriod = (database: DemoDB, year: number, month: num
       r.applied_amount = target;
       r.updated_at = now;
     }
+  });
+};
+
+/** Fold the UNPAID medicine records scheduled for (year, month) into that
+ *  month's payroll DEDUCTION column (mirrors medicine_deduction_sync_period).
+ *  PAID rows are skipped (their markers stay frozen as the "recovered by
+ *  that salary" evidence); manual deduction edits are never double-counted
+ *  (medicine_deduction_applied tracks exactly the medicine part inside the
+ *  stored deduction). Paid medicine records never enter payroll at all. */
+export const syncMedicinePeriod = (database: DemoDB, year: number, month: number): void => {
+  const period = database.payrollPeriods.find((p) => p.year === year && p.month === month);
+  if (!period) return;
+  const rows = database.payrollEmployees.filter((pe) => pe.payroll_period_id === period.id);
+
+  for (const pe of rows) {
+    if (pe.payment_status === 'paid') continue;                 // locked
+    const medSum = round2(database.medicineRecords
+      .filter((r) => r.employee_id === pe.employee_id && !r.paid
+        && r.cut_year === year && r.cut_month === month)
+      .reduce((n, r) => n + r.total_amount, 0));
+    if ((pe.medicine_deduction_applied ?? 0) === medSum) continue; // unchanged
+    pe.deduction = round2(Math.max(0, pe.deduction - (pe.medicine_deduction_applied ?? 0) + medSum));
+    pe.medicine_deduction_applied = medSum;
+    pe.net_salary = round2(pe.gross_salary - pe.advance - pe.deduction - pe.absent_deduction);
+  }
+
+  // per-record markers — folded into an UNPAID row → full amount; row gone
+  // → back to 0 (the record is due again); PAID row → marker frozen (cleared)
+  database.medicineRecords.forEach((r) => {
+    if (r.paid || r.cut_year !== year || r.cut_month !== month) return;
+    const pe = rows.find((x) => x.employee_id === r.employee_id);
+    const target = !pe ? 0 : pe.payment_status === 'paid' ? r.applied_amount : round2(r.total_amount);
+    if (r.applied_amount !== target) r.applied_amount = target;
   });
 };
 
@@ -817,6 +857,8 @@ export const buildSalarySheet = (
   pes.forEach((pe) => {
     if (pe.absent_deduction == null) pe.absent_deduction = 0;
     if (pe.absent_deduction_edited == null) pe.absent_deduction_edited = false;
+    // medicine part of the deduction (20261126) — same heal
+    if (pe.medicine_deduction_applied == null) pe.medicine_deduction_applied = 0;
   });
 
   const totals: SalarySheetTotals = {

@@ -25,6 +25,7 @@ export type AppView =
   | 'attendance_calendar'
   | 'trade_management'
   | 'uniform_registry'
+  | 'medicine_registry'
   | 'leave_requests'
   | 'cancellation_requests'
   | 'notifications'
@@ -51,6 +52,7 @@ export const VIEW_TITLES: Record<AppView, string> = {
   attendance_calendar: 'Attendance Record',
   trade_management: 'Trade / Deduction Management',
   uniform_registry: 'Uniform Registry',
+  medicine_registry: 'Medicine Registry',
   leave_requests: 'Leave Requests',
   cancellation_requests: 'Cancellation Requests',
   notifications: 'Notifications Hub',

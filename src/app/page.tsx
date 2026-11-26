@@ -21,6 +21,7 @@ import { EmployeeFormPage } from '@/components/employees/employee-form-page';
 import { EmployeePage } from '@/components/employees/employee-page';
 import { AppHeader } from '@/components/layout/app-header';
 import { AppSidebar } from '@/components/layout/app-sidebar';
+import { MedicineRegistryPage } from '@/components/medicine/medicine-registry-page';
 import { BranchesPage } from '@/components/branches/branches-page';
 import { AttendanceCalendarPage } from '@/components/payroll/attendance-calendar-page';
 import { AdvanceBookPage } from '@/components/payroll/advance-book-page';
@@ -93,6 +94,7 @@ function MainLayout() {
     attendance_calendar: <AttendanceCalendarPage />,
     trade_management: <TradePage />,
     uniform_registry: <UniformRegistryPage />,
+    medicine_registry: <MedicineRegistryPage />,
     leave_requests: <LeaveRequestPage />,
     cancellation_requests: <CancellationRequestPage />,
     notifications: <NotificationPage />,

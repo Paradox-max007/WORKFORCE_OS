@@ -26,7 +26,7 @@
 
 import {
   LayoutDashboard, Users, Building2, GitBranch, Tent, CalendarCheck, Clock, Shirt,
-  FileWarning, Ban, Bell, UserSquare2, UserCog, Wallet, Banknote, BookOpenText, Wrench, Settings, type LucideIcon,
+  FileWarning, Ban, Bell, UserSquare2, UserCog, Wallet, Banknote, BookOpenText, Wrench, Pill, Settings, type LucideIcon,
 } from 'lucide-react';
 import type { AppView } from '@/store/app-store';
 import type { MenuPermissionMap } from '@/lib/types';
@@ -90,6 +90,7 @@ export const MENUS = [
   { id: 'advance_book', label: 'Advance Book', hint: 'Advance ledger — due & cleared records, cut-month scheduling', icon: BookOpenText, managed: true, defaultOn: false, group: 'salary_details' },
   { id: 'trade_management', label: 'Trade/Ded Management', hint: 'Trades, hourly rates & the absent deduction rule', icon: Wrench, managed: true, defaultOn: false, group: 'salary_details' },
   { id: 'uniform_registry', label: 'Uniform Registry', hint: 'Uniform tokens & renewals', icon: Shirt, managed: true, defaultOn: true },
+  { id: 'medicine_registry', label: 'Medicine Registry', hint: 'Basic medicine stock & dispensing — unpaid amounts deduct from the coming salary (MED tag)', icon: Pill, managed: true, defaultOn: false },
   { id: 'leave_requests', label: 'Leave Requests', hint: 'Leave applications & review', icon: FileWarning, managed: true, defaultOn: false },
   { id: 'cancellation_requests', label: 'Cancellations', hint: 'Employee deletion requests', icon: Ban, managed: true, defaultOn: false },
   { id: 'notifications', label: 'Notifications', hint: 'Alerts & announcements', icon: Bell, managed: true, defaultOn: false },

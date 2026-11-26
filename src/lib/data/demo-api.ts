@@ -30,6 +30,10 @@ import {
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
+  type Medicine,
+  type MedicineDispenseInput,
+  type MedicineInput,
+  type MedicineRecordVM,
   type MonthlySummaryRow,
   type Notification,
   type PayrollAdjustmentInput,
@@ -81,6 +85,8 @@ import {
   uid,
   daysInMonth,
   type DemoAttendanceShareLink,
+  type DemoMedicine,
+  type DemoMedicineRecord,
 } from './demo-store';
 import {
   absentDeductionOf,
@@ -98,6 +104,7 @@ import {
   resetPayrollEmployeeAuto,
   round2,
   syncAdvanceBookPeriod,
+  syncMedicinePeriod,
   tradesWithRates,
 } from './demo-salary';
 import { MENUS, defaultPermissionMap, permissionLabel, type PermissionKey } from '@/lib/menus';
@@ -404,6 +411,50 @@ const attachTerminationVM = (t: (typeof db.terminationLetters)[number]): Termina
     employee_name: e?.full_name ?? 'Unknown',
     employee_code: e?.employee_code ?? '—',
     created_by_name: profileName(t.created_by) ?? 'System',
+  };
+};
+
+/** CLEARED = the record was folded into the cut month's Deduction AND that
+ *  salary was PAID (mirrors the SQL derived status — can never drift). */
+const medicineRecordCleared = (r: (typeof db.medicineRecords)[number]): boolean => {
+  if (r.paid || r.cut_year == null || r.cut_month == null || r.applied_amount <= 0) return false;
+  const period = db.payrollPeriods.find(
+    (p) => p.year === r.cut_year && p.month === r.cut_month);
+  if (!period) return false;
+  const pe = db.payrollEmployees.find(
+    (x) => x.payroll_period_id === period.id && x.employee_id === r.employee_id);
+  return pe?.payment_status === 'paid';
+};
+
+/** Raw medicine_record row → MedicineRecordVM (employee join + derived status). */
+const attachMedicineVM = (r: (typeof db.medicineRecords)[number]): MedicineRecordVM => {
+  const e = db.employees.find((x) => x.id === r.employee_id);
+  const cleared = medicineRecordCleared(r);
+  const period = r.cut_year != null && r.cut_month != null
+    ? db.payrollPeriods.find((p) => p.year === r.cut_year && p.month === r.cut_month)
+    : undefined;
+  const pe = period
+    ? db.payrollEmployees.find(
+        (x) => x.payroll_period_id === period.id && x.employee_id === r.employee_id)
+    : undefined;
+  return {
+    id: r.id,
+    employee_id: r.employee_id,
+    employee_name: e?.full_name ?? 'Unknown',
+    employee_code: e?.employee_code ?? '—',
+    photo: e?.photo ?? null,
+    dispensed_at: r.dispensed_at,
+    items: r.items,
+    total_amount: r.total_amount,
+    paid: r.paid,
+    paid_at: r.paid_at,
+    cut_year: r.cut_year,
+    cut_month: r.cut_month,
+    applied_amount: r.applied_amount,
+    cleared,
+    cleared_at: cleared ? pe?.paid_at ?? null : null,
+    created_by_name: r.created_by ? profileName(r.created_by) : null,
+    created_at: r.created_at,
   };
 };
 
@@ -1973,6 +2024,203 @@ export const demoApi = {
     if (!u) return;
     u.is_deleted = true;
     saveAndEmit(['uniform_registry']);
+  },
+
+  // ---- medicine registry (mirrors the 20261126 RPCs) -------------------------
+
+  /** Stock list — every medicine (active + deactivated), alphabetical. */
+  async listMedicines(): Promise<Medicine[]> {
+    return [...db.medicines].sort((a, b) => a.name.localeCompare(b.name));
+  },
+
+  /** Add / edit a medicine (name, rate per tablet, quantity available). */
+  async saveMedicine(input: MedicineInput): Promise<Medicine> {
+    const name = input.name.trim();
+    if (!name) throw new Error('Medicine name is required');
+    if (!Number.isFinite(input.rate_per_tablet) || input.rate_per_tablet < 0) {
+      throw new Error('Rate per tablet must be 0 or more');
+    }
+    const qty = Math.round(input.quantity_available);
+    if (!Number.isFinite(qty) || qty < 0) {
+      throw new Error('Quantity available must be 0 or more');
+    }
+    const dup = db.medicines.find(
+      (m) => m.id !== input.id && m.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (dup) throw new Error(`"${dup.name}" already exists in the stock list`);
+
+    if (input.id) {
+      const med = db.medicines.find((m) => m.id === input.id);
+      if (!med) throw new Error('Medicine not found');
+      med.name = name;
+      med.rate_per_tablet = round2(input.rate_per_tablet);
+      med.quantity_available = qty;
+      med.is_active = input.is_active ?? med.is_active;
+      med.updated_at = nowISO();
+      saveAndEmit(['medicine']);
+      return { ...med };
+    }
+    const med: DemoMedicine = {
+      id: uid(), name,
+      rate_per_tablet: round2(input.rate_per_tablet),
+      quantity_available: qty,
+      is_active: input.is_active ?? true,
+      created_at: nowISO(), updated_at: nowISO(),
+    };
+    db.medicines.push(med);
+    saveAndEmit(['medicine']);
+    return { ...med };
+  },
+
+  async deleteMedicine(id: string): Promise<void> {
+    if (!db.medicines.some((m) => m.id === id)) throw new Error('Medicine not found');
+    db.medicines = db.medicines.filter((m) => m.id !== id);
+    saveAndEmit(['medicine']);
+  },
+
+  /** Record medicines handed to an employee (multiple lines at once). PAID →
+   *  nothing touches payroll. UNPAID → the total deducts from the employee's
+   *  COMING salary: this month's settlement while it is still unpaid, else
+   *  next month's (syncMedicinePeriod folds it into the Deduction column). */
+  async dispenseMedicine(input: MedicineDispenseInput): Promise<MedicineRecordVM> {
+    const me = currentProfile();
+    const emp = db.employees.find((e) => e.id === input.employee_id && e.status !== 'deleted');
+    if (!emp) throw new Error('Employee not found');
+    if (emp.status === 'cancelled') {
+      throw new Error('This employee is cancelled — restore them before dispensing medicines');
+    }
+    const picked = input.items.filter((it) => it.medicine_id);
+    if (picked.length === 0) throw new Error('Select at least one medicine');
+
+    // validate + snapshot every line BEFORE touching the stock (nothing is
+    // deducted when any line is invalid)
+    const lines = picked.map((it) => {
+      const med = db.medicines.find((m) => m.id === it.medicine_id);
+      if (!med || !med.is_active) throw new Error('Medicine not found or inactive');
+      const qty = Math.floor(Number(it.quantity));
+      if (!Number.isFinite(qty) || qty < 1) {
+        throw new Error(`Enter how many ${med.name} the employee takes`);
+      }
+      if (qty > med.quantity_available) {
+        throw new Error(`Only ${med.quantity_available} × ${med.name} left in stock`);
+      }
+      return { med, qty };
+    });
+    const items = lines.map(({ med, qty }) => ({
+      medicine_id: med.id,
+      medicine_name: med.name,
+      rate_per_tablet: med.rate_per_tablet,
+      quantity: qty,
+      amount: round2(med.rate_per_tablet * qty),
+    }));
+    const total = round2(items.reduce((n, i) => n + i.amount, 0));
+    const dispensedAt = input.dispensed_at || nowISO();
+
+    // COMING SALARY: the dispense month's settlement while it is still
+    // unpaid — a paid settlement can never absorb it, so roll to next month
+    let cutYear: number | null = null;
+    let cutMonth: number | null = null;
+    if (!input.paid) {
+      const d = new Date(dispensedAt);
+      let y = d.getFullYear();
+      let m = d.getMonth() + 1;
+      const monthRowPaid = db.payrollEmployees.some((pe) => {
+        const p = db.payrollPeriods.find((pp) => pp.id === pe.payroll_period_id);
+        return p?.year === y && p?.month === m
+          && pe.employee_id === emp.id && pe.payment_status === 'paid';
+      });
+      if (monthRowPaid) {
+        const nm = new Date(y, m, 1);
+        y = nm.getFullYear();
+        m = nm.getMonth() + 1;
+      }
+      cutYear = y;
+      cutMonth = m;
+    }
+
+    lines.forEach(({ med, qty }) => {
+      med.quantity_available -= qty;
+      med.updated_at = nowISO();
+    });
+    const rec: DemoMedicineRecord = {
+      id: uid(),
+      employee_id: emp.id,
+      dispensed_at: dispensedAt,
+      items,
+      total_amount: total,
+      paid: !!input.paid,
+      paid_at: input.paid ? nowISO() : null,
+      cut_year: cutYear,
+      cut_month: cutMonth,
+      applied_amount: 0,
+      created_by: me?.id ?? null,
+      created_at: nowISO(),
+    };
+    db.medicineRecords.push(rec);
+    if (!rec.paid) syncMedicinePeriod(db, rec.cut_year!, rec.cut_month!);
+    saveAndEmit(['medicine', 'medicine_record', 'payroll_period', 'payroll_employee']);
+    return attachMedicineVM(rec);
+  },
+
+  /** The employee paid later — removes the pending salary deduction (the
+   *  sync re-folds the cut month without this record). Cleared records
+   *  (already recovered by a PAID salary) cannot be marked paid afterwards. */
+  async markMedicineRecordPaid(id: string): Promise<void> {
+    const rec = db.medicineRecords.find((r) => r.id === id);
+    if (!rec) throw new Error('Medicine record not found');
+    if (rec.paid) return;
+    if (medicineRecordCleared(rec)) {
+      throw new Error(`This amount was already deducted from the paid ${MONTH_NAMES[rec.cut_month! - 1]} ${rec.cut_year} salary — it cannot be marked paid afterwards`);
+    }
+    const oldY = rec.cut_year;
+    const oldM = rec.cut_month;
+    rec.paid = true;
+    rec.paid_at = nowISO();
+    rec.cut_year = null;
+    rec.cut_month = null;
+    rec.applied_amount = 0;
+    if (oldY != null && oldM != null) syncMedicinePeriod(db, oldY, oldM);
+    saveAndEmit(['medicine_record', 'payroll_period', 'payroll_employee']);
+  },
+
+  /** Delete a dispense record that was never recovered by a paid salary —
+   *  the stock is restored (the dispense is annulled) and the pending
+   *  deduction is removed. Cleared records are kept as history. */
+  async deleteMedicineRecord(id: string): Promise<void> {
+    const rec = db.medicineRecords.find((r) => r.id === id);
+    if (!rec) throw new Error('Medicine record not found');
+    if (medicineRecordCleared(rec)) {
+      throw new Error(`This amount was already deducted from the paid ${MONTH_NAMES[rec.cut_month! - 1]} ${rec.cut_year} salary — cleared records are kept as history`);
+    }
+    const oldY = rec.cut_year;
+    const oldM = rec.cut_month;
+    rec.items.forEach((it) => {
+      const med = db.medicines.find((m) => m.id === it.medicine_id);
+      if (med) {
+        med.quantity_available += it.quantity;
+        med.updated_at = nowISO();
+      }
+    });
+    db.medicineRecords = db.medicineRecords.filter((r) => r.id !== id);
+    if (oldY != null && oldM != null) syncMedicinePeriod(db, oldY, oldM);
+    saveAndEmit(['medicine', 'medicine_record', 'payroll_period', 'payroll_employee']);
+  },
+
+  /** Every dispense record, newest first — normal admins only see the records
+   *  of employees working at one of their GRANTED sites (branch sites +
+   *  direct assignments), mirroring getAdvanceBook's scoping. */
+  async listMedicineRecords(): Promise<MedicineRecordVM[]> {
+    const records = db.medicineRecords
+      .map(attachMedicineVM)
+      .sort((a, b) => (a.dispensed_at < b.dispensed_at ? 1 : -1));
+    const allowedSites = mySiteAllowance();
+    if (allowedSites === null) return records;
+    const scopeEmpIds = new Set(
+      db.employees
+        .filter((e) => e.current_site_id !== null && allowedSites.has(e.current_site_id))
+        .map((e) => e.id),
+    );
+    return records.filter((r) => scopeEmpIds.has(r.employee_id));
   },
 
   // ---- trades & salary ---------------------------------------------------------

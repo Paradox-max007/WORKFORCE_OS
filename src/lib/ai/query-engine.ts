@@ -643,6 +643,32 @@ const TABLES: Record<string, TableDef> = {
       };
     },
   },
+  medicine_records: {
+    doc: 'medicine dispensing records — employee_code, employee_name, taken_at (date + time), medicines (item lines), total_amount, payment (paid | unpaid → cut_month salary | recovered), recorded_by',
+    fields: ['employee_code', 'employee_name', 'taken_at', 'medicines', 'total_amount', 'payment', 'recorded_by'],
+    defaultFields: ['employee_code', 'employee_name', 'taken_at', 'medicines', 'total_amount', 'payment'],
+    defaultOrder: { field: 'taken_at', desc: true },
+    fetch: async () => {
+      const list = await dataApi.listMedicineRecords();
+      const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'];
+      return {
+        rows: list.map((r) => ({
+          employee_code: r.employee_code,
+          employee_name: r.employee_name,
+          taken_at: fmtDateTime(r.dispensed_at),
+          medicines: r.items.map((i) => `${i.medicine_name} ×${i.quantity} @ ${i.rate_per_tablet}`).join(', '),
+          total_amount: r.total_amount,
+          payment: r.paid
+            ? 'paid'
+            : r.cleared
+              ? `recovered by the paid ${r.cut_month ? MONTHS[r.cut_month - 1] : ''} ${r.cut_year} salary`
+              : `unpaid → deducts from the ${r.cut_month ? MONTHS[r.cut_month - 1] : ''} ${r.cut_year} salary`,
+          recorded_by: r.created_by_name ?? null,
+        })),
+      };
+    },
+  },
   working_hours: {
     doc: 'per-employee monthly worked hours by site — month (YYYY-MM), site, hours, days. Param: {"employee_id":"…"} (required — the UUID id field of employees / cancelled_employees)',
     fields: ['month', 'site', 'hours', 'days'],

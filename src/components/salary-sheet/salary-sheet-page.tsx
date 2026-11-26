@@ -44,7 +44,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, Check, ChevronDown, ChevronRight, ChevronUp, ClipboardCheck, Clock, Eye,
-  FileSpreadsheet, GitBranch, History, Loader2, Lock, LockOpen, Pencil, PencilLine, RotateCcw, Search,
+  FileSpreadsheet, GitBranch, History, Loader2, Lock, LockOpen, Pencil, PencilLine, Pill, RotateCcw, Search,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -64,11 +64,12 @@ import {
 } from '@/components/ui/table';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
 import { TimeCardDialog } from '@/components/salary-sheet/time-card-dialog';
+import { MedicineRecordDialog } from '@/components/medicine/medicine-record-dialog';
 import { dataApi } from '@/lib/data';
 import { fmtDateTime, initials } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  type PayrollEmployeeVM, type PayrollSalaryLineVM, type SalarySheetReport,
+  type MedicineRecordVM, type PayrollEmployeeVM, type PayrollSalaryLineVM, type SalarySheetReport,
   type SalarySheetSiteGroup, type SiteWithCount, type Trade, type BranchWithCount,
 } from '@/lib/types';
 import { useAppStore } from '@/store/app-store';
@@ -229,7 +230,7 @@ function LinesDialog({ employee, siteName, open, onOpenChange }: {
 function SiteGroup({
   group, index, onShowLines, editMode, peIdOf, siteDraftOf, onSiteDraftChange,
   onSaveSite, onResetAuto, busyKey, tradeOptions, tradeLabelOf, tradeStateOf, onTradeChange,
-  paidOf, settlementOf, onOpenTimeCard,
+  paidOf, settlementOf, onOpenMedRecords, onOpenTimeCard,
 }: {
   group: SalarySheetSiteGroup;
   index: number;
@@ -247,13 +248,16 @@ function SiteGroup({
   tradeStateOf: (employeeId: string) => TradeState;
   onTradeChange: (employeeId: string, tradeId: string | null) => void;
   paidOf: (employeeId: string) => boolean;
-  /** employee-level settlement (advance / deduction / absent deduction) —
-   *  set per employee in Payroll; the absent part follows the Payroll page
-   *  rule (an edited amount there has priority) */
+  /** employee-level settlement (advance / deduction / absent deduction /
+   *  medicine amount) — set per employee in Payroll; the absent part follows
+   *  the Payroll page rule (an edited amount there has priority) */
   settlementOf: (employeeId: string) => {
     advance: number; deduction: number;
     absent_deduction: number; absent_deduction_edited: boolean;
+    medicine_amount: number;
   } | undefined;
+  /** open the medicine record dialog for one employee (the MED tag click) */
+  onOpenMedRecords: (employeeId: string) => void;
   /** open the Time Card dialog for this site (site sections only) */
   onOpenTimeCard: (siteId: string, siteName: string) => void;
 }) {
@@ -547,7 +551,7 @@ function SiteGroup({
                             <TableCell className="text-right font-mono text-xs">
                               <span
                                 className={settlement && (settlement.deduction + settlement.absent_deduction) > 0 ? '' : 'text-muted-foreground'}
-                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
+                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}${(settlement?.medicine_amount ?? 0) > 0 ? ` + medicine ${fmtMoney(settlement?.medicine_amount ?? 0)} (MED tag — click it to open the medicine record)` : ''}`}
                               >
                                 {settlement && (settlement.deduction + settlement.absent_deduction) > 0
                                   ? fmtMoney(settlement.deduction + settlement.absent_deduction)
@@ -567,6 +571,16 @@ function SiteGroup({
                                   >
                                     <Pencil size={9} />
                                   </span>
+                                )}
+                                {(settlement?.medicine_amount ?? 0) > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenMedRecords(r.employee_id)}
+                                    title={`Medicine — ${fmtMoney(settlement!.medicine_amount)} unpaid medicine record(s) folded into this month's Deduction (MED). Click to open the medicine record.`}
+                                    className="ml-1 inline-flex cursor-pointer items-center gap-0.5 rounded bg-sky-500/15 px-1 py-0.5 text-[9px] font-bold text-sky-600 transition-colors hover:bg-sky-500/25 dark:text-sky-400"
+                                  >
+                                    <Pill size={9} /> MED
+                                  </button>
                                 )}
                               </span>
                             </TableCell>
@@ -649,7 +663,7 @@ function SiteGroup({
                             <TableCell className="text-right font-mono text-xs">
                               <span
                                 className={settlement && (settlement.deduction + settlement.absent_deduction) > 0 ? '' : 'text-muted-foreground'}
-                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}`}
+                                title={`Deduction is set per employee on the Payroll page — manual ${fmtMoney(settlement?.deduction ?? 0)}${(settlement?.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(settlement?.absent_deduction ?? 0)}${settlement?.absent_deduction_edited ? ' (manually set — priority)' : ''}` : ''}${(settlement?.medicine_amount ?? 0) > 0 ? ` + medicine ${fmtMoney(settlement?.medicine_amount ?? 0)} (MED tag — click it to open the medicine record)` : ''}`}
                               >
                                 {settlement && (settlement.deduction + settlement.absent_deduction) > 0
                                   ? fmtMoney(settlement.deduction + settlement.absent_deduction)
@@ -669,6 +683,16 @@ function SiteGroup({
                                   >
                                     <Pencil size={9} />
                                   </span>
+                                )}
+                                {(settlement?.medicine_amount ?? 0) > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenMedRecords(r.employee_id)}
+                                    title={`Medicine — ${fmtMoney(settlement!.medicine_amount)} unpaid medicine record(s) folded into this month's Deduction (MED). Click to open the medicine record.`}
+                                    className="ml-1 inline-flex cursor-pointer items-center gap-0.5 rounded bg-sky-500/15 px-1 py-0.5 text-[9px] font-bold text-sky-600 transition-colors hover:bg-sky-500/25 dark:text-sky-400"
+                                  >
+                                    <Pill size={9} /> MED
+                                  </button>
                                 )}
                               </span>
                             </TableCell>
@@ -692,7 +716,7 @@ function SiteGroup({
 // Page
 // ---------------------------------------------------------------------------
 export function SalarySheetPage() {
-  const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'attendance', 'employee', 'trade_rate_history']);
+  const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'attendance', 'employee', 'trade_rate_history', 'medicine_record']);
   // branch/site scoping data — powers the BRANCH dropdown in the top row
   const branchVersion = useRealtimeVersion(['site', 'branch', 'admin_branch', 'admin_site', 'profiles']);
   const isSuperAdmin = useAuthStore((s) => s.user?.role) === 'super_admin';
@@ -714,6 +738,11 @@ export function SalarySheetPage() {
   const [reopenOpen, setReopenOpen] = useState(false);
   // per-site TIME CARD dialog (each site section header has its own button)
   const [timeCardTarget, setTimeCardTarget] = useState<{ siteId: string; siteName: string } | null>(null);
+
+  // medicine records — the UNPAID ones scheduled for the viewed month are the
+  // MED-tag part of the Deduction column (clicking the tag opens the record)
+  const [medicineRecords, setMedicineRecords] = useState<MedicineRecordVM[] | null>(null);
+  const [medDialogRecords, setMedDialogRecords] = useState<MedicineRecordVM[] | null>(null);
 
   // ---- edit mode (the sheet record has priority) ---------------------------
   const [editMode, setEditMode] = useState(false);
@@ -782,6 +811,15 @@ export function SalarySheetPage() {
 
   useEffect(load, [year, month, realtimeVersion]);
 
+  // medicine records (never blocking the sheet — the MED tag simply pops in)
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.listMedicineRecords()
+      .then((rows) => { if (!cancelled) setMedicineRecords(rows); })
+      .catch(() => { if (!cancelled) setMedicineRecords(null); });
+    return () => { cancelled = true; };
+  }, [realtimeVersion]);
+
   // trades for the edit-mode dropdown
   useEffect(() => {
     if (!editMode) return;
@@ -823,23 +861,45 @@ export function SalarySheetPage() {
     [employeeById],
   );
 
-  /** employee-level settlement (advance / deduction / absent deduction) for
-   *  the new columns — same value on every site row of the employee; edited
-   *  on the Payroll page (an edited absent deduction has priority) */
+  /** employee-level settlement (advance / deduction / absent deduction /
+   *  medicine amount) for the new columns — same value on every site row of
+   *  the employee; edited on the Payroll page (an edited absent deduction has
+   *  priority). The medicine amount = the employee's UNPAID medicine records
+   *  scheduled for the viewed month (folded into the Deduction column). */
   const settlementOf = useCallback(
     (employeeId: string): {
       advance: number; deduction: number;
       absent_deduction: number; absent_deduction_edited: boolean;
+      medicine_amount: number;
     } | undefined => {
       const e = employeeById.get(employeeId);
-      return e ? {
+      if (!e) return undefined;
+      const med = (medicineRecords ?? []).filter(
+        (r) => r.employee_id === employeeId && !r.paid
+          && r.cut_year === year && r.cut_month === month,
+      );
+      return {
         advance: e.advance,
         deduction: e.deduction,
         absent_deduction: e.absent_deduction ?? 0,
         absent_deduction_edited: !!e.absent_deduction_edited,
-      } : undefined;
+        medicine_amount: Math.round(med.reduce((n, r) => n + r.total_amount, 0) * 100) / 100,
+      };
     },
-    [employeeById],
+    [employeeById, medicineRecords, year, month],
+  );
+
+  /** open the medicine record dialog for one employee (the MED tag click) */
+  const openMedRecords = useCallback(
+    (employeeId: string): void => {
+      setMedDialogRecords(
+        (medicineRecords ?? []).filter(
+          (r) => r.employee_id === employeeId && !r.paid
+            && r.cut_year === year && r.cut_month === month,
+        ),
+      );
+    },
+    [medicineRecords, year, month],
   );
 
   const siteDraftOf = useCallback((peId: string, r: SiteRow): SiteDraft =>
@@ -1316,6 +1376,7 @@ export function SalarySheetPage() {
                   onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   paidOf={paidOf}
                   settlementOf={settlementOf}
+                  onOpenMedRecords={openMedRecords}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
                   onOpenTimeCard={(siteId, siteName) => setTimeCardTarget({ siteId, siteName })}
                 />
@@ -1339,6 +1400,7 @@ export function SalarySheetPage() {
                   onTradeChange={(employeeId, tradeId) => { void onTradeChange(employeeId, tradeId); }}
                   paidOf={paidOf}
                   settlementOf={settlementOf}
+                  onOpenMedRecords={openMedRecords}
                   onShowLines={(employeeId, siteName) => setLinesTarget({ employeeId, siteName })}
                   onOpenTimeCard={() => undefined}
                 />
@@ -1418,6 +1480,15 @@ export function SalarySheetPage() {
       />
       <FinalizeDialog report={report} open={finalizeOpen} onOpenChange={setFinalizeOpen} onDone={load} />
       <ReopenDialog report={report} open={reopenOpen} onOpenChange={setReopenOpen} onDone={load} />
+
+      {/* medicine record(s) behind a MED tag — view only (the Medicine
+          Registry manages marking paid / deleting) */}
+      {medDialogRecords && medDialogRecords.length > 0 && (
+        <MedicineRecordDialog
+          records={medDialogRecords}
+          onClose={() => setMedDialogRecords(null)}
+        />
+      )}
     </div>
   );
 }

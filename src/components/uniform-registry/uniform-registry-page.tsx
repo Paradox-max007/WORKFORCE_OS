@@ -83,6 +83,10 @@ const toEmployeeInput = (e: EmployeeVM): EmployeeInput => ({
   photo: e.photo,
   is_team_leader: e.is_team_leader,
   team_leader_site_id: e.team_leader_site_id,
+  // pass the trade through — omitting it would WIPE the employee's trade
+  // (update_employee treats a missing trade_id as "no trade")
+  trade_id: e.trade_id,
+  salary_role: e.salary_role,
 });
 
 // ---------------------------------------------------------------------------

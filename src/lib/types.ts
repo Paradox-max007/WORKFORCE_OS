@@ -339,6 +339,84 @@ export interface UniformEntry {
   renewal_date: string;
 }
 
+// ============================================================================
+// Medicine Registry — basic medicines handed to employees
+// ============================================================================
+/** One basic medicine in the dispensary stock (rate per tablet + quantity). */
+export interface Medicine {
+  id: string;
+  name: string;
+  /** price per tablet / capsule / sachet charged when dispensed */
+  rate_per_tablet: number;
+  /** units currently in stock */
+  quantity_available: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Add / edit payload — save_medicine RPC. */
+export interface MedicineInput {
+  /** present → edit an existing medicine; absent → add a new one */
+  id?: string;
+  name: string;
+  rate_per_tablet: number;
+  quantity_available: number;
+  is_active?: boolean;
+}
+
+/** One dispensed medicine line (SNAPSHOT — survives renames / deletes of the
+ *  stock entry, so every record stays readable as history). */
+export interface MedicineLineItem {
+  medicine_id: string;
+  medicine_name: string;
+  rate_per_tablet: number;
+  quantity: number;
+  amount: number;
+}
+
+/** One medicine dispense record: WHAT an employee took, WHEN (date + time)
+ *  and whether they PAID. UNPAID records deduct from the coming salary —
+ *  medicine_deduction_sync_period folds the amount into that month's payroll
+ *  Deduction column and the Payroll page shows it with a MED tag. Status is
+ *  DERIVED (can never drift): cleared = the cut month's salary was PAID with
+ *  this record folded in (applied_amount > 0). Paid records never touch
+ *  payroll — deduction only happens when NOT paid. */
+export interface MedicineRecordVM {
+  id: string;
+  employee_id: string;
+  employee_name: string;
+  employee_code: string;
+  photo: string | null;
+  /** date AND time the employee took the medicines */
+  dispensed_at: string;
+  items: MedicineLineItem[];
+  total_amount: number;
+  /** true → the employee paid (at the counter, or marked paid later) */
+  paid: boolean;
+  paid_at: string | null;
+  /** salary month an UNPAID record deducts from (null when paid) */
+  cut_year: number | null;
+  cut_month: number | null;
+  /** how much of this record currently sits inside the cut month's Deduction */
+  applied_amount: number;
+  /** true → recovered by the cut month's PAID salary */
+  cleared: boolean;
+  cleared_at: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+/** Dispense payload — dispense_medicine RPC. */
+export interface MedicineDispenseInput {
+  employee_id: string;
+  items: { medicine_id: string; quantity: number }[];
+  /** true → paid at the counter (no salary deduction) */
+  paid: boolean;
+  /** override the taken moment (defaults to now) */
+  dispensed_at?: string | null;
+}
+
 import type { PermissionKey } from './menus';
 
 /** Per-admin permission map: every sidebar menu key plus the permission-only
@@ -1008,6 +1086,8 @@ export type RealtimeTable =
   | 'leave_request'
   | 'cancellation_request'
   | 'uniform_registry'
+  | 'medicine'
+  | 'medicine_record'
   | 'site_transfer'
   | 'company'
   | 'card_type'

@@ -51,7 +51,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeftRight, Building2, CalendarCheck, CalendarDays, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, Copy, ExternalLink, GitBranch, Link2, Loader2, Lock, MapPin, MessageCircle, Search, Send, Shield,
-  Tent, Unlock, UserCheck, UserX, Users, X, Zap,
+  Tent, Unlock, UserCheck, UserPlus, UserX, Users, X, Zap,
 } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
@@ -79,9 +79,10 @@ import {
   type SiteTimelineInput,
 } from '@/lib/site-timeline';
 import { cn } from '@/lib/utils';
+import { menuAllows } from '@/lib/menus';
 import type {
   AdminSiteAssignment, Attendance, AttendanceShareLink, BranchWithCount,
-  BulkAttendanceEntry, EmployeeVM, SiteTransfer, SiteWithCount,
+  BulkAttendanceEntry, EmployeeInput, EmployeeVM, SiteTransfer, SiteWithCount,
 } from '@/lib/types';
 import { useAuthStore } from '@/store/auth-store';
 import { useRealtimeVersion } from '@/store/realtime';
@@ -179,6 +180,43 @@ function parseCell(raw: string): { kind: 'absent' | 'hours' | 'text' | 'clear' |
   return { kind: 'invalid', hours: null };
 }
 
+/**
+ * updateEmployee() requires the FULL EmployeeInput — build one from an existing
+ * EmployeeVM and override only the site/leader fields (mirrors the Sites page
+ * helper). trade_id + salary_role are passed through EXPLICITLY: omitting them
+ * would wipe the employee's trade (update_employee treats a missing trade_id
+ * as "no trade"), and the Add Employee flow must only move the site.
+ */
+const toEmployeeInput = (
+  e: EmployeeVM,
+  overrides: Partial<Pick<EmployeeInput, 'current_site_id' | 'is_team_leader' | 'team_leader_site_id'>> = {},
+): EmployeeInput => ({
+  full_name: e.full_name,
+  nationality: e.nationality,
+  date_of_birth: e.date_of_birth,
+  phone: e.phone,
+  email: e.email,
+  address: e.address,
+  emergency_contact: e.emergency_contact,
+  position: e.position,
+  join_date: e.join_date,
+  company_name: e.company_name,
+  passport_number: e.passport_number,
+  passport_status: e.passport_status,
+  id_number: e.id_number,
+  id_status: e.id_status,
+  current_site_id: e.current_site_id,
+  camp_id: e.camp_id,
+  camp_block: e.camp_block,
+  camp_room: e.camp_room,
+  photo: e.photo,
+  is_team_leader: e.is_team_leader,
+  team_leader_site_id: e.team_leader_site_id,
+  trade_id: e.trade_id,
+  salary_role: e.salary_role,
+  ...overrides,
+});
+
 // ---------------------------------------------------------------------------
 // One site section type (header band + that site's crew table)
 // ---------------------------------------------------------------------------
@@ -259,6 +297,16 @@ export function AttendancePage() {
   // "View by Supervisors" popover state
   const [supOpen, setSupOpen] = useState(false);
   const [expandedSupervisor, setExpandedSupervisor] = useState<string | null>(null);
+
+  // ---- Add Employee to a site (per-section dialog) ---------------------------
+  // update_employee (the RPC the Sites page uses to assign a site) gates on the
+  // Employees menu — only viewers holding it see the button
+  const menuPermissions = useAuthStore((s) => s.menuPermissions);
+  const canAssignEmployees = isSuperAdmin || menuAllows(menuPermissions, 'employees');
+  const [addOpenSite, setAddOpenSite] = useState<{ id: string; name: string } | null>(null);
+  const [addQuery, setAddQuery] = useState('');
+  const [addPicked, setAddPicked] = useState<Set<string>>(new Set());
+  const [addSaving, setAddSaving] = useState(false);
 
   // shareable digital sheets — one-time links per site (right sidebar)
   const [shareLinks, setShareLinks] = useState<AttendanceShareLink[] | null>(null);
@@ -788,6 +836,68 @@ export function AttendancePage() {
   };
 
   // ===========================================================================
+  // ADD EMPLOYEE TO A SITE — the per-section "Add Employee" button opens a
+  // searchable, multi-select picker of every ACTIVE employee not already at
+  // that site. Confirming transfers each of them (updateEmployee → current_
+  // site_id, exactly like the Sites page picker): a site move effective today
+  // is recorded, so the marking sheet, the Bulk Day dialog, the permissions
+  // engine AND the site's printable attendance paper (PDF) all pick the new
+  // crew up immediately through the shared site-timeline engine.
+  // ===========================================================================
+  const addCandidates = useMemo(() => {
+    if (!addOpenSite) return [];
+    const q = addQuery.trim().toLowerCase();
+    return (employees ?? [])
+      .filter((e) => e.status === 'active' && e.current_site_id !== addOpenSite.id)
+      .filter((e) => !q
+        || `${e.full_name} ${e.employee_code} ${e.position ?? ''} ${e.nationality ?? ''} ${e.trade_name ?? ''}`
+          .toLowerCase().includes(q))
+      .sort((a, b) => a.full_name.localeCompare(b.full_name));
+  }, [employees, addOpenSite, addQuery]);
+
+  const toggleAddPick = (id: string) => {
+    setAddPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const closeAddDialog = () => {
+    setAddOpenSite(null);
+    setAddPicked(new Set());
+    setAddQuery('');
+  };
+
+  const confirmAddEmployees = async () => {
+    if (!addOpenSite || addPicked.size === 0 || addSaving) return;
+    setAddSaving(true);
+    const { id: siteId, name: siteName } = addOpenSite;
+    const picked = [...addPicked];
+    const results = await Promise.allSettled(picked.map((id) => {
+      const emp = (employees ?? []).find((e) => e.id === id);
+      if (!emp) return Promise.reject(new Error('Employee not found'));
+      return dataApi.updateEmployee(id, toEmployeeInput(emp, { current_site_id: siteId }));
+    }));
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    const failed = results.length - ok;
+    if (ok > 0) {
+      toast.success(`${ok} employee${ok !== 1 ? 's' : ''} added to ${siteName}`, {
+        description: `A site move effective today was recorded — their attendance now marks under ${siteName} (today onward; earlier days stay at the site they belonged to), and the site's printable attendance paper includes them immediately.`,
+      });
+    }
+    if (failed > 0) {
+      const firstErr = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+      toast.error(`${failed} could not be added`, {
+        description: firstErr?.reason instanceof Error ? firstErr.reason.message : 'Please try again.',
+      });
+    }
+    setAddSaving(false);
+    if (ok > 0 || failed === 0) closeAddDialog();
+  };
+
+  // ===========================================================================
   // BULK DAY ENTRY — mark a whole day for an entire crew at once.
   // Unmarked employees are prefilled with the default hours (10), every value
   // is editable before saving, and the sheet cells remain editable any time.
@@ -1144,6 +1254,22 @@ export function AttendancePage() {
                 <ArrowLeftRight size={11} />
                 {movedCount} moved
               </span>
+            )}
+            {!section.isIdle && canAssignEmployees && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 px-2.5 text-[11px]"
+                onClick={() => {
+                  setAddOpenSite({ id: section.key, name: section.title });
+                  setAddPicked(new Set());
+                  setAddQuery('');
+                }}
+                title={`Add employees to ${section.title} — pick one or several from the searchable list. They are transferred effective today; this marking sheet and the site's printable attendance paper update immediately.`}
+              >
+                <UserPlus size={12} />
+                Add Employee
+              </Button>
             )}
             <Button
               variant="outline"
@@ -2398,6 +2524,120 @@ export function AttendancePage() {
           </>
         )}
       </AnimatePresence>
+
+      {/* =========================================================================
+          ADD EMPLOYEE TO A SITE — searchable multi-select picker (per section)
+         ========================================================================= */}
+      <Dialog open={!!addOpenSite} onOpenChange={(o) => { if (!o && !addSaving) closeAddDialog(); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <span className="flex size-8 items-center justify-center rounded-lg bg-brand/10 text-brand">
+                <UserPlus size={16} />
+              </span>
+              Add employees to {addOpenSite?.name}
+            </DialogTitle>
+            <DialogDescription>
+              Search and pick one or several employees — they are transferred to this site effective
+              today (the same flow as adding an employee on the Sites page). Their attendance marks
+              under this site from today onward, and the site&apos;s printable attendance paper
+              updates immediately.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* search */}
+          <div className="relative">
+            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={addQuery}
+              onChange={(e) => setAddQuery(e.target.value)}
+              placeholder="Search by name, ID, position, nationality or trade…"
+              aria-label="Search employees to add"
+              className="h-10 pl-9 pr-9"
+              autoFocus
+            />
+            {addQuery && (
+              <button
+                type="button"
+                onClick={() => setAddQuery('')}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          {/* candidate list (multi-select) */}
+          <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border bg-card p-1.5">
+            {addCandidates.length === 0 ? (
+              <p className="py-10 text-center text-sm text-muted-foreground">
+                {addQuery ? 'No matching employees.' : 'Every active employee is already at this site.'}
+              </p>
+            ) : (
+              addCandidates.map((e) => {
+                const checked = addPicked.has(e.id);
+                return (
+                  <button
+                    key={e.id}
+                    type="button"
+                    onClick={() => toggleAddPick(e.id)}
+                    aria-pressed={checked}
+                    className={cn(
+                      'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
+                      checked ? 'bg-brand/10 ring-1 ring-brand/30' : 'hover:bg-muted/60',
+                    )}
+                  >
+                    <Checkbox checked={checked} tabIndex={-1} className="pointer-events-none" aria-hidden />
+                    <span className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-brand/15 text-[10px] font-bold text-brand">
+                      {e.photo ? <img src={e.photo} alt={e.full_name} className="size-full object-cover" /> : initials(e.full_name)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5 truncate text-sm font-medium">
+                        {e.full_name}
+                        {e.is_team_leader && <span className="text-amber-500" title="Team leader">★</span>}
+                      </span>
+                      <span className="font-mono text-[10.5px] text-muted-foreground">
+                        {e.employee_code} · {e.trade_name ?? e.position ?? 'No position'}
+                      </span>
+                    </span>
+                    {e.site_name ? (
+                      <span className="ml-2 inline-flex shrink-0 items-center gap-0.5 text-[10px] text-muted-foreground">
+                        <MapPin size={10} />
+                        {e.site_name}
+                      </span>
+                    ) : (
+                      <span className="ml-2 shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">Idle</span>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          <DialogFooter className="flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground">
+              {addPicked.size > 0
+                ? `${addPicked.size} employee${addPicked.size !== 1 ? 's' : ''} selected — a site move is recorded for each.`
+                : 'Select at least one employee.'}
+            </p>
+            <div className="flex items-center gap-2">
+              {addPicked.size > 0 && (
+                <Button variant="ghost" disabled={addSaving} onClick={() => setAddPicked(new Set())}>
+                  Clear
+                </Button>
+              )}
+              <Button
+                disabled={addPicked.size === 0 || addSaving}
+                onClick={() => void confirmAddEmployees()}
+              >
+                {addSaving ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
+                Add {addPicked.size > 0 ? addPicked.size : ''} employee{addPicked.size !== 1 ? 's' : ''}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

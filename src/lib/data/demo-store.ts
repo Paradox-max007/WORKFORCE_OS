@@ -19,6 +19,7 @@ import {
   type ExperienceTier,
   type Fine,
   type LeaveRequest,
+  type MedicineLineItem,
   type MenuKey,
   type Notification,
   type PermissionKey,
@@ -91,6 +92,10 @@ export interface DemoPayrollEmployee {
    *  scheduled for this period — folded in by syncAdvanceBookPeriod) */
   advance_book_applied: number;
   deduction: number;
+  /** how much of the deduction came from UNPAID medicine records scheduled
+   *  for this period — folded in by syncMedicinePeriod (mirrors the
+   *  payroll_employee.medicine_deduction_applied column) */
+  medicine_deduction_applied: number;
   /** automatic absent deduction (absences beyond the configured free days
    *  × the configured amount — db.deductionSettings); when EDITED on the
    *  Payroll page this holds the ACTUAL amount and the flag below is true */
@@ -192,6 +197,60 @@ export interface DemoAdvanceRecord {
   updated_at: string;
 }
 
+/** One basic medicine of the dispensary stock (mirrors the medicine table). */
+export interface DemoMedicine {
+  id: string;
+  name: string;
+  rate_per_tablet: number;
+  quantity_available: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One medicine dispense record (mirrors the medicine_record table): what an
+ *  employee took (item SNAPSHOTS), when (date + time), and whether they paid.
+ *  UNPAID records deduct from the coming salary — syncMedicinePeriod folds
+ *  the amount into that month's Deduction column (applied_amount tracks the
+ *  folded part; paid records keep cut_year/cut_month null and never touch
+ *  payroll). */
+export interface DemoMedicineRecord {
+  id: string;
+  employee_id: string;
+  /** date AND time the employee took the medicines */
+  dispensed_at: string;
+  items: MedicineLineItem[];
+  total_amount: number;
+  paid: boolean;
+  paid_at: string | null;
+  /** salary month an UNPAID record deducts from (null when paid) */
+  cut_year: number | null;
+  cut_month: number | null;
+  /** how much currently sits inside the cut month's Deduction column */
+  applied_amount: number;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** Default dispensary stock — the basic medicines every demo starts with
+ *  (also used to HEAL older localStorage databases that predate the
+ *  Medicine Registry, so existing demo users see stock immediately). */
+export const defaultMedicines = (): DemoMedicine[] => {
+  const t = nowISO();
+  const mk = (name: string, rate: number, qty: number): DemoMedicine => ({
+    id: uid(), name, rate_per_tablet: rate, quantity_available: qty,
+    is_active: true, created_at: t, updated_at: t,
+  });
+  return [
+    mk('Paracetamol 500mg', 0.5, 500),
+    mk('Ibuprofen 400mg', 0.75, 300),
+    mk('Amoxicillin 500mg', 1.25, 200),
+    mk('Cetirizine 10mg', 0.4, 400),
+    mk('ORS Sachet', 1, 150),
+    mk('Bandage Roll', 2, 80),
+  ];
+};
+
 export interface DemoDB {
   version: number;
   profiles: DemoProfile[];
@@ -226,6 +285,10 @@ export interface DemoDB {
   tradeRateAudit: DemoAuditEntry[];
   // advance ledger (Advance Book page — mirrors the advance_record table)
   advanceRecords: DemoAdvanceRecord[];
+  // medicine registry (mirrors the medicine / medicine_record tables):
+  // the dispensary stock + every dispense record
+  medicines: DemoMedicine[];
+  medicineRecords: DemoMedicineRecord[];
   // manpower companies (own table — the Add Employee company dropdown)
   companies: Company[];
   // payroll card types (own table — Lulu Card, C3 Card, …)
@@ -351,6 +414,8 @@ function seedDB(): DemoDB {
     payrollAudit: [],
     tradeRateAudit: [],
     advanceRecords: [],
+    medicines: defaultMedicines(),
+    medicineRecords: [],
     companies: [],
     cardTypes: [],
     employeeNotes: [],
@@ -981,6 +1046,10 @@ function loadDB(): DemoDB {
         parsed.advanceRecords?.forEach((r) => {
           if (r.source_period_id === undefined) r.source_period_id = null;
         });
+        // medicine registry shipped without a version bump — heal the stock
+        // to the default basic-medicines list and the records to []
+        if (!parsed.medicines) parsed.medicines = defaultMedicines();
+        if (!parsed.medicineRecords) parsed.medicineRecords = [];
         // branch-owned trades shipped without a version bump — trades saved
         // before branches owned trades become the org-wide (shared) book
         parsed.trades?.forEach((t) => {

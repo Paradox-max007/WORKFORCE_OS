@@ -30,6 +30,10 @@ import {
   type FineVM,
   type LeaveRequestInput,
   type LeaveRequestVM,
+  type Medicine,
+  type MedicineDispenseInput,
+  type MedicineInput,
+  type MedicineRecordVM,
   type MenuPermissionMap,
   type AdminAccess,
   type MonthlySummaryRow,
@@ -1163,6 +1167,64 @@ export const prodApi = {
   async deleteUniformEntry(id: string): Promise<void> {
     const { error } = await sb().rpc('delete_uniform_entry', { p_id: id });
     assertOk(error);
+  },
+
+  // ---- medicine registry (20261126 RPCs) --------------------------------------
+
+  async listMedicines(): Promise<Medicine[]> {
+    const { data, error } = await sb().from('medicine')
+      .select('*')
+      .order('name', { ascending: true });
+    assertOk(error);
+    return (data ?? []) as unknown as Medicine[];
+  },
+
+  async saveMedicine(input: MedicineInput): Promise<Medicine> {
+    const { data, error } = await sb().rpc('save_medicine', {
+      p_payload: {
+        id: input.id ?? null,
+        name: input.name,
+        rate_per_tablet: input.rate_per_tablet,
+        quantity_available: input.quantity_available,
+        is_active: input.is_active ?? null,
+      },
+    });
+    assertOk(error);
+    return data as unknown as Medicine;
+  },
+
+  async deleteMedicine(id: string): Promise<void> {
+    const { error } = await sb().rpc('delete_medicine', { p_id: id });
+    assertOk(error);
+  },
+
+  async dispenseMedicine(input: MedicineDispenseInput): Promise<MedicineRecordVM> {
+    const { data, error } = await sb().rpc('dispense_medicine', {
+      p_payload: {
+        employee_id: input.employee_id,
+        items: input.items,
+        paid: input.paid,
+        dispensed_at: input.dispensed_at ?? null,
+      },
+    });
+    assertOk(error);
+    return data as unknown as MedicineRecordVM;
+  },
+
+  async markMedicineRecordPaid(id: string): Promise<void> {
+    const { error } = await sb().rpc('set_medicine_record_paid', { p_id: id });
+    assertOk(error);
+  },
+
+  async deleteMedicineRecord(id: string): Promise<void> {
+    const { error } = await sb().rpc('delete_medicine_record', { p_id: id });
+    assertOk(error);
+  },
+
+  async listMedicineRecords(): Promise<MedicineRecordVM[]> {
+    const { data, error } = await sb().rpc('list_medicine_records');
+    assertOk(error);
+    return (data ?? []) as unknown as MedicineRecordVM[];
   },
 
   // ---- trades & salary --------------------------------------------------------

@@ -112,7 +112,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   BadgeCheck, Banknote, BookOpenText, CalendarDays, Check, ChevronDown, ChevronUp, Clock, CreditCard, Eye,
   FileSpreadsheet, GitBranch, History, ListFilter, Loader2, Lock,
-  LockOpen, Pencil, PencilLine, Plus, RotateCcw, Scale, Search, StickyNote, Trash2,
+  LockOpen, Pencil, PencilLine, Pill, Plus, RotateCcw, Scale, Search, StickyNote, Trash2,
   TriangleAlert, UserX, Users, Wallet, X,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
@@ -141,6 +141,7 @@ import {
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { FinalizeDialog, ReopenDialog } from '@/components/salary-sheet/period-dialogs';
+import { MedicineRecordDialog } from '@/components/medicine/medicine-record-dialog';
 import { dataApi } from '@/lib/data';
 import {
   payrollBalanceOf, payrollEffectiveRateOf, payrollExportFileName,
@@ -154,7 +155,7 @@ import { cn } from '@/lib/utils';
 import {
   type CardType, DEFAULT_DEDUCTION_SETTINGS, type DeductionSettings,
   type AdvanceBookDueRecord,
-  type EmployeeNote, type PayrollEmployeeVM,
+  type EmployeeNote, type MedicineRecordVM, type PayrollEmployeeVM,
   type SalarySheetReport, type SiteWithCount, type Trade,
   type BranchWithCount,
 } from '@/lib/types';
@@ -1047,7 +1048,7 @@ function PaymentMethodCell({ e }: { e: PayrollEmployeeVM }) {
 // Page
 // ---------------------------------------------------------------------------
 export function PayrollPage() {
-  const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'payroll_time_card', 'attendance', 'employee', 'trade_rate_history']);
+  const realtimeVersion = useRealtimeVersion(['payroll_period', 'payroll_employee', 'payroll_time_card', 'attendance', 'employee', 'trade_rate_history', 'medicine_record']);
   // branch/site scoping data — powers the BRANCH dropdown in the top row
   // (branch grants change → the dropdown and the scoped rows follow)
   const branchVersion = useRealtimeVersion(['site', 'branch', 'admin_branch', 'admin_site', 'profiles']);
@@ -1067,6 +1068,11 @@ export function PayrollPage() {
   const [report, setReport] = useState<SalarySheetReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+
+  // medicine records — the UNPAID ones scheduled for the viewed month are the
+  // MED-tag part of the Deduction column (clicking the tag opens the record)
+  const [medicineRecords, setMedicineRecords] = useState<MedicineRecordVM[] | null>(null);
+  const [medDialogRecords, setMedDialogRecords] = useState<MedicineRecordVM[] | null>(null);
 
   // effective absent-deduction rule (Trade Management → Deductions) — used
   // for the column tooltips / help texts; the amounts themselves come from
@@ -1180,6 +1186,31 @@ export function PayrollPage() {
   };
 
   useEffect(load, [year, month, realtimeVersion]);
+
+  // medicine records (never blocking the sheet — the MED tag simply pops in)
+  useEffect(() => {
+    let cancelled = false;
+    dataApi.listMedicineRecords()
+      .then((rows) => { if (!cancelled) setMedicineRecords(rows); })
+      .catch(() => { if (!cancelled) setMedicineRecords(null); });
+    return () => { cancelled = true; };
+  }, [realtimeVersion]);
+
+  // the employee's UNPAID medicine records scheduled for the viewed month —
+  // the medicine part of the Deduction column (folded in by the sync; the
+  // stored deduction carries it, the MED tag makes it visible + clickable)
+  const medRecordsOf = useMemo(() => {
+    const byEmp = new Map<string, MedicineRecordVM[]>();
+    (medicineRecords ?? []).forEach((r) => {
+      if (r.paid || r.cut_year !== year || r.cut_month !== month) return;
+      const list = byEmp.get(r.employee_id) ?? [];
+      list.push(r);
+      byEmp.set(r.employee_id, list);
+    });
+    return (e: PayrollEmployeeVM): MedicineRecordVM[] => byEmp.get(e.employee_id) ?? [];
+  }, [medicineRecords, year, month]);
+  const medAmountOf = (e: PayrollEmployeeVM): number =>
+    Math.round(medRecordsOf(e).reduce((n, r) => n + r.total_amount, 0) * 100) / 100;
 
   // deduction rule texts — refreshed with the same realtime bump a settings
   // save triggers (payroll_period / payroll_employee)
@@ -2032,7 +2063,7 @@ export function PayrollPage() {
                     <TableHead className={cw('w-[6.5%]', 'w-[7%]')} title="Payment method — cash, or the card type">Payment</TableHead>
                     <TableHead className={cn('text-right', cw('w-[7.5%]', 'w-[9%]'))}>Amount</TableHead>
                     <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[7%]'))}>Advance</TableHead>
-                    <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[7%]'))} title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) — the absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
+                    <TableHead className={cn('text-right', cw('w-[6.5%]', 'w-[7%]'))} title={`Manual deduction + absent deduction (${dedSettings.absent_deduction_amount} per absence beyond the first ${dedSettings.absent_free_days}) + unpaid medicine (MED tag — from the Medicine Registry; click the tag to open the medicine record). The absent part is editable in Edit mode and the edited value has priority — click a value to open the attendance calendar`}>Deduction</TableHead>
                     <TableHead className={cn('text-right', cw('w-[9.5%]', 'w-[10%]'))}>Net Payable</TableHead>
                     <TableHead className={cn('text-right', cw('w-[8%]', 'w-[8.5%]'))}>Paid</TableHead>
                   </TableRow>
@@ -2278,23 +2309,44 @@ export function PayrollPage() {
                                   )}
                                 </div>
                               )}
+                              {/* MEDICINE deduction — read-only: unpaid medicine
+                                  records are folded into the stored Deduction
+                                  by the Medicine Registry; the tag opens the
+                                  record (date, time, items, amounts) */}
+                              {medAmountOf(e) > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setMedDialogRecords(medRecordsOf(e))}
+                                  title={`Medicine — ${fmtMoney(medAmountOf(e))} of unpaid medicine records folded into this month's Deduction. Managed from the Medicine Registry — click to open the record.`}
+                                  className="inline-flex items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-muted/70"
+                                >
+                                  <span className="inline-flex items-center gap-0.5 rounded bg-sky-500/15 px-1 py-0.5 text-[9px] font-bold text-sky-600 dark:text-sky-400">
+                                    <Pill size={9} /> MED
+                                  </span>
+                                  <span className="font-mono text-[11px] tabular-nums">{fmtMoney(medAmountOf(e))}</span>
+                                </button>
+                              )}
                             </div>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => navigateToAttendanceCalendar(e, year, month)}
-                              title={`Open ${e.full_name}'s attendance calendar for ${MONTH_NAMES[month - 1]} ${year}${
-                                (e.deduction + (e.absent_deduction ?? 0)) > 0
-                                  ? ` — manual ${fmtMoney(e.deduction)}${(e.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(e.absent_deduction)}` : ''}`
-                                  : ' (no deduction this month)'}`}
+                            <div
                               className={cn(
-                                'group inline-flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 font-mono text-xs transition-colors hover:bg-muted/70',
+                                'group inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 font-mono text-xs',
                                 (e.deduction + (e.absent_deduction ?? 0)) > 0 ? '' : 'text-muted-foreground',
                               )}
                             >
-                              {(e.deduction + (e.absent_deduction ?? 0)) > 0
-                                ? fmtMoney(e.deduction + (e.absent_deduction ?? 0))
-                                : '—'}
+                              <button
+                                type="button"
+                                onClick={() => navigateToAttendanceCalendar(e, year, month)}
+                                title={`Open ${e.full_name}'s attendance calendar for ${MONTH_NAMES[month - 1]} ${year}${
+                                  (e.deduction + (e.absent_deduction ?? 0)) > 0
+                                    ? ` — manual ${fmtMoney(e.deduction)}${(e.absent_deduction ?? 0) > 0 ? ` + absent ${fmtMoney(e.absent_deduction)}` : ''}${medAmountOf(e) > 0 ? ` + medicine ${fmtMoney(medAmountOf(e))}` : ''}`
+                                    : ' (no deduction this month)'}`}
+                                className="cursor-pointer rounded-md px-0.5 transition-colors hover:bg-muted/70"
+                              >
+                                {(e.deduction + (e.absent_deduction ?? 0)) > 0
+                                  ? fmtMoney(e.deduction + (e.absent_deduction ?? 0))
+                                  : '—'}
+                              </button>
                               {(e.absent_deduction ?? 0) > 0 && (
                                 <span
                                   className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-bold text-red-500"
@@ -2313,8 +2365,25 @@ export function PayrollPage() {
                                   <Pencil size={9} />
                                 </span>
                               )}
-                              <CalendarDays size={11} className="text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
-                            </button>
+                              {/* MED tag — the medicine part of the deduction.
+                                  Clicking it opens the medicine record. */}
+                              {medAmountOf(e) > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setMedDialogRecords(medRecordsOf(e))}
+                                  title={`Medicine — ${fmtMoney(medAmountOf(e))} unpaid medicine record(s) folded into this month's Deduction (MED). Click to open the medicine record — date, time, items and amounts.`}
+                                  className="inline-flex cursor-pointer items-center gap-0.5 rounded bg-sky-500/15 px-1 py-0.5 text-[9px] font-bold text-sky-600 transition-colors hover:bg-sky-500/25 dark:text-sky-400"
+                                >
+                                  <Pill size={9} /> MED
+                                </button>
+                              )}
+                              <CalendarDays
+                                size={11}
+                                aria-hidden
+                                className="cursor-pointer text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100"
+                                onClick={() => navigateToAttendanceCalendar(e, year, month)}
+                              />
+                            </div>
                           )}
                         </TableCell>
                         {/* NET PAYABLE — attendance net + the POSITIVE time
@@ -2458,7 +2527,7 @@ export function PayrollPage() {
             </Table>
             <p className="flex items-center gap-1.5 border-t px-4 py-2.5 text-[11px] text-muted-foreground">
               <UserX size={12} className="shrink-0" />
-              Hover (or tap) an Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Employees without a site are listed under Idle Employees in the Salary Sheet.
+              Hover (or tap) an Hours value for the complete calculation. Click a Deduction value to open the employee&apos;s attendance calendar (absent deduction: {dedSettings.absent_deduction_amount} per absence beyond the first {dedSettings.absent_free_days} — configurable in Trade/Ded Management, and editable per employee in Edit mode; an edited amount has priority and flows into the Salary Sheet and the attendance record). Unpaid medicines from the Medicine Registry fold into the Deduction with a <span className="font-semibold text-sky-600 dark:text-sky-400">MED</span> tag — clicking it opens the medicine record (date, time and amounts). Employees without a site are listed under Idle Employees in the Salary Sheet.
             </p>
           </section>
 
@@ -2517,6 +2586,15 @@ export function PayrollPage() {
           lives on the SALARY SHEET page (per site section). */}
       <FinalizeDialog report={report} open={finalizeOpen} onOpenChange={setFinalizeOpen} onDone={load} />
       <ReopenDialog report={report} open={reopenOpen} onOpenChange={setReopenOpen} onDone={load} />
+
+      {/* medicine record(s) behind a MED tag — view only (the Medicine
+          Registry manages marking paid / deleting) */}
+      {medDialogRecords && medDialogRecords.length > 0 && (
+        <MedicineRecordDialog
+          records={medDialogRecords}
+          onClose={() => setMedDialogRecords(null)}
+        />
+      )}
     </div>
   );
 }

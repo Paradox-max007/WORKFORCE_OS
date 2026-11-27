@@ -443,6 +443,7 @@ const attachMedicineVM = (r: (typeof db.medicineRecords)[number]): MedicineRecor
     employee_name: e?.full_name ?? 'Unknown',
     employee_code: e?.employee_code ?? '—',
     photo: e?.photo ?? null,
+    site_name: (e?.current_site_id ? db.sites.find((s) => s.id === e.current_site_id)?.name : null) ?? null,
     dispensed_at: r.dispensed_at,
     items: r.items,
     total_amount: r.total_amount,

@@ -388,6 +388,8 @@ export interface MedicineRecordVM {
   employee_name: string;
   employee_code: string;
   photo: string | null;
+  /** the employee's site (their current site — null when idle) */
+  site_name: string | null;
   /** date AND time the employee took the medicines */
   dispensed_at: string;
   items: MedicineLineItem[];

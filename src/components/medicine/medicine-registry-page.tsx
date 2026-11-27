@@ -23,7 +23,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Banknote, CircleCheck, Eye, History, Loader2, PackagePlus, Pencil, Pill,
+  Banknote, CircleCheck, Eye, History, Loader2, MapPin, PackagePlus, Pencil, Pill,
   Plus, RefreshCw, Search, Trash2, X, Zap,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -161,7 +161,7 @@ export function MedicineRegistryPage() {
       if (recStatusFilter === 'unpaid' && (r.paid || r.cleared)) return false;
       if (recStatusFilter === 'paid' && !r.paid) return false;
       if (!q) return true;
-      return `${r.employee_name} ${r.employee_code} ${medicineItemsText(r.items)}`.toLowerCase().includes(q);
+      return `${r.employee_name} ${r.employee_code} ${r.site_name ?? ''} ${medicineItemsText(r.items)}`.toLowerCase().includes(q);
     });
   }, [records, recSearch, recStatusFilter]);
 
@@ -510,6 +510,7 @@ export function MedicineRegistryPage() {
                   <TableRow>
                     <TableHead className="px-4 py-3 text-xs uppercase tracking-wide text-muted-foreground">Taken on</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Employee</TableHead>
+                    <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Site</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Medicines</TableHead>
                     <TableHead className="px-3 py-3 text-right text-xs uppercase tracking-wide text-muted-foreground">Total</TableHead>
                     <TableHead className="px-3 py-3 text-xs uppercase tracking-wide text-muted-foreground">Payment</TableHead>
@@ -532,6 +533,16 @@ export function MedicineRegistryPage() {
                             <p className="font-mono text-[10px] text-muted-foreground">{r.employee_code}</p>
                           </div>
                         </div>
+                      </TableCell>
+                      <TableCell className="max-w-44 px-3 py-3">
+                        {r.site_name ? (
+                          <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 text-[11px] font-medium text-foreground" title={`Employee's site — ${r.site_name}`}>
+                            <MapPin size={11} className="shrink-0 text-brand" />
+                            <span className="truncate">{r.site_name}</span>
+                          </span>
+                        ) : (
+                          <span className="text-[11px] italic text-muted-foreground">No site (idle)</span>
+                        )}
                       </TableCell>
                       <TableCell className="max-w-64 px-3 py-3 text-xs text-muted-foreground">
                         <p className="truncate">{medicineItemsText(r.items)}</p>

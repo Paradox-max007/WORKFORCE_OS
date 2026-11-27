@@ -16,7 +16,7 @@
 // Payroll / Salary Sheet pages (the clickable MED tag — view only).
 
 import {
-  BadgeCheck, Banknote, CircleCheck, Clock, Loader2, Pill, Trash2, User,
+  BadgeCheck, Banknote, CircleCheck, Clock, Loader2, MapPin, Pill, Trash2, User,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -118,7 +118,15 @@ export function MedicineRecordDialog({
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold">{r.employee_name}</p>
-                  <p className="font-mono text-[11px] text-muted-foreground">{r.employee_code}</p>
+                  <p className="flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
+                    <span>{r.employee_code}</span>
+                    {r.site_name && (
+                      <span className="flex min-w-0 items-center gap-0.5 font-sans" title={`Employee's site — ${r.site_name}`}>
+                        <MapPin size={10} className="shrink-0 text-brand" />
+                        <span className="truncate font-medium text-foreground/80">{r.site_name}</span>
+                      </span>
+                    )}
+                  </p>
                 </div>
               </div>
               <MedicineStatusChip record={r} />

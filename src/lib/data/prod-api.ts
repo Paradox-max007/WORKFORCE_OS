@@ -115,6 +115,24 @@ let activeRealtimeChannel: RealtimeChannel | null = null;
 const realtimeListeners = new Set<(tables: RealtimeTable[] | string[]) => void>();
 let teardownTimeout: ReturnType<typeof setTimeout> | null = null;
 
+/** Local "your own write" notification — fires the realtime listeners for the
+ *  given tables WITHOUT waiting for the Supabase postgres_changes round-trip.
+ *  This is the exact contract the demo engine's saveAndEmit gives every
+ *  mutation (own writes included): views depending on useRealtimeVersion
+ *  refetch immediately, so the user NEVER has to reload after acting — even
+ *  when the project's realtime delivery is delayed or the channel flaps.
+ *  Duplicate bumps (real event arriving afterwards) are harmless: the version
+ *  counter is debounced and refetches are idempotent. */
+function notifyLocal(tables: string[]): void {
+  realtimeListeners.forEach((listener) => {
+    try {
+      listener(tables);
+    } catch (err) {
+      console.error('Realtime listener error:', err);
+    }
+  });
+}
+
 function ensureRealtimeChannel(): void {
   if (teardownTimeout) {
     clearTimeout(teardownTimeout);
@@ -153,6 +171,8 @@ function ensureRealtimeChannel(): void {
     'advance_record',
     'site_settings',
     'termination_letter',
+    'medicine',
+    'medicine_record',
   ];
 
   // Clean up any stale channel on the same topic before subscribing
@@ -813,6 +833,10 @@ export const prodApi = {
       p_id: id, p_employee: input, p_effective_date: localTodayYMD(),
     });
     assertOk(error);
+    // own-write refresh — the attendance page's Add Employee flow (and the
+    // Sites page picker) must show the moved crew immediately, without
+    // waiting for the postgres_changes event
+    notifyLocal(['employee', 'site_transfer', 'employee_salary_assignment']);
     const updated = data as unknown as Record<string, unknown>;
     return {
       ...(updated as unknown as EmployeeVM),
@@ -1190,12 +1214,14 @@ export const prodApi = {
       },
     });
     assertOk(error);
+    notifyLocal(['medicine']);
     return data as unknown as Medicine;
   },
 
   async deleteMedicine(id: string): Promise<void> {
     const { error } = await sb().rpc('delete_medicine', { p_id: id });
     assertOk(error);
+    notifyLocal(['medicine']);
   },
 
   async dispenseMedicine(input: MedicineDispenseInput): Promise<MedicineRecordVM> {
@@ -1208,17 +1234,22 @@ export const prodApi = {
       },
     });
     assertOk(error);
+    // own-write refresh — the stock list, records list AND the payroll pages
+    // (MED tag deduction) all update immediately
+    notifyLocal(['medicine', 'medicine_record', 'payroll_period', 'payroll_employee']);
     return data as unknown as MedicineRecordVM;
   },
 
   async markMedicineRecordPaid(id: string): Promise<void> {
     const { error } = await sb().rpc('set_medicine_record_paid', { p_id: id });
     assertOk(error);
+    notifyLocal(['medicine_record', 'payroll_period', 'payroll_employee']);
   },
 
   async deleteMedicineRecord(id: string): Promise<void> {
     const { error } = await sb().rpc('delete_medicine_record', { p_id: id });
     assertOk(error);
+    notifyLocal(['medicine', 'medicine_record', 'payroll_period', 'payroll_employee']);
   },
 
   async listMedicineRecords(): Promise<MedicineRecordVM[]> {

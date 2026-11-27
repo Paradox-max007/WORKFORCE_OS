@@ -1930,6 +1930,18 @@ exception
   when duplicate_object then null; -- already in publication
 end $$;
 
+-- REPLICA IDENTITY FULL — with RLS enabled and the DEFAULT replica identity,
+-- Supabase Realtime cannot evaluate the old row's visibility and DROPS
+-- UPDATE/DELETE postgres_changes events. These tables are UPDATED by core
+-- flows that open pages watch live (update_employee moves an employee in the
+-- attendance Add Employee flow, medicine stock decrements on dispense,
+-- medicine_record mark-paid / delete, payroll_employee deduction folds), so
+-- they must stream their UPDATEs too. (20261127)
+alter table public.employee         replica identity full;
+alter table public.medicine         replica identity full;
+alter table public.medicine_record  replica identity full;
+alter table public.payroll_employee replica identity full;
+
 -- ============================================================================
 -- 15. FUNCTION GRANTS (final pass)
 -- ============================================================================
@@ -12175,6 +12187,7 @@ begin
     'employee_name', v_emp.full_name,
     'employee_code', v_emp.employee_code,
     'photo', v_emp.photo,
+    'site_name', (select name from public.site where id = v_emp.current_site_id),
     'dispensed_at', v_rec.dispensed_at,
     'items', v_rec.items,
     'total_amount', v_rec.total_amount,
@@ -12283,6 +12296,7 @@ as $$
         'id', r.id, 'employee_id', r.employee_id,
         'employee_name', e.full_name, 'employee_code', e.employee_code,
         'photo', e.photo,
+        'site_name', s.name,
         'dispensed_at', r.dispensed_at,
         'items', r.items,
         'total_amount', r.total_amount,
@@ -12298,6 +12312,7 @@ as $$
       r.dispensed_at as dispensed_at
     from public.medicine_record r
     join public.employee e on e.id = r.employee_id
+    left join public.site s on s.id = e.current_site_id
     left join public.payroll_period p on p.year = r.cut_year and p.month = r.cut_month
     left join public.payroll_employee pe
       on pe.payroll_period_id = p.id and pe.employee_id = r.employee_id
@@ -12305,8 +12320,8 @@ as $$
       e.current_site_id is not null and (
         e.current_site_id in (select site_id from public.admin_site where profile_id = auth.uid())
         or e.current_site_id in (
-          select s.id from public.site s
-          where s.branch_id in (select branch_id from public.admin_branch where profile_id = auth.uid()))
+          select s2.id from public.site s2
+          where s2.branch_id in (select branch_id from public.admin_branch where profile_id = auth.uid()))
       ))
   ) rows;
 $$;
